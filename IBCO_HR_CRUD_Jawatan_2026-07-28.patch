@@ -1,0 +1,3709 @@
+diff --git a/README.md b/README.md
+index 9ec5adc59ad78e09caadabc3d48dd49ad8a84533..6b0c2b1b867ffea0b18d88727d07b4416def0946 100644
+--- a/README.md
++++ b/README.md
+@@ -20,8 +20,8 @@ ## Modul index
+ - Laporan bulanan
+ - Roles & Permissions
+ 
+-Semua modul index menggunakan carian, pagination dan hanya memaparkan rekod
+-aktif (`rcd_enable = 1`).
++Semua modul index menggunakan carian dan pagination. Modul Jawatan turut
++menyediakan tab rekod aktif dan sejarah.
+ 
+ ## CRUD pekerja
+ 
+@@ -42,11 +42,22 @@ ## CRUD pekerja
+ `audit_logs` pada database sistem, termasuk pengguna, masa, nilai yang berubah,
+ alamat IP dan user agent.
+ 
++## CRUD jawatan dan penempatan
++
++Super Admin dan HR Admin boleh menambah penempatan, menukar jawatan serta
++menamatkan jawatan aktif. Setiap pertukaran mewujudkan rekod baharu dan menukar
++rekod terdahulu kepada `rcd_enable = 0`, supaya sejarah tidak ditimpa. Sistem
++turut memastikan hanya satu jawatan aktif bagi seseorang pekerja.
++
++Viewer / Manager boleh melihat jawatan aktif dan sejarah, tetapi tidak menerima
++medan gaji, bank atau caruman daripada backend. Profil pekerja memaparkan
++jawatan semasa dan keseluruhan sejarah penempatan.
++
+ ## Audit Trail
+ 
+ Super Admin dan HR Admin boleh:
+ 
+-- melihat tindakan tambah, kemas kini, nyahaktif dan aktif semula pekerja;
++- melihat tindakan pekerja serta tambah, tukar dan tamat jawatan;
+ - melihat pengguna, tarikh, masa, alamat IP serta nilai sebelum dan selepas;
+ - mencari dan menapis audit mengikut pengguna, tindakan dan julat tarikh;
+ - melihat senarai pekerja yang mempunyai `rcd_enable = 0`; dan
+@@ -107,4 +118,4 @@ ## Sambungan database
+ `php artisan migrate` untuk menyediakan role dan audit log pada database
+ sistem. Gunakan akaun database dengan akses minimum yang diperlukan.
+ Connection `ibco` memerlukan akses `SELECT`, `INSERT` dan `UPDATE` untuk CRUD
+-pekerja; operasi `DELETE` tidak digunakan.
++pekerja serta jawatan; operasi `DELETE` tidak digunakan.
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index d4941eaac532d964ab04ecde91e7b1dc6174ed81..afb6be380f5cefde80c862441dbce957edc54df4 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -19,6 +19,7 @@ public function permissions(): array
+                 'employees.view',
+                 'employees.manage',
+                 'positions.view',
++                'positions.manage',
+                 'attendance.view',
+                 'leave.view',
+                 'overtime.view',
+@@ -32,6 +33,7 @@ public function permissions(): array
+                 'employees.view',
+                 'employees.manage',
+                 'positions.view',
++                'positions.manage',
+                 'attendance.view',
+                 'leave.view',
+                 'overtime.view',
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 8e8d912faacbdc9ae1d15d19f80c6b716c8c9eed..4e2db9fcf14ca37aa249b0150673d112f7827239 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -22,6 +22,14 @@ class AuditTrailController extends Controller
+         'employee.updated' => 'Maklumat Dikemas Kini',
+         'employee.deactivated' => 'Pekerja Dinyahaktifkan',
+         'employee.reactivated' => 'Pekerja Diaktifkan Semula',
++        'position.created' => 'Penempatan Ditambah',
++        'position.changed' => 'Jawatan Ditukar',
++        'position.terminated' => 'Jawatan Ditamatkan',
++    ];
++
++    private const AUDITABLE_TYPES = [
++        'maklumatpekerja',
++        'maklumatjawatan',
+     ];
+ 
+     public function index(Request $request): Response
+@@ -53,12 +61,24 @@ public function index(Request $request): Response
+         $inactiveSearch = trim($validated['inactive_search'] ?? '');
+ 
+         $matchingEmployeeIds = $this->matchingEmployeeIds($search);
++        $matchingPositionIds = $this->matchingPositionIds(
++            $search,
++            $matchingEmployeeIds,
++        );
+ 
+         $audits = AuditLog::query()
+             ->with('user:id,name,email')
+-            ->where('auditable_type', 'maklumatpekerja')
+-            ->when($search !== '', function (Builder $query) use ($search, $matchingEmployeeIds) {
+-                $query->where(function (Builder $query) use ($search, $matchingEmployeeIds) {
++            ->whereIn('auditable_type', self::AUDITABLE_TYPES)
++            ->when($search !== '', function (Builder $query) use (
++                $search,
++                $matchingEmployeeIds,
++                $matchingPositionIds,
++            ) {
++                $query->where(function (Builder $query) use (
++                    $search,
++                    $matchingEmployeeIds,
++                    $matchingPositionIds,
++                ) {
+                     $query->where('auditable_id', 'like', "%{$search}%")
+                         ->orWhere('ip_address', 'like', "%{$search}%")
+                         ->orWhereHas('user', function (Builder $query) use ($search) {
+@@ -67,7 +87,17 @@ public function index(Request $request): Response
+                         });
+ 
+                     if ($matchingEmployeeIds !== []) {
+-                        $query->orWhereIn('auditable_id', $matchingEmployeeIds);
++                        $query->orWhere(function (Builder $query) use ($matchingEmployeeIds) {
++                            $query->where('auditable_type', 'maklumatpekerja')
++                                ->whereIn('auditable_id', $matchingEmployeeIds);
++                        });
++                    }
++
++                    if ($matchingPositionIds !== []) {
++                        $query->orWhere(function (Builder $query) use ($matchingPositionIds) {
++                            $query->where('auditable_type', 'maklumatjawatan')
++                                ->whereIn('auditable_id', $matchingPositionIds);
++                        });
+                     }
+                 });
+             })
+@@ -79,23 +109,19 @@ public function index(Request $request): Response
+             ->paginate(15, ['*'], 'audit_page')
+             ->withQueryString();
+ 
+-        $employeeMap = $this->employeeMap(
+-            collect($audits->items())
+-                ->pluck('auditable_id')
+-                ->filter(fn ($id) => is_numeric($id))
+-                ->unique()
+-                ->values()
+-                ->all(),
+-        );
++        $auditEmployees = $this->auditEmployeeMap(collect($audits->items()));
+         $referenceLookups = $this->referenceLookups();
+ 
+-        $audits->through(function (AuditLog $audit) use ($employeeMap, $referenceLookups) {
+-            $employee = $employeeMap[(string) $audit->auditable_id] ?? null;
++        $audits->through(function (AuditLog $audit) use ($auditEmployees, $referenceLookups) {
++            $employee = $auditEmployees[
++                "{$audit->auditable_type}:{$audit->auditable_id}"
++            ] ?? null;
+ 
+             return [
+                 'id' => $audit->getKey(),
+                 'action' => $audit->action,
+                 'action_label' => self::ACTIONS[$audit->action] ?? $audit->action,
++                'auditable_type' => $audit->auditable_type,
+                 'auditable_id' => (string) $audit->auditable_id,
+                 'employee' => $employee,
+                 'user' => $audit->user
+@@ -141,14 +167,14 @@ public function index(Request $request): Response
+             ->withQueryString();
+ 
+         $actionCounts = AuditLog::query()
+-            ->where('auditable_type', 'maklumatpekerja')
++            ->whereIn('auditable_type', self::AUDITABLE_TYPES)
+             ->whereIn('action', array_keys(self::ACTIONS))
+             ->selectRaw('action, COUNT(*) as aggregate')
+             ->groupBy('action')
+             ->pluck('aggregate', 'action');
+ 
+         $actorIds = AuditLog::query()
+-            ->where('auditable_type', 'maklumatpekerja')
++            ->whereIn('auditable_type', self::AUDITABLE_TYPES)
+             ->whereNotNull('user_id')
+             ->distinct()
+             ->pluck('user_id');
+@@ -184,9 +210,18 @@ public function index(Request $request): Response
+             'userOptions' => $userOptions,
+             'statistics' => [
+                 'total' => (int) $actionCounts->sum(),
+-                'created' => (int) ($actionCounts['employee.created'] ?? 0),
+-                'updated' => (int) ($actionCounts['employee.updated'] ?? 0),
+-                'deactivated' => (int) ($actionCounts['employee.deactivated'] ?? 0),
++                'created' => (int) (
++                    ($actionCounts['employee.created'] ?? 0)
++                    + ($actionCounts['position.created'] ?? 0)
++                ),
++                'updated' => (int) (
++                    ($actionCounts['employee.updated'] ?? 0)
++                    + ($actionCounts['position.changed'] ?? 0)
++                ),
++                'deactivated' => (int) (
++                    ($actionCounts['employee.deactivated'] ?? 0)
++                    + ($actionCounts['position.terminated'] ?? 0)
++                ),
+                 'reactivated' => (int) ($actionCounts['employee.reactivated'] ?? 0),
+                 'inactive' => DB::connection('ibco')
+                     ->table('maklumatpekerja')
+@@ -250,6 +285,85 @@ private function matchingEmployeeIds(string $search): array
+             ->all();
+     }
+ 
++    /**
++     * @param  array<int, string>  $employeeIds
++     * @return array<int, string>
++     */
++    private function matchingPositionIds(string $search, array $employeeIds): array
++    {
++        if ($search === '') {
++            return [];
++        }
++
++        return DB::connection('ibco')
++            ->table('maklumatjawatan as j')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->where(function ($query) use ($search, $employeeIds) {
++                $query->where('j.jawatan', 'like', "%{$search}%")
++                    ->orWhere('d.description', 'like', "%{$search}%");
++
++                if ($employeeIds !== []) {
++                    $query->orWhereIn('j.id_pekerja', $employeeIds);
++                }
++            })
++            ->pluck('j.id')
++            ->map(fn ($id) => (string) $id)
++            ->all();
++    }
++
++    /**
++     * @return array<string, array{id: int, employee_id: string|null, nama: string|null}>
++     */
++    private function auditEmployeeMap($audits): array
++    {
++        $employeeAuditIds = $audits
++            ->where('auditable_type', 'maklumatpekerja')
++            ->pluck('auditable_id')
++            ->filter(fn ($id) => is_numeric($id))
++            ->map(fn ($id) => (string) $id)
++            ->values();
++
++        $positionIds = $audits
++            ->where('auditable_type', 'maklumatjawatan')
++            ->pluck('auditable_id')
++            ->filter(fn ($id) => is_numeric($id))
++            ->map(fn ($id) => (string) $id)
++            ->values();
++
++        $positionEmployeeIds = $positionIds->isEmpty()
++            ? collect()
++            : DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->whereIn('id', $positionIds)
++                ->pluck('id_pekerja', 'id')
++                ->mapWithKeys(fn ($employeeId, $positionId) => [
++                    (string) $positionId => (string) $employeeId,
++                ]);
++
++        $employeeMap = $this->employeeMap(
++            $employeeAuditIds
++                ->merge($positionEmployeeIds->values())
++                ->unique()
++                ->values()
++                ->all(),
++        );
++
++        return $audits
++            ->mapWithKeys(function (AuditLog $audit) use ($employeeMap, $positionEmployeeIds) {
++                $employeeId = $audit->auditable_type === 'maklumatjawatan'
++                    ? $positionEmployeeIds[(string) $audit->auditable_id] ?? null
++                    : (string) $audit->auditable_id;
++
++                return [
++                    "{$audit->auditable_type}:{$audit->auditable_id}" =>
++                        $employeeId !== null
++                            ? ($employeeMap[(string) $employeeId] ?? null)
++                            : null,
++                ];
++            })
++            ->all();
++    }
++
+     /**
+      * @param  array<int, int|string>  $employeeIds
+      * @return array<string, array{id: int, employee_id: string|null, nama: string|null}>
+@@ -285,9 +399,11 @@ private function referenceLookups(): array
+             'bangsa' => 'xbangsa',
+             'statusperkahwinan' => 'xstatusperkahwinan',
+             'status' => 'xstatus',
++            'id_department' => 'xdepartment',
++            'id_bank' => 'xbank',
+         ];
+ 
+-        return collect($tables)
++        $lookups = collect($tables)
+             ->mapWithKeys(fn (string $table, string $field) => [
+                 $field => DB::connection('ibco')
+                     ->table($table)
+@@ -298,6 +414,19 @@ private function referenceLookups(): array
+                     ->all(),
+             ])
+             ->all();
++
++        $lookups['id_pekerja'] = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->get(['id', 'employeeID', 'nama'])
++            ->mapWithKeys(fn ($employee) => [
++                (string) $employee->id => trim(
++                    ($employee->employeeID ? "{$employee->employeeID} — " : '')
++                    . ($employee->nama ?? "Pekerja #{$employee->id}"),
++                ),
++            ])
++            ->all();
++
++        return $lookups;
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatJawatanController.php b/app/Http/Controllers/MaklumatJawatanController.php
+index 4c036d503d814b4ed0e5289246f3e1c2379a8eae..4072c04e177a6242953525b0d3de9096e4b3702f 100644
+--- a/app/Http/Controllers/MaklumatJawatanController.php
++++ b/app/Http/Controllers/MaklumatJawatanController.php
+@@ -2,22 +2,80 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Http\Requests\SaveMaklumatJawatanRequest;
+ use App\Models\MaklumatJawatan;
++use App\Models\MaklumatPekerja;
++use App\Support\AuditLogger;
++use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use Illuminate\Validation\Rule;
+ use Inertia\Inertia;
++use Inertia\Response;
+ 
+ class MaklumatJawatanController extends Controller
+ {
+-    public function index(Request $request)
++    private const EDITABLE_FIELDS = [
++        'id_pekerja',
++        'date_lapordiri',
++        'date_tempohcubaan',
++        'id_department',
++        'jawatan',
++        'salary',
++        'id_bank',
++        'noakaun',
++        'noepf',
++        'nosocso',
++        'jumlahcuti',
++    ];
++
++    public function index(Request $request): Response
+     {
+-        $search = $request->string('search')->trim()->toString();
++        $validated = $request->validate([
++            'search' => ['nullable', 'string', 'max:100'],
++            'status' => ['nullable', Rule::in(['active', 'history'])],
++            'department_id' => [
++                'nullable',
++                'integer',
++                Rule::exists('ibco.xdepartment', 'id'),
++            ],
++        ]);
++
++        $search = trim($validated['search'] ?? '');
++        $status = $validated['status'] ?? 'active';
++        $departmentId = isset($validated['department_id'])
++            ? (int) $validated['department_id']
++            : null;
++        $canViewPayroll = $request->user()->hasPermission('payroll.view');
++
++        $fields = [
++            'j.id',
++            'j.id_pekerja',
++            'p.employeeID as employee_id',
++            'p.nama as nama_pekerja',
++            'd.description as jabatan',
++            'j.jawatan',
++            'j.date_lapordiri as tarikh_berkuat_kuasa',
++            'j.date_tempohcubaan as tarikh_tamat_tempoh_cubaan',
++            'j.jumlahcuti as kelayakan_cuti',
++            'j.rcd_enable as aktif',
++            'j.mdf_dt as tarikh_tamat',
++        ];
++
++        if ($canViewPayroll) {
++            array_push(
++                $fields,
++                'j.salary as gaji_asas',
++                'b.description as bank',
++            );
++        }
+ 
+         $records = DB::connection('ibco')->table('maklumatjawatan as j')
+             ->leftJoin('maklumatpekerja as p', 'j.id_pekerja', '=', 'p.id')
+             ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
+             ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
+-            ->where('j.rcd_enable', 1)
++            ->where('j.rcd_enable', $status === 'active' ? 1 : 0)
+             ->when($search !== '', function ($query) use ($search) {
+                 $query->where(function ($query) use ($search) {
+                     $query->where('p.nama', 'like', "%{$search}%")
+@@ -26,71 +84,404 @@ public function index(Request $request)
+                         ->orWhere('d.description', 'like', "%{$search}%");
+                 });
+             })
+-            ->select([
+-                'j.id',
+-                'p.employeeID as employee_id',
+-                'p.nama as nama_pekerja',
+-                'd.description as jabatan',
+-                'j.jawatan',
+-                'j.salary as gaji_asas',
+-                'j.date_lapordiri as tarikh_lapor_diri',
+-                'b.description as bank',
+-            ])
+-            ->orderBy('p.nama')
++            ->when(
++                $departmentId !== null,
++                fn ($query) => $query->where('j.id_department', $departmentId),
++            )
++            ->select($fields)
++            ->orderByDesc('j.date_lapordiri')
++            ->orderByDesc('j.id')
+             ->paginate(15)
+             ->withQueryString();
+ 
++        $statistics = [
++            'active' => DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->where('rcd_enable', 1)
++                ->count(),
++            'history' => DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->where('rcd_enable', 0)
++                ->count(),
++            'without_position' => DB::connection('ibco')
++                ->table('maklumatpekerja as p')
++                ->where('p.rcd_enable', 1)
++                ->whereNotExists(function ($query) {
++                    $query->selectRaw('1')
++                        ->from('maklumatjawatan as j')
++                        ->whereColumn('j.id_pekerja', 'p.id')
++                        ->where('j.rcd_enable', 1);
++                })
++                ->count(),
++        ];
++
+         return Inertia::render('MaklumatJawatan/Index', [
+             'records' => $records,
+-            'filters' => ['search' => $search],
++            'filters' => [
++                'search' => $search,
++                'status' => $status,
++                'department_id' => $departmentId ? (string) $departmentId : '',
++            ],
++            'departmentOptions' => $this->referenceOptions('xdepartment'),
++            'statistics' => $statistics,
++            'canManage' => $request->user()->hasPermission('positions.manage'),
++            'canViewPayroll' => $canViewPayroll,
+         ]);
+     }
+ 
+-    /**
+-     * Show the form for creating a new resource.
+-     */
+-    public function create()
++    public function create(Request $request): Response
++    {
++        $selectedEmployeeId = $request->integer('employee_id');
++
++        if (
++            $selectedEmployeeId > 0
++            && ! MaklumatPekerja::query()
++                ->whereKey($selectedEmployeeId)
++                ->where('rcd_enable', 1)
++                ->exists()
++        ) {
++            $selectedEmployeeId = 0;
++        }
++
++        return Inertia::render('MaklumatJawatan/Create', [
++            'options' => $this->formOptions(),
++            'selectedEmployeeId' => $selectedEmployeeId > 0
++                ? (string) $selectedEmployeeId
++                : '',
++        ]);
++    }
++
++    public function store(SaveMaklumatJawatanRequest $request): RedirectResponse
+     {
+-        //
++        $payload = $request->safe()->only(self::EDITABLE_FIELDS);
++        [$jawatan, $previous] = $this->createPlacement($request, $payload);
++
++        AuditLogger::record(
++            $request,
++            $previous ? 'position.changed' : 'position.created',
++            'maklumatjawatan',
++            $jawatan->getKey(),
++            oldValues: $previous ? $this->snapshot($previous) : [],
++            newValues: $this->snapshot($jawatan),
++        );
++
++        return redirect()
++            ->route('jawatan.show', $jawatan->getKey())
++            ->with('toast', [
++                'type' => 'success',
++                'message' => $previous
++                    ? 'Penempatan baharu berjaya disimpan dan jawatan terdahulu dipindahkan ke sejarah.'
++                    : 'Penempatan pekerja berjaya ditambah.',
++            ]);
++    }
++
++    public function show(Request $request, int $id): Response
++    {
++        $canViewPayroll = $request->user()->hasPermission('payroll.view');
++        $fields = $this->positionFields($canViewPayroll);
++
++        $jawatan = DB::connection('ibco')->table('maklumatjawatan as j')
++            ->leftJoin('maklumatpekerja as p', 'j.id_pekerja', '=', 'p.id')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.id', $id)
++            ->select($fields)
++            ->first();
++
++        abort_if($jawatan === null, 404);
++
++        $history = DB::connection('ibco')->table('maklumatjawatan as j')
++            ->leftJoin('maklumatpekerja as p', 'j.id_pekerja', '=', 'p.id')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.id_pekerja', $jawatan->id_pekerja)
++            ->select($fields)
++            ->orderByDesc('j.rcd_enable')
++            ->orderByDesc('j.date_lapordiri')
++            ->orderByDesc('j.id')
++            ->get();
++
++        return Inertia::render('MaklumatJawatan/Show', [
++            'jawatan' => $jawatan,
++            'history' => $history,
++            'canManage' => $request->user()->hasPermission('positions.manage'),
++            'canViewPayroll' => $canViewPayroll,
++        ]);
++    }
++
++    public function edit(int $id): Response
++    {
++        $jawatan = $this->findActivePosition($id);
++
++        return Inertia::render('MaklumatJawatan/Edit', [
++            'jawatan' => [
++                'id' => $jawatan->getKey(),
++                ...$jawatan->only(self::EDITABLE_FIELDS),
++            ],
++            'pekerja' => DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $jawatan->id_pekerja)
++                ->first(['id', 'employeeID as employee_id', 'nama']),
++            'options' => [
++                'departments' => $this->referenceOptions('xdepartment'),
++                'banks' => $this->referenceOptions('xbank'),
++            ],
++        ]);
++    }
++
++    public function update(
++        SaveMaklumatJawatanRequest $request,
++        int $id,
++    ): RedirectResponse {
++        $current = $this->findActivePosition($id);
++        $payload = $request->safe()->only(self::EDITABLE_FIELDS);
++        $payload['id_pekerja'] = $current->id_pekerja;
++
++        $comparison = clone $current;
++        $comparison->fill($payload);
++        $changedFields = array_keys(
++            array_intersect_key(
++                $comparison->getDirty(),
++                array_flip(self::EDITABLE_FIELDS),
++            ),
++        );
++
++        if ($changedFields === []) {
++            return redirect()
++                ->route('jawatan.show', $current->getKey())
++                ->with('toast', [
++                    'type' => 'info',
++                    'message' => 'Tiada perubahan pada maklumat jawatan.',
++                ]);
++        }
++
++        [$jawatan, $previous] = $this->createPlacement(
++            $request,
++            $payload,
++            $current->getKey(),
++        );
++
++        AuditLogger::record(
++            $request,
++            'position.changed',
++            'maklumatjawatan',
++            $jawatan->getKey(),
++            oldValues: $this->snapshot($previous ?? $current),
++            newValues: $this->snapshot($jawatan),
++        );
++
++        return redirect()
++            ->route('jawatan.show', $jawatan->getKey())
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Pertukaran jawatan berjaya disimpan. Rekod terdahulu dikekalkan dalam sejarah.',
++            ]);
++    }
++
++    public function destroy(Request $request, int $id): RedirectResponse
++    {
++        $jawatan = DB::connection('ibco')->transaction(function () use ($id, $request) {
++            $jawatan = MaklumatJawatan::query()
++                ->whereKey($id)
++                ->where('rcd_enable', 1)
++                ->lockForUpdate()
++                ->firstOrFail();
++
++            MaklumatPekerja::query()
++                ->whereKey($jawatan->id_pekerja)
++                ->lockForUpdate()
++                ->firstOrFail();
++
++            $jawatan->forceFill([
++                'rcd_enable' => 0,
++                'mdf_dt' => now()->toDateString(),
++                'mdf_by' => $this->actorName($request),
++            ])->save();
++
++            return $jawatan;
++        });
++
++        AuditLogger::record(
++            $request,
++            'position.terminated',
++            'maklumatjawatan',
++            $jawatan->getKey(),
++            oldValues: ['rcd_enable' => 1],
++            newValues: [
++                'rcd_enable' => 0,
++                'mdf_dt' => $jawatan->mdf_dt,
++            ],
++        );
++
++        return redirect()
++            ->route('jawatan.index', ['status' => 'history'])
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Jawatan aktif telah ditamatkan dan dikekalkan dalam sejarah.',
++            ]);
+     }
+ 
+     /**
+-     * Store a newly created resource in storage.
++     * @param  array<string, mixed>  $payload
++     * @return array{0: MaklumatJawatan, 1: MaklumatJawatan|null}
+      */
+-    public function store(Request $request)
++    private function createPlacement(
++        Request $request,
++        array $payload,
++        ?int $expectedPositionId = null,
++    ): array {
++        return DB::connection('ibco')->transaction(function () use (
++            $request,
++            $payload,
++            $expectedPositionId,
++        ) {
++            MaklumatPekerja::query()
++                ->whereKey($payload['id_pekerja'])
++                ->where('rcd_enable', 1)
++                ->lockForUpdate()
++                ->firstOrFail();
++
++            $activePositions = MaklumatJawatan::query()
++                ->where('id_pekerja', $payload['id_pekerja'])
++                ->where('rcd_enable', 1)
++                ->lockForUpdate()
++                ->orderByDesc('id')
++                ->get();
++
++            if (
++                $expectedPositionId !== null
++                && ! $activePositions->contains(
++                    fn (MaklumatJawatan $position) => $position->getKey() === $expectedPositionId,
++                )
++            ) {
++                abort(404);
++            }
++
++            /** @var MaklumatJawatan|null $previous */
++            $previous = $activePositions->first();
++
++            if ($activePositions->isNotEmpty()) {
++                MaklumatJawatan::query()
++                    ->whereIn('id', $activePositions->modelKeys())
++                    ->update([
++                        'rcd_enable' => 0,
++                        'mdf_dt' => now()->toDateString(),
++                        'mdf_by' => $this->actorName($request),
++                    ]);
++            }
++
++            $jawatan = MaklumatJawatan::query()->create([
++                ...$payload,
++                'rcd_enable' => 1,
++                'crt_dt' => now()->toDateString(),
++                'crt_by' => $this->actorName($request),
++                'mdf_dt' => null,
++                'mdf_by' => null,
++            ]);
++
++            return [$jawatan, $previous];
++        });
++    }
++
++    private function findActivePosition(int $id): MaklumatJawatan
+     {
+-        //
++        return MaklumatJawatan::query()
++            ->whereKey($id)
++            ->where('rcd_enable', 1)
++            ->firstOrFail();
+     }
+ 
+     /**
+-     * Display the specified resource.
++     * @return array<string, mixed>
+      */
+-    public function show(MaklumatJawatan $maklumatJawatan)
++    private function formOptions(): array
+     {
+-        //
++        return [
++            'employees' => DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('rcd_enable', 1)
++                ->orderBy('nama')
++                ->get(['id', 'employeeID', 'nama'])
++                ->map(fn ($employee) => [
++                    'value' => (string) $employee->id,
++                    'label' => trim(
++                        ($employee->employeeID ? "{$employee->employeeID} — " : '')
++                        . ($employee->nama ?? "Pekerja #{$employee->id}"),
++                    ),
++                ])
++                ->values()
++                ->all(),
++            'departments' => $this->referenceOptions('xdepartment'),
++            'banks' => $this->referenceOptions('xbank'),
++        ];
+     }
+ 
+     /**
+-     * Show the form for editing the specified resource.
++     * @return array<int, array{value: string, label: string}>
+      */
+-    public function edit(MaklumatJawatan $maklumatJawatan)
++    private function referenceOptions(string $table): array
+     {
+-        //
++        return DB::connection('ibco')
++            ->table($table)
++            ->where('rcd_enable', 1)
++            ->orderBy('description')
++            ->get(['id', 'description'])
++            ->map(fn ($option) => [
++                'value' => (string) $option->id,
++                'label' => (string) $option->description,
++            ])
++            ->values()
++            ->all();
+     }
+ 
+     /**
+-     * Update the specified resource in storage.
++     * @return array<int, string>
+      */
+-    public function update(Request $request, MaklumatJawatan $maklumatJawatan)
++    private function positionFields(bool $canViewPayroll): array
+     {
+-        //
++        $fields = [
++            'j.id',
++            'j.id_pekerja',
++            'p.employeeID as employee_id',
++            'p.nama as nama_pekerja',
++            'j.jawatan',
++            'j.id_department',
++            'd.description as jabatan',
++            'j.date_lapordiri as tarikh_berkuat_kuasa',
++            'j.date_tempohcubaan as tarikh_tamat_tempoh_cubaan',
++            'j.jumlahcuti as kelayakan_cuti',
++            'j.rcd_enable as aktif',
++            'j.crt_dt as tarikh_dicipta',
++            'j.crt_by as dicipta_oleh',
++            'j.mdf_dt as tarikh_tamat',
++            'j.mdf_by as ditamatkan_oleh',
++        ];
++
++        if ($canViewPayroll) {
++            array_push(
++                $fields,
++                'j.salary as gaji_asas',
++                'j.id_bank',
++                'b.description as bank',
++                'j.noakaun as no_akaun',
++                'j.noepf as no_kwsp',
++                'j.nosocso as no_perkeso',
++            );
++        }
++
++        return $fields;
+     }
+ 
+     /**
+-     * Remove the specified resource from storage.
++     * @return array<string, mixed>
+      */
+-    public function destroy(MaklumatJawatan $maklumatJawatan)
++    private function snapshot(MaklumatJawatan $jawatan): array
++    {
++        return $jawatan->only([...self::EDITABLE_FIELDS, 'rcd_enable']);
++    }
++
++    private function actorName(Request $request): string
+     {
+-        //
++        return Str::limit($request->user()?->name ?? 'System', 12, '');
+     }
+ }
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index 7ef267cfcb2ce1962225b82814c9cd2f17b885fe..037983eb7dfc97592e07b2e7c8a2a121b09808b7 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -137,6 +137,20 @@ public function show(Request $request, int $id): Response
+             ->orderByDesc('j.id')
+             ->first();
+ 
++        $jawatanHistory = $connection->table('maklumatjawatan as j')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.id_pekerja', $id)
++            ->select([
++                ...$jawatanFields,
++                'j.rcd_enable as aktif',
++                'j.mdf_dt as tarikh_tamat',
++            ])
++            ->orderByDesc('j.rcd_enable')
++            ->orderByDesc('j.date_lapordiri')
++            ->orderByDesc('j.id')
++            ->get();
++
+         $statistics = [
+             'kehadiran' => $connection->table('maklumatkehadiran')
+                 ->where('id_pekerja', $id)
+@@ -241,6 +255,7 @@ public function show(Request $request, int $id): Response
+         return Inertia::render('MaklumatPekerja/Show', [
+             'pekerja' => $pekerja,
+             'jawatan' => $jawatan,
++            'jawatanHistory' => $jawatanHistory,
+             'statistics' => $statistics,
+             'recentAttendance' => $recentAttendance,
+             'recentLeave' => $recentLeave,
+@@ -248,6 +263,7 @@ public function show(Request $request, int $id): Response
+             'recentPayroll' => $recentPayroll,
+             'canViewPayroll' => $canViewPayroll,
+             'canManage' => $request->user()->hasPermission('employees.manage'),
++            'canManagePositions' => $request->user()->hasPermission('positions.manage'),
+         ]);
+     }
+ 
+diff --git a/app/Http/Requests/SaveMaklumatJawatanRequest.php b/app/Http/Requests/SaveMaklumatJawatanRequest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..45b664372edbc4f60c01f797fc3aa7f8bf1ac6c9
+--- /dev/null
++++ b/app/Http/Requests/SaveMaklumatJawatanRequest.php
+@@ -0,0 +1,115 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class SaveMaklumatJawatanRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('positions.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, mixed>>
++     */
++    public function rules(): array
++    {
++        return [
++            'id_pekerja' => [
++                'required',
++                'integer',
++                Rule::exists('ibco.maklumatpekerja', 'id')->where('rcd_enable', 1),
++            ],
++            'date_lapordiri' => ['required', 'date'],
++            'date_tempohcubaan' => [
++                'nullable',
++                'date',
++                'after_or_equal:date_lapordiri',
++            ],
++            'id_department' => [
++                'required',
++                'integer',
++                Rule::exists('ibco.xdepartment', 'id')->where('rcd_enable', 1),
++            ],
++            'jawatan' => ['required', 'string', 'max:100'],
++            'salary' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
++            'id_bank' => [
++                'nullable',
++                'integer',
++                Rule::exists('ibco.xbank', 'id')->where('rcd_enable', 1),
++            ],
++            'noakaun' => ['nullable', 'string', 'max:20'],
++            'noepf' => ['nullable', 'string', 'max:20'],
++            'nosocso' => ['nullable', 'string', 'max:20'],
++            'jumlahcuti' => ['nullable', 'integer', 'min:0', 'max:365'],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function attributes(): array
++    {
++        return [
++            'id_pekerja' => 'pekerja',
++            'date_lapordiri' => 'tarikh berkuat kuasa',
++            'date_tempohcubaan' => 'tarikh tamat tempoh percubaan',
++            'id_department' => 'jabatan atau unit',
++            'jawatan' => 'nama jawatan',
++            'salary' => 'gaji asas',
++            'id_bank' => 'bank',
++            'noakaun' => 'nombor akaun',
++            'noepf' => 'nombor KWSP',
++            'nosocso' => 'nombor PERKESO',
++            'jumlahcuti' => 'kelayakan cuti',
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'date_tempohcubaan.after_or_equal' => 'Tarikh tamat tempoh percubaan tidak boleh lebih awal daripada tarikh berkuat kuasa.',
++            'salary.max' => 'Gaji asas melebihi had yang dibenarkan oleh database.',
++        ];
++    }
++
++    protected function prepareForValidation(): void
++    {
++        $nullableFields = [
++            'date_tempohcubaan',
++            'salary',
++            'id_bank',
++            'noakaun',
++            'noepf',
++            'nosocso',
++            'jumlahcuti',
++        ];
++
++        $normalized = collect($nullableFields)
++            ->filter(fn (string $field) => $this->has($field))
++            ->mapWithKeys(function (string $field) {
++                $value = $this->input($field);
++
++                return [$field => $value === '' ? null : $value];
++            })
++            ->all();
++
++        if ($this->has('jawatan') && is_string($this->input('jawatan'))) {
++            $normalized['jawatan'] = trim($this->input('jawatan'));
++        }
++
++        foreach (['noakaun', 'noepf', 'nosocso'] as $field) {
++            if ($this->has($field) && is_string($this->input($field))) {
++                $normalized[$field] = trim($this->input($field)) ?: null;
++            }
++        }
++
++        $this->merge($normalized);
++    }
++}
+diff --git a/app/Models/MaklumatJawatan.php b/app/Models/MaklumatJawatan.php
+index 889518c83a1cbdabafeb0690d356f30d98d5c4ad..d77bd40cc212f04da77404c0e5ff5111454384dd 100644
+--- a/app/Models/MaklumatJawatan.php
++++ b/app/Models/MaklumatJawatan.php
+@@ -11,4 +11,23 @@ class MaklumatJawatan extends Model
+     protected $table = 'maklumatjawatan';
+ 
+     public $timestamps = false;
++
++    protected $fillable = [
++        'id_pekerja',
++        'date_lapordiri',
++        'date_tempohcubaan',
++        'id_department',
++        'jawatan',
++        'salary',
++        'id_bank',
++        'noakaun',
++        'noepf',
++        'nosocso',
++        'jumlahcuti',
++        'rcd_enable',
++        'crt_by',
++        'crt_dt',
++        'mdf_by',
++        'mdf_dt',
++    ];
+ }
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index d5158e81f61714c7637a1d16c99c02a5e805b069..7e90a6f767ead5469410dbcc080ff24ac66578ca 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -68,6 +68,7 @@ type AuditRecord = {
+     id: number;
+     action: string;
+     action_label: string;
++    auditable_type: 'maklumatpekerja' | 'maklumatjawatan';
+     auditable_id: string;
+     employee: AuditEmployee | null;
+     user: AuditActor | null;
+@@ -150,6 +151,18 @@ const fieldLabels: Record<string, string> = {
+     notel: 'No. Telefon',
+     email: 'E-mel',
+     status: 'Status Pekerjaan',
++    id_pekerja: 'Pekerja',
++    date_lapordiri: 'Tarikh Berkuat Kuasa',
++    date_tempohcubaan: 'Tamat Tempoh Percubaan',
++    id_department: 'Jabatan / Unit',
++    jawatan: 'Jawatan',
++    salary: 'Gaji Asas',
++    id_bank: 'Bank',
++    noakaun: 'No. Akaun',
++    noepf: 'No. KWSP',
++    nosocso: 'No. PERKESO',
++    jumlahcuti: 'Kelayakan Cuti',
++    mdf_dt: 'Tarikh Tamat',
+     rcd_enable: 'Status Rekod',
+ };
+ 
+@@ -162,6 +175,12 @@ const actionStyles: Record<string, string> = {
+         'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+     'employee.reactivated':
+         'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
++    'position.created':
++        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++    'position.changed':
++        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
++    'position.terminated':
++        'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+ };
+ 
+ function formatDate(value: string | null): string {
+@@ -200,10 +219,24 @@ function formatAuditValue(field: string, value: AuditValue | undefined) {
+         return '-';
+     }
+ 
+-    if (field === 'tarikhlahir') {
++    if (
++        [
++            'tarikhlahir',
++            'date_lapordiri',
++            'date_tempohcubaan',
++            'mdf_dt',
++        ].includes(field)
++    ) {
+         return formatDate(String(value));
+     }
+ 
++    if (field === 'salary') {
++        return new Intl.NumberFormat('ms-MY', {
++            style: 'currency',
++            currency: 'MYR',
++        }).format(Number(value));
++    }
++
+     return String(value);
+ }
+ 
+@@ -531,7 +564,7 @@ export default function AuditTrail({
+             className: 'text-slate-600 dark:text-slate-300',
+         },
+         {
+-            label: 'Pekerja Ditambah',
++            label: 'Rekod Ditambah',
+             value: statistics.created,
+             icon: UserPlus,
+             className: 'text-emerald-600 dark:text-emerald-300',
+@@ -543,7 +576,7 @@ export default function AuditTrail({
+             className: 'text-blue-600 dark:text-blue-300',
+         },
+         {
+-            label: 'Dinyahaktifkan',
++            label: 'Ditamatkan / Dinyahaktifkan',
+             value: statistics.deactivated,
+             icon: UserMinus,
+             className: 'text-red-600 dark:text-red-300',
+@@ -570,7 +603,7 @@ export default function AuditTrail({
+                 <div className="space-y-2">
+                     <HeadingSmall
+                         title="Audit Trail & Pekerja Tidak Aktif"
+-                        description="Jejaki perubahan rekod pekerja dan pulihkan rekod yang telah dinyahaktifkan."
++                        description="Jejaki perubahan pekerja dan penempatan jawatan serta pulihkan rekod pekerja yang telah dinyahaktifkan."
+                     />
+                     <div className="flex flex-wrap gap-2">
+                         <Badge
+diff --git a/resources/js/pages/MaklumatJawatan/Create.tsx b/resources/js/pages/MaklumatJawatan/Create.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c397c587e1cb897858538d898c3eac619102c07
+--- /dev/null
++++ b/resources/js/pages/MaklumatJawatan/Create.tsx
+@@ -0,0 +1,48 @@
++import { Head } from '@inertiajs/react';
++import JawatanForm from './partials/jawatan-form';
++import type {
++    PositionFormData,
++    PositionFormOptions,
++} from './partials/jawatan-form';
++
++type CreatePositionProps = {
++    options: PositionFormOptions;
++    selectedEmployeeId: string;
++};
++
++export default function CreatePosition({
++    options,
++    selectedEmployeeId,
++}: CreatePositionProps) {
++    const initialValues: PositionFormData = {
++        id_pekerja: selectedEmployeeId,
++        date_lapordiri: '',
++        date_tempohcubaan: '',
++        id_department: '',
++        jawatan: '',
++        salary: '',
++        id_bank: '',
++        noakaun: '',
++        noepf: '',
++        nosocso: '',
++        jumlahcuti: '',
++    };
++
++    return (
++        <>
++            <Head title="Tambah Penempatan" />
++            <JawatanForm
++                mode="create"
++                options={options}
++                initialValues={initialValues}
++            />
++        </>
++    );
++}
++
++CreatePosition.layout = {
++    breadcrumbs: [
++        { title: 'Jawatan', href: '/jawatan' },
++        { title: 'Tambah Penempatan', href: '/jawatan/create' },
++    ],
++};
+diff --git a/resources/js/pages/MaklumatJawatan/Edit.tsx b/resources/js/pages/MaklumatJawatan/Edit.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3f1e42994451ef2b6636de6664baecac53040c4
+--- /dev/null
++++ b/resources/js/pages/MaklumatJawatan/Edit.tsx
+@@ -0,0 +1,68 @@
++import { Head } from '@inertiajs/react';
++import JawatanForm from './partials/jawatan-form';
++import type {
++    PositionFormData,
++    PositionFormOptions,
++} from './partials/jawatan-form';
++
++type PositionRecord = {
++    id: number;
++} & Partial<PositionFormData>;
++
++type EmployeeRecord = {
++    id: number;
++    employee_id: string | null;
++    nama: string | null;
++};
++
++type EditPositionProps = {
++    jawatan: PositionRecord;
++    pekerja: EmployeeRecord;
++    options: PositionFormOptions;
++};
++
++function toFormValues(jawatan: PositionRecord): PositionFormData {
++    return {
++        id_pekerja: String(jawatan.id_pekerja ?? ''),
++        date_lapordiri: String(jawatan.date_lapordiri ?? '').slice(0, 10),
++        date_tempohcubaan: String(jawatan.date_tempohcubaan ?? '').slice(0, 10),
++        id_department: String(jawatan.id_department ?? ''),
++        jawatan: String(jawatan.jawatan ?? ''),
++        salary: String(jawatan.salary ?? ''),
++        id_bank: String(jawatan.id_bank ?? ''),
++        noakaun: String(jawatan.noakaun ?? ''),
++        noepf: String(jawatan.noepf ?? ''),
++        nosocso: String(jawatan.nosocso ?? ''),
++        jumlahcuti: String(jawatan.jumlahcuti ?? ''),
++    };
++}
++
++export default function EditPosition({
++    jawatan,
++    pekerja,
++    options,
++}: EditPositionProps) {
++    const employeeLabel = [pekerja.employee_id, pekerja.nama]
++        .filter(Boolean)
++        .join(' — ');
++
++    return (
++        <>
++            <Head title={`Tukar Jawatan ${pekerja.nama ?? ''}`} />
++            <JawatanForm
++                mode="edit"
++                options={options}
++                initialValues={toFormValues(jawatan)}
++                positionId={jawatan.id}
++                employeeLabel={employeeLabel}
++            />
++        </>
++    );
++}
++
++EditPosition.layout = {
++    breadcrumbs: [
++        { title: 'Jawatan', href: '/jawatan' },
++        { title: 'Tukar Jawatan', href: '#' },
++    ],
++};
+diff --git a/resources/js/pages/MaklumatJawatan/Index.tsx b/resources/js/pages/MaklumatJawatan/Index.tsx
+index c3572fe83a8a7bd582e44514a1a5688118c30adf..05d8e90221ac67322c0df0f8261c32412d9fc5f1 100644
+--- a/resources/js/pages/MaklumatJawatan/Index.tsx
++++ b/resources/js/pages/MaklumatJawatan/Index.tsx
+@@ -1,36 +1,693 @@
+-import RecordsIndex from '@/components/records-index';
+-import type {
+-    RecordPageConfig,
+-    RecordsIndexPageProps,
+-} from '@/components/records-index';
+-
+-const config: RecordPageConfig = {
+-    title: 'Maklumat Jawatan',
+-    description: 'Maklumat jawatan, jabatan dan gaji asas pekerja.',
+-    routePath: '/jawatan',
+-    searchPlaceholder: 'Cari nama, ID, jawatan atau jabatan...',
+-    columns: [
+-        { key: 'employee_id', label: 'ID Pekerja' },
+-        { key: 'nama_pekerja', label: 'Nama' },
+-        { key: 'jabatan', label: 'Jabatan' },
+-        { key: 'jawatan', label: 'Jawatan' },
++import { Head, Link, router } from '@inertiajs/react';
++import {
++    BriefcaseBusiness,
++    Building2,
++    CircleOff,
++    Eye,
++    History,
++    Pencil,
++    Plus,
++    RotateCcw,
++    Search,
++    UserRoundX,
++} from 'lucide-react';
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++    DialogTrigger,
++} from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type PositionRecord = {
++    id: number;
++    id_pekerja: number;
++    employee_id: string | null;
++    nama_pekerja: string | null;
++    jabatan: string | null;
++    jawatan: string | null;
++    tarikh_berkuat_kuasa: string | null;
++    tarikh_tamat_tempoh_cubaan: string | null;
++    kelayakan_cuti: string | null;
++    aktif: number;
++    tarikh_tamat: string | null;
++    gaji_asas?: string | number | null;
++    bank?: string | null;
++};
++
++type PaginationLink = {
++    url: string | null;
++    label: string;
++    active: boolean;
++};
++
++type Paginator<T> = {
++    data: T[];
++    current_page: number;
++    last_page: number;
++    from: number | null;
++    to: number | null;
++    total: number;
++    links: PaginationLink[];
++};
++
++type SelectOption = {
++    value: string;
++    label: string;
++};
++
++type JawatanIndexProps = {
++    records: Paginator<PositionRecord>;
++    filters: {
++        search: string;
++        status: 'active' | 'history';
++        department_id: string;
++    };
++    departmentOptions: SelectOption[];
++    statistics: {
++        active: number;
++        history: number;
++        without_position: number;
++    };
++    canManage: boolean;
++    canViewPayroll: boolean;
++};
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const parts = value.slice(0, 10).split('-');
++
++    return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : value;
++}
++
++function formatCurrency(value: string | number | null | undefined): string {
++    if (value === null || value === undefined || value === '') {
++        return '-';
++    }
++
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++    }).format(Number(value));
++}
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++function TerminateButton({
++    position,
++    compact = false,
++}: {
++    position: PositionRecord;
++    compact?: boolean;
++}) {
++    const [open, setOpen] = useState(false);
++    const [processing, setProcessing] = useState(false);
++
++    const terminate = () => {
++        router.delete(`/jawatan/${position.id}`, {
++            preserveScroll: true,
++            onStart: () => setProcessing(true),
++            onFinish: () => {
++                setProcessing(false);
++                setOpen(false);
++            },
++        });
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button
++                    type="button"
++                    variant="destructive"
++                    size="sm"
++                    className={compact ? 'w-full' : undefined}
++                >
++                    <CircleOff />
++                    Tamatkan
++                </Button>
++            </DialogTrigger>
++            <DialogContent>
++                <DialogHeader>
++                    <DialogTitle>Tamatkan jawatan aktif?</DialogTitle>
++                    <DialogDescription>
++                        Jawatan {position.jawatan ?? 'ini'} bagi{' '}
++                        {position.nama_pekerja ??
++                            position.employee_id ??
++                            'pekerja ini'}{' '}
++                        akan dipindahkan ke sejarah. Rekod tidak akan dipadam
++                        secara kekal dan tindakan ini direkodkan dalam Audit
++                        Trail.
++                    </DialogDescription>
++                </DialogHeader>
++                <DialogFooter>
++                    <DialogClose asChild>
++                        <Button variant="outline" disabled={processing}>
++                            Batal
++                        </Button>
++                    </DialogClose>
++                    <Button
++                        type="button"
++                        variant="destructive"
++                        onClick={terminate}
++                        disabled={processing}
++                    >
++                        <CircleOff />
++                        {processing
++                            ? 'Sedang diproses...'
++                            : 'Ya, Tamatkan Jawatan'}
++                    </Button>
++                </DialogFooter>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
++function PositionActions({
++    position,
++    canManage,
++    compact = false,
++}: {
++    position: PositionRecord;
++    canManage: boolean;
++    compact?: boolean;
++}) {
++    const active = Number(position.aktif) === 1;
++
++    return (
++        <div
++            className={
++                compact ? 'grid grid-cols-2 gap-2' : 'flex justify-end gap-2'
++            }
++        >
++            <Button
++                asChild
++                variant="outline"
++                size="sm"
++                className={compact ? 'col-span-2' : undefined}
++            >
++                <Link href={`/jawatan/${position.id}`}>
++                    <Eye />
++                    Papar
++                </Link>
++            </Button>
++            {active && canManage && (
++                <>
++                    <Button asChild variant="outline" size="sm">
++                        <Link href={`/jawatan/${position.id}/edit`}>
++                            <Pencil />
++                            Tukar
++                        </Link>
++                    </Button>
++                    <TerminateButton position={position} compact={compact} />
++                </>
++            )}
++        </div>
++    );
++}
++
++export default function JawatanIndex({
++    records,
++    filters,
++    departmentOptions,
++    statistics,
++    canManage,
++    canViewPayroll,
++}: JawatanIndexProps) {
++    const [search, setSearch] = useState(filters.search);
++    const [departmentId, setDepartmentId] = useState(
++        filters.department_id || 'all',
++    );
++
++    const visit = (
++        status: 'active' | 'history',
++        nextSearch = search,
++        nextDepartment = departmentId,
++    ) => {
++        router.get(
++            '/jawatan',
++            {
++                status,
++                search: nextSearch || undefined,
++                department_id:
++                    nextDepartment === 'all' ? undefined : nextDepartment,
++            },
++            {
++                preserveState: true,
++                preserveScroll: true,
++                replace: true,
++            },
++        );
++    };
++
++    const submitFilters = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        visit(filters.status);
++    };
++
++    const resetFilters = () => {
++        setSearch('');
++        setDepartmentId('all');
++        visit(filters.status, '', 'all');
++    };
++
++    const summaryCards = [
+         {
+-            key: 'gaji_asas',
+-            label: 'Gaji Asas',
+-            type: 'currency',
+-            align: 'right',
++            label: 'Jawatan Aktif',
++            value: statistics.active,
++            icon: BriefcaseBusiness,
++            className: 'text-emerald-600 dark:text-emerald-300',
+         },
+         {
+-            key: 'tarikh_lapor_diri',
+-            label: 'Tarikh Lapor Diri',
+-            type: 'date',
++            label: 'Rekod Sejarah',
++            value: statistics.history,
++            icon: History,
++            className: 'text-blue-600 dark:text-blue-300',
+         },
+-        { key: 'bank', label: 'Bank' },
+-    ],
+-};
++        {
++            label: 'Belum Ada Jawatan',
++            value: statistics.without_position,
++            icon: UserRoundX,
++            className: 'text-amber-600 dark:text-amber-300',
++        },
++    ];
++
++    return (
++        <>
++            <Head title="Jawatan & Penempatan" />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                    <div className="space-y-2">
++                        <HeadingSmall
++                            title="Jawatan & Penempatan Pekerja"
++                            description="Urus penempatan semasa dan semak sejarah pertukaran jawatan tanpa memadam rekod lama."
++                        />
++                        <Badge
++                            variant="secondary"
++                            className="gap-1.5 font-normal"
++                        >
++                            <BriefcaseBusiness className="size-3.5" />
++                            Sumber data: db_spp
++                        </Badge>
++                    </div>
++
++                    {canManage && (
++                        <Button asChild>
++                            <Link href="/jawatan/create">
++                                <Plus />
++                                Tambah Penempatan
++                            </Link>
++                        </Button>
++                    )}
++                </div>
++
++                <div className="grid gap-4 sm:grid-cols-3">
++                    {summaryCards.map((card) => (
++                        <Card key={card.label}>
++                            <CardContent className="flex items-center justify-between p-5">
++                                <div>
++                                    <p className="text-sm text-muted-foreground">
++                                        {card.label}
++                                    </p>
++                                    <p className="mt-1 text-2xl font-semibold">
++                                        {card.value.toLocaleString('ms-MY')}
++                                    </p>
++                                </div>
++                                <card.icon
++                                    className={`size-6 ${card.className}`}
++                                />
++                            </CardContent>
++                        </Card>
++                    ))}
++                </div>
++
++                <div className="flex flex-col gap-2 rounded-xl border bg-card p-2 sm:flex-row">
++                    <Button
++                        type="button"
++                        variant={
++                            filters.status === 'active' ? 'default' : 'ghost'
++                        }
++                        className="justify-start sm:flex-1 sm:justify-center"
++                        onClick={() => visit('active')}
++                    >
++                        <BriefcaseBusiness />
++                        Jawatan Aktif ({statistics.active})
++                    </Button>
++                    <Button
++                        type="button"
++                        variant={
++                            filters.status === 'history' ? 'default' : 'ghost'
++                        }
++                        className="justify-start sm:flex-1 sm:justify-center"
++                        onClick={() => visit('history')}
++                    >
++                        <History />
++                        Sejarah Jawatan ({statistics.history})
++                    </Button>
++                </div>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2 text-base">
++                            <Search className="size-4" />
++                            Carian & Penapis
++                        </CardTitle>
++                        <CardDescription>
++                            Cari nama, ID pekerja, jawatan atau jabatan.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent>
++                        <form
++                            onSubmit={submitFilters}
++                            className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(220px,0.35fr)_auto]"
++                        >
++                            <div className="relative">
++                                <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                <Input
++                                    value={search}
++                                    onChange={(event) =>
++                                        setSearch(event.target.value)
++                                    }
++                                    placeholder="Nama, ID, jawatan atau jabatan..."
++                                    className="pl-9"
++                                    aria-label="Cari rekod jawatan"
++                                />
++                            </div>
++                            <Select
++                                value={departmentId}
++                                onValueChange={setDepartmentId}
++                            >
++                                <SelectTrigger className="w-full">
++                                    <Building2 />
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    <SelectItem value="all">
++                                        Semua Jabatan
++                                    </SelectItem>
++                                    {departmentOptions.map((option) => (
++                                        <SelectItem
++                                            key={option.value}
++                                            value={option.value}
++                                        >
++                                            {option.label}
++                                        </SelectItem>
++                                    ))}
++                                </SelectContent>
++                            </Select>
++                            <div className="flex gap-2">
++                                <Button
++                                    type="button"
++                                    variant="outline"
++                                    onClick={resetFilters}
++                                >
++                                    <RotateCcw />
++                                    Reset
++                                </Button>
++                                <Button type="submit">
++                                    <Search />
++                                    Cari
++                                </Button>
++                            </div>
++                        </form>
++                    </CardContent>
++                </Card>
++
++                <div className="hidden overflow-hidden rounded-xl border bg-card md:block">
++                    <div className="overflow-x-auto">
++                        <Table>
++                            <TableHeader className="bg-muted/60">
++                                <TableRow>
++                                    <TableHead className="w-16">No.</TableHead>
++                                    <TableHead>Pekerja</TableHead>
++                                    <TableHead>Jawatan / Jabatan</TableHead>
++                                    <TableHead>Berkuat Kuasa</TableHead>
++                                    {filters.status === 'history' && (
++                                        <TableHead>Tarikh Tamat</TableHead>
++                                    )}
++                                    {canViewPayroll && (
++                                        <TableHead className="text-right">
++                                            Gaji Asas
++                                        </TableHead>
++                                    )}
++                                    <TableHead>Status</TableHead>
++                                    <TableHead className="min-w-64 text-right">
++                                        Tindakan
++                                    </TableHead>
++                                </TableRow>
++                            </TableHeader>
++                            <TableBody>
++                                {records.data.length > 0 ? (
++                                    records.data.map((position, index) => (
++                                        <TableRow key={position.id}>
++                                            <TableCell className="text-muted-foreground">
++                                                {(records.from ?? 1) + index}
++                                            </TableCell>
++                                            <TableCell>
++                                                <p className="font-medium">
++                                                    {position.nama_pekerja ??
++                                                        '-'}
++                                                </p>
++                                                <p className="text-xs text-muted-foreground">
++                                                    {position.employee_id ??
++                                                        '-'}
++                                                </p>
++                                            </TableCell>
++                                            <TableCell>
++                                                <p className="font-medium">
++                                                    {position.jawatan ?? '-'}
++                                                </p>
++                                                <p className="text-xs text-muted-foreground">
++                                                    {position.jabatan ?? '-'}
++                                                </p>
++                                            </TableCell>
++                                            <TableCell>
++                                                {formatDate(
++                                                    position.tarikh_berkuat_kuasa,
++                                                )}
++                                            </TableCell>
++                                            {filters.status === 'history' && (
++                                                <TableCell>
++                                                    {formatDate(
++                                                        position.tarikh_tamat,
++                                                    )}
++                                                </TableCell>
++                                            )}
++                                            {canViewPayroll && (
++                                                <TableCell className="text-right font-medium tabular-nums">
++                                                    {formatCurrency(
++                                                        position.gaji_asas,
++                                                    )}
++                                                </TableCell>
++                                            )}
++                                            <TableCell>
++                                                <Badge
++                                                    variant={
++                                                        Number(
++                                                            position.aktif,
++                                                        ) === 1
++                                                            ? 'secondary'
++                                                            : 'outline'
++                                                    }
++                                                >
++                                                    {Number(position.aktif) ===
++                                                    1
++                                                        ? 'Aktif'
++                                                        : 'Sejarah'}
++                                                </Badge>
++                                            </TableCell>
++                                            <TableCell className="text-right">
++                                                <PositionActions
++                                                    position={position}
++                                                    canManage={canManage}
++                                                />
++                                            </TableCell>
++                                        </TableRow>
++                                    ))
++                                ) : (
++                                    <TableRow>
++                                        <TableCell
++                                            colSpan={
++                                                6 +
++                                                (filters.status === 'history'
++                                                    ? 1
++                                                    : 0) +
++                                                (canViewPayroll ? 1 : 0)
++                                            }
++                                            className="py-12 text-center text-muted-foreground"
++                                        >
++                                            Tiada rekod jawatan ditemui.
++                                        </TableCell>
++                                    </TableRow>
++                                )}
++                            </TableBody>
++                        </Table>
++                    </div>
++                </div>
++
++                <div className="grid gap-4 md:hidden">
++                    {records.data.length > 0 ? (
++                        records.data.map((position) => (
++                            <Card key={position.id}>
++                                <CardHeader className="gap-3 pb-3">
++                                    <div className="flex items-start justify-between gap-3">
++                                        <div>
++                                            <CardTitle className="text-base">
++                                                {position.nama_pekerja ?? '-'}
++                                            </CardTitle>
++                                            <CardDescription>
++                                                {position.employee_id ?? '-'}
++                                            </CardDescription>
++                                        </div>
++                                        <Badge
++                                            variant={
++                                                Number(position.aktif) === 1
++                                                    ? 'secondary'
++                                                    : 'outline'
++                                            }
++                                        >
++                                            {Number(position.aktif) === 1
++                                                ? 'Aktif'
++                                                : 'Sejarah'}
++                                        </Badge>
++                                    </div>
++                                </CardHeader>
++                                <CardContent className="space-y-4 text-sm">
++                                    <div>
++                                        <p className="text-muted-foreground">
++                                            Jawatan / Jabatan
++                                        </p>
++                                        <p className="font-medium">
++                                            {position.jawatan ?? '-'}
++                                        </p>
++                                        <p>{position.jabatan ?? '-'}</p>
++                                    </div>
++                                    <div className="grid grid-cols-2 gap-3">
++                                        <div>
++                                            <p className="text-muted-foreground">
++                                                Berkuat Kuasa
++                                            </p>
++                                            <p className="font-medium">
++                                                {formatDate(
++                                                    position.tarikh_berkuat_kuasa,
++                                                )}
++                                            </p>
++                                        </div>
++                                        {filters.status === 'history' && (
++                                            <div>
++                                                <p className="text-muted-foreground">
++                                                    Tarikh Tamat
++                                                </p>
++                                                <p className="font-medium">
++                                                    {formatDate(
++                                                        position.tarikh_tamat,
++                                                    )}
++                                                </p>
++                                            </div>
++                                        )}
++                                    </div>
++                                    {canViewPayroll && (
++                                        <div>
++                                            <p className="text-muted-foreground">
++                                                Gaji Asas
++                                            </p>
++                                            <p className="font-medium">
++                                                {formatCurrency(
++                                                    position.gaji_asas,
++                                                )}
++                                            </p>
++                                        </div>
++                                    )}
++                                    <PositionActions
++                                        position={position}
++                                        canManage={canManage}
++                                        compact
++                                    />
++                                </CardContent>
++                            </Card>
++                        ))
++                    ) : (
++                        <Card>
++                            <CardContent className="py-12 text-center text-muted-foreground">
++                                Tiada rekod jawatan ditemui.
++                            </CardContent>
++                        </Card>
++                    )}
++                </div>
+ 
+-export default function JawatanIndex(props: RecordsIndexPageProps) {
+-    return <RecordsIndex {...props} config={config} />;
++                <div className="flex flex-col gap-3 rounded-xl border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
++                    <p className="text-sm text-muted-foreground">
++                        Menunjukkan {records.from ?? 0} hingga {records.to ?? 0}{' '}
++                        daripada {records.total} rekod
++                    </p>
++                    {records.last_page > 1 && (
++                        <div className="flex flex-wrap gap-1">
++                            {records.links.map((link, index) => (
++                                <Button
++                                    key={`${link.label}-${index}`}
++                                    type="button"
++                                    size="sm"
++                                    variant={
++                                        link.active ? 'default' : 'outline'
++                                    }
++                                    disabled={!link.url}
++                                    onClick={() => {
++                                        if (link.url) {
++                                            router.visit(link.url, {
++                                                preserveState: true,
++                                                preserveScroll: true,
++                                            });
++                                        }
++                                    }}
++                                >
++                                    {paginationLabel(link.label)}
++                                </Button>
++                            ))}
++                        </div>
++                    )}
++                </div>
++            </div>
++        </>
++    );
+ }
+ 
+ JawatanIndex.layout = {
+diff --git a/resources/js/pages/MaklumatJawatan/Show.tsx b/resources/js/pages/MaklumatJawatan/Show.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..859b43f01f4a62864e4f3d7b16c06e2d3027d9f8
+--- /dev/null
++++ b/resources/js/pages/MaklumatJawatan/Show.tsx
+@@ -0,0 +1,528 @@
++import { Head, Link, router } from '@inertiajs/react';
++import {
++    ArrowLeft,
++    Banknote,
++    BriefcaseBusiness,
++    Building2,
++    CalendarDays,
++    CircleOff,
++    CreditCard,
++    History,
++    IdCard,
++    Landmark,
++    Pencil,
++    ShieldCheck,
++    UserRound,
++} from 'lucide-react';
++import { useState } from 'react';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++    DialogTrigger,
++} from '@/components/ui/dialog';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type Position = {
++    id: number;
++    id_pekerja: number;
++    employee_id: string | null;
++    nama_pekerja: string | null;
++    jawatan: string | null;
++    id_department: number | null;
++    jabatan: string | null;
++    tarikh_berkuat_kuasa: string | null;
++    tarikh_tamat_tempoh_cubaan: string | null;
++    kelayakan_cuti: string | null;
++    aktif: number;
++    tarikh_dicipta: string | null;
++    dicipta_oleh: string | null;
++    tarikh_tamat: string | null;
++    ditamatkan_oleh: string | null;
++    gaji_asas?: string | number | null;
++    id_bank?: number | null;
++    bank?: string | null;
++    no_akaun?: string | null;
++    no_kwsp?: string | null;
++    no_perkeso?: string | null;
++};
++
++type PositionShowProps = {
++    jawatan: Position;
++    history: Position[];
++    canManage: boolean;
++    canViewPayroll: boolean;
++};
++
++function displayValue(value: string | number | null | undefined): string {
++    return value === null || value === undefined || value === ''
++        ? '-'
++        : String(value);
++}
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const parts = value.slice(0, 10).split('-');
++
++    return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : value;
++}
++
++function formatCurrency(value: string | number | null | undefined): string {
++    if (value === null || value === undefined || value === '') {
++        return '-';
++    }
++
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++    }).format(Number(value));
++}
++
++function InformationItem({
++    label,
++    value,
++    icon: Icon,
++    type = 'text',
++}: {
++    label: string;
++    value: string | number | null | undefined;
++    icon: typeof BriefcaseBusiness;
++    type?: 'text' | 'date' | 'currency';
++}) {
++    const formatted =
++        type === 'date'
++            ? formatDate(value ? String(value) : null)
++            : type === 'currency'
++              ? formatCurrency(value)
++              : displayValue(value);
++
++    return (
++        <div className="flex gap-3 rounded-lg border bg-muted/20 p-3">
++            <div className="mt-0.5 rounded-md bg-background p-2 text-muted-foreground shadow-sm">
++                <Icon className="size-4" />
++            </div>
++            <div className="min-w-0">
++                <p className="text-xs text-muted-foreground">{label}</p>
++                <p className="mt-1 text-sm font-medium break-words">
++                    {formatted}
++                </p>
++            </div>
++        </div>
++    );
++}
++
++function TerminatePositionButton({ position }: { position: Position }) {
++    const [open, setOpen] = useState(false);
++    const [processing, setProcessing] = useState(false);
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button type="button" variant="destructive" size="sm">
++                    <CircleOff />
++                    Tamatkan Jawatan
++                </Button>
++            </DialogTrigger>
++            <DialogContent>
++                <DialogHeader>
++                    <DialogTitle>Tamatkan jawatan aktif?</DialogTitle>
++                    <DialogDescription>
++                        Rekod ini akan dipindahkan ke sejarah dan tidak dipadam
++                        secara kekal. Pekerja akan berada tanpa jawatan aktif
++                        sehingga penempatan baharu dibuat.
++                    </DialogDescription>
++                </DialogHeader>
++                <DialogFooter>
++                    <DialogClose asChild>
++                        <Button variant="outline" disabled={processing}>
++                            Batal
++                        </Button>
++                    </DialogClose>
++                    <Button
++                        type="button"
++                        variant="destructive"
++                        disabled={processing}
++                        onClick={() =>
++                            router.delete(`/jawatan/${position.id}`, {
++                                onStart: () => setProcessing(true),
++                                onFinish: () => {
++                                    setProcessing(false);
++                                    setOpen(false);
++                                },
++                            })
++                        }
++                    >
++                        <CircleOff />
++                        {processing
++                            ? 'Sedang diproses...'
++                            : 'Ya, Tamatkan Jawatan'}
++                    </Button>
++                </DialogFooter>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
++export default function PositionShow({
++    jawatan,
++    history,
++    canManage,
++    canViewPayroll,
++}: PositionShowProps) {
++    const active = Number(jawatan.aktif) === 1;
++
++    return (
++        <>
++            <Head
++                title={`Jawatan ${jawatan.nama_pekerja ?? jawatan.employee_id ?? ''}`}
++            />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
++                    <Button asChild variant="outline" size="sm">
++                        <Link href="/jawatan">
++                            <ArrowLeft />
++                            Kembali ke Senarai Jawatan
++                        </Link>
++                    </Button>
++                    {active && canManage && (
++                        <div className="flex flex-col gap-2 sm:flex-row">
++                            <Button asChild variant="outline" size="sm">
++                                <Link href={`/jawatan/${jawatan.id}/edit`}>
++                                    <Pencil />
++                                    Tukar Jawatan
++                                </Link>
++                            </Button>
++                            <TerminatePositionButton position={jawatan} />
++                        </div>
++                    )}
++                </div>
++
++                <Card className="overflow-hidden">
++                    <div className="h-2 bg-gradient-to-r from-blue-600 via-cyan-500 to-emerald-500" />
++                    <CardContent className="flex flex-col gap-5 pt-1 sm:flex-row sm:items-center sm:justify-between">
++                        <div className="min-w-0">
++                            <div className="flex items-center gap-2">
++                                <BriefcaseBusiness className="size-6 text-muted-foreground" />
++                                <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
++                                    {displayValue(jawatan.jawatan)}
++                                </h1>
++                            </div>
++                            <p className="mt-2 text-sm text-muted-foreground">
++                                {displayValue(jawatan.nama_pekerja)}
++                                {jawatan.employee_id
++                                    ? ` · ${jawatan.employee_id}`
++                                    : ''}
++                            </p>
++                            <div className="mt-3 flex flex-wrap gap-2">
++                                <Badge
++                                    variant={active ? 'secondary' : 'outline'}
++                                >
++                                    {active ? 'Jawatan Aktif' : 'Rekod Sejarah'}
++                                </Badge>
++                                <Badge variant="outline">
++                                    {displayValue(jawatan.jabatan)}
++                                </Badge>
++                            </div>
++                        </div>
++                        <Button asChild variant="outline">
++                            <Link href={`/pekerja/${jawatan.id_pekerja}`}>
++                                <UserRound />
++                                Papar Profil Pekerja
++                            </Link>
++                        </Button>
++                    </CardContent>
++                </Card>
++
++                <div
++                    className={
++                        canViewPayroll ? 'grid gap-6 xl:grid-cols-2' : undefined
++                    }
++                >
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <Building2 className="size-5 text-muted-foreground" />
++                                Butiran Penempatan
++                            </CardTitle>
++                            <CardDescription>
++                                Maklumat jawatan dan tempoh penempatan pekerja.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-3 sm:grid-cols-2">
++                            <InformationItem
++                                icon={BriefcaseBusiness}
++                                label="Jawatan"
++                                value={jawatan.jawatan}
++                            />
++                            <InformationItem
++                                icon={Building2}
++                                label="Jabatan / Unit"
++                                value={jawatan.jabatan}
++                            />
++                            <InformationItem
++                                icon={CalendarDays}
++                                label="Tarikh Berkuat Kuasa"
++                                value={jawatan.tarikh_berkuat_kuasa}
++                                type="date"
++                            />
++                            <InformationItem
++                                icon={CalendarDays}
++                                label="Tamat Tempoh Percubaan"
++                                value={jawatan.tarikh_tamat_tempoh_cubaan}
++                                type="date"
++                            />
++                            <InformationItem
++                                icon={CalendarDays}
++                                label="Kelayakan Cuti"
++                                value={jawatan.kelayakan_cuti}
++                            />
++                            {!active && (
++                                <InformationItem
++                                    icon={CircleOff}
++                                    label="Tarikh Tamat"
++                                    value={jawatan.tarikh_tamat}
++                                    type="date"
++                                />
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    {canViewPayroll && (
++                        <Card>
++                            <CardHeader>
++                                <CardTitle className="flex items-center gap-2">
++                                    <Banknote className="size-5 text-muted-foreground" />
++                                    Gaji & Caruman
++                                </CardTitle>
++                                <CardDescription>
++                                    Maklumat sensitif untuk pengguna dengan
++                                    akses payroll sahaja.
++                                </CardDescription>
++                            </CardHeader>
++                            <CardContent className="grid gap-3 sm:grid-cols-2">
++                                <InformationItem
++                                    icon={Banknote}
++                                    label="Gaji Asas"
++                                    value={jawatan.gaji_asas}
++                                    type="currency"
++                                />
++                                <InformationItem
++                                    icon={Landmark}
++                                    label="Bank"
++                                    value={jawatan.bank}
++                                />
++                                <InformationItem
++                                    icon={CreditCard}
++                                    label="No. Akaun"
++                                    value={jawatan.no_akaun}
++                                />
++                                <InformationItem
++                                    icon={IdCard}
++                                    label="No. KWSP"
++                                    value={jawatan.no_kwsp}
++                                />
++                                <InformationItem
++                                    icon={ShieldCheck}
++                                    label="No. PERKESO"
++                                    value={jawatan.no_perkeso}
++                                />
++                            </CardContent>
++                        </Card>
++                    )}
++                </div>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <History className="size-5 text-muted-foreground" />
++                            Sejarah Jawatan Pekerja
++                        </CardTitle>
++                        <CardDescription>
++                            Semua penempatan direkodkan tanpa menimpa rekod
++                            terdahulu.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="p-0">
++                        <div className="hidden overflow-x-auto md:block">
++                            <Table>
++                                <TableHeader className="bg-muted/60">
++                                    <TableRow>
++                                        <TableHead>Jawatan</TableHead>
++                                        <TableHead>Jabatan</TableHead>
++                                        <TableHead>Berkuat Kuasa</TableHead>
++                                        <TableHead>Tamat</TableHead>
++                                        {canViewPayroll && (
++                                            <TableHead className="text-right">
++                                                Gaji Asas
++                                            </TableHead>
++                                        )}
++                                        <TableHead>Status</TableHead>
++                                        <TableHead className="text-right">
++                                            Papar
++                                        </TableHead>
++                                    </TableRow>
++                                </TableHeader>
++                                <TableBody>
++                                    {history.map((position) => (
++                                        <TableRow key={position.id}>
++                                            <TableCell className="font-medium">
++                                                {displayValue(position.jawatan)}
++                                            </TableCell>
++                                            <TableCell>
++                                                {displayValue(position.jabatan)}
++                                            </TableCell>
++                                            <TableCell>
++                                                {formatDate(
++                                                    position.tarikh_berkuat_kuasa,
++                                                )}
++                                            </TableCell>
++                                            <TableCell>
++                                                {Number(position.aktif) === 1
++                                                    ? '-'
++                                                    : formatDate(
++                                                          position.tarikh_tamat,
++                                                      )}
++                                            </TableCell>
++                                            {canViewPayroll && (
++                                                <TableCell className="text-right tabular-nums">
++                                                    {formatCurrency(
++                                                        position.gaji_asas,
++                                                    )}
++                                                </TableCell>
++                                            )}
++                                            <TableCell>
++                                                <Badge
++                                                    variant={
++                                                        Number(
++                                                            position.aktif,
++                                                        ) === 1
++                                                            ? 'secondary'
++                                                            : 'outline'
++                                                    }
++                                                >
++                                                    {Number(position.aktif) ===
++                                                    1
++                                                        ? 'Aktif'
++                                                        : 'Sejarah'}
++                                                </Badge>
++                                            </TableCell>
++                                            <TableCell className="text-right">
++                                                <Button
++                                                    asChild
++                                                    variant="ghost"
++                                                    size="sm"
++                                                >
++                                                    <Link
++                                                        href={`/jawatan/${position.id}`}
++                                                    >
++                                                        Papar
++                                                    </Link>
++                                                </Button>
++                                            </TableCell>
++                                        </TableRow>
++                                    ))}
++                                </TableBody>
++                            </Table>
++                        </div>
++
++                        <div className="grid gap-3 p-4 md:hidden">
++                            {history.map((position) => (
++                                <div
++                                    key={position.id}
++                                    className="rounded-lg border p-4"
++                                >
++                                    <div className="flex items-start justify-between gap-3">
++                                        <div>
++                                            <p className="font-medium">
++                                                {displayValue(position.jawatan)}
++                                            </p>
++                                            <p className="text-sm text-muted-foreground">
++                                                {displayValue(position.jabatan)}
++                                            </p>
++                                        </div>
++                                        <Badge
++                                            variant={
++                                                Number(position.aktif) === 1
++                                                    ? 'secondary'
++                                                    : 'outline'
++                                            }
++                                        >
++                                            {Number(position.aktif) === 1
++                                                ? 'Aktif'
++                                                : 'Sejarah'}
++                                        </Badge>
++                                    </div>
++                                    <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
++                                        <div>
++                                            <p className="text-muted-foreground">
++                                                Berkuat Kuasa
++                                            </p>
++                                            <p>
++                                                {formatDate(
++                                                    position.tarikh_berkuat_kuasa,
++                                                )}
++                                            </p>
++                                        </div>
++                                        <div>
++                                            <p className="text-muted-foreground">
++                                                Tamat
++                                            </p>
++                                            <p>
++                                                {Number(position.aktif) === 1
++                                                    ? '-'
++                                                    : formatDate(
++                                                          position.tarikh_tamat,
++                                                      )}
++                                            </p>
++                                        </div>
++                                    </div>
++                                    <Button
++                                        asChild
++                                        variant="outline"
++                                        size="sm"
++                                        className="mt-3 w-full"
++                                    >
++                                        <Link href={`/jawatan/${position.id}`}>
++                                            Papar Rekod
++                                        </Link>
++                                    </Button>
++                                </div>
++                            ))}
++                        </div>
++                    </CardContent>
++                </Card>
++            </div>
++        </>
++    );
++}
++
++PositionShow.layout = {
++    breadcrumbs: [
++        { title: 'Jawatan', href: '/jawatan' },
++        { title: 'Butiran Jawatan', href: '#' },
++    ],
++};
+diff --git a/resources/js/pages/MaklumatJawatan/partials/jawatan-form.tsx b/resources/js/pages/MaklumatJawatan/partials/jawatan-form.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b4e0b30a33bf4a8915bff3e4dcf90ff4956a123
+--- /dev/null
++++ b/resources/js/pages/MaklumatJawatan/partials/jawatan-form.tsx
+@@ -0,0 +1,574 @@
++import { Link, useForm } from '@inertiajs/react';
++import {
++    AlertCircle,
++    Banknote,
++    BriefcaseBusiness,
++    Building2,
++    CalendarDays,
++    Database,
++    Landmark,
++    Save,
++    UserRound,
++} from 'lucide-react';
++import { useState } from 'react';
++import type { FormEvent, ReactNode } from 'react';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++} from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++
++export type ReferenceOption = {
++    value: string;
++    label: string;
++};
++
++export type PositionFormOptions = {
++    employees?: ReferenceOption[];
++    departments: ReferenceOption[];
++    banks: ReferenceOption[];
++};
++
++export type PositionFormData = {
++    id_pekerja: string;
++    date_lapordiri: string;
++    date_tempohcubaan: string;
++    id_department: string;
++    jawatan: string;
++    salary: string;
++    id_bank: string;
++    noakaun: string;
++    noepf: string;
++    nosocso: string;
++    jumlahcuti: string;
++};
++
++type PositionFormProps = {
++    mode: 'create' | 'edit';
++    options: PositionFormOptions;
++    initialValues: PositionFormData;
++    positionId?: number;
++    employeeLabel?: string;
++};
++
++type FieldProps = {
++    htmlFor: string;
++    label: string;
++    required?: boolean;
++    error?: string;
++    description?: string;
++    children: ReactNode;
++};
++
++const emptyOption = '__none__';
++
++function Field({
++    htmlFor,
++    label,
++    required = false,
++    error,
++    description,
++    children,
++}: FieldProps) {
++    return (
++        <div className="grid gap-2">
++            <Label htmlFor={htmlFor}>
++                {label}
++                {required && <span className="ml-1 text-destructive">*</span>}
++            </Label>
++            {children}
++            {description && (
++                <p className="text-xs text-muted-foreground">{description}</p>
++            )}
++            <InputError message={error} />
++        </div>
++    );
++}
++
++function ReferenceSelect({
++    id,
++    label,
++    value,
++    options,
++    onChange,
++    error,
++    required = false,
++    disabled = false,
++}: {
++    id: keyof PositionFormData;
++    label: string;
++    value: string;
++    options: ReferenceOption[];
++    onChange: (value: string) => void;
++    error?: string;
++    required?: boolean;
++    disabled?: boolean;
++}) {
++    return (
++        <Field htmlFor={id} label={label} required={required} error={error}>
++            <Select
++                value={value || emptyOption}
++                onValueChange={(selected) =>
++                    onChange(selected === emptyOption ? '' : selected)
++                }
++                disabled={disabled}
++                required={required}
++            >
++                <SelectTrigger
++                    id={id}
++                    className="w-full"
++                    aria-invalid={Boolean(error)}
++                >
++                    <SelectValue placeholder={`Pilih ${label.toLowerCase()}`} />
++                </SelectTrigger>
++                <SelectContent align="start">
++                    {!required && (
++                        <SelectItem value={emptyOption}>
++                            Tidak dinyatakan
++                        </SelectItem>
++                    )}
++                    {options.map((option) => (
++                        <SelectItem key={option.value} value={option.value}>
++                            {option.label}
++                        </SelectItem>
++                    ))}
++                </SelectContent>
++            </Select>
++        </Field>
++    );
++}
++
++export default function JawatanForm({
++    mode,
++    options,
++    initialValues,
++    positionId,
++    employeeLabel,
++}: PositionFormProps) {
++    const [confirmationOpen, setConfirmationOpen] = useState(false);
++    const { data, setData, post, put, processing, errors } =
++        useForm<PositionFormData>(initialValues);
++    const isEditing = mode === 'edit';
++
++    const requestConfirmation = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        setConfirmationOpen(true);
++    };
++
++    const submit = () => {
++        const requestOptions = {
++            preserveScroll: true,
++            onError: () => setConfirmationOpen(false),
++        };
++
++        if (isEditing && positionId !== undefined) {
++            put(`/jawatan/${positionId}`, requestOptions);
++
++            return;
++        }
++
++        post('/jawatan', requestOptions);
++    };
++
++    return (
++        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                <div className="space-y-2">
++                    <div>
++                        <h1 className="text-2xl font-semibold tracking-tight">
++                            {isEditing
++                                ? 'Tukar Jawatan / Penempatan'
++                                : 'Tambah Penempatan Pekerja'}
++                        </h1>
++                        <p className="mt-1 text-sm text-muted-foreground">
++                            {isEditing
++                                ? 'Rekod semasa akan dikekalkan dalam sejarah dan penempatan baharu akan diwujudkan.'
++                                : 'Tetapkan jawatan, jabatan dan tarikh berkuat kuasa bagi pekerja.'}
++                        </p>
++                    </div>
++                    <Badge variant="secondary" className="gap-1.5 font-normal">
++                        <Database className="size-3.5" />
++                        Simpanan data: db_spp
++                    </Badge>
++                </div>
++
++                <Button asChild variant="outline">
++                    <Link
++                        href={
++                            isEditing && positionId !== undefined
++                                ? `/jawatan/${positionId}`
++                                : '/jawatan'
++                        }
++                    >
++                        Batal
++                    </Link>
++                </Button>
++            </div>
++
++            <Alert>
++                <BriefcaseBusiness />
++                <AlertTitle>Sejarah jawatan dilindungi</AlertTitle>
++                <AlertDescription>
++                    Jika pekerja sudah mempunyai jawatan aktif, rekod tersebut
++                    akan ditamatkan secara automatik dan disimpan sebagai
++                    sejarah. Hanya penempatan baharu akan kekal aktif.
++                </AlertDescription>
++            </Alert>
++
++            {Object.keys(errors).length > 0 && (
++                <Alert variant="destructive">
++                    <AlertCircle />
++                    <AlertTitle>Maklumat belum dapat disimpan</AlertTitle>
++                    <AlertDescription>
++                        Sila semak semula medan yang ditandakan di bawah.
++                    </AlertDescription>
++                </Alert>
++            )}
++
++            <form onSubmit={requestConfirmation} className="space-y-6">
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <Building2 className="size-5 text-muted-foreground" />
++                            Maklumat Penempatan
++                        </CardTitle>
++                        <CardDescription>
++                            Medan bertanda * wajib dilengkapkan.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="grid gap-5 md:grid-cols-2">
++                        {isEditing ? (
++                            <Field
++                                htmlFor="employee"
++                                label="Pekerja"
++                                required
++                                error={errors.id_pekerja}
++                            >
++                                <div className="relative">
++                                    <UserRound className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                    <Input
++                                        id="employee"
++                                        value={
++                                            employeeLabel ||
++                                            `Pekerja #${data.id_pekerja}`
++                                        }
++                                        className="pl-9"
++                                        disabled
++                                    />
++                                </div>
++                            </Field>
++                        ) : (
++                            <ReferenceSelect
++                                id="id_pekerja"
++                                label="Pekerja"
++                                value={data.id_pekerja}
++                                options={options.employees ?? []}
++                                onChange={(value) =>
++                                    setData('id_pekerja', value)
++                                }
++                                error={errors.id_pekerja}
++                                required
++                                disabled={processing}
++                            />
++                        )}
++
++                        <ReferenceSelect
++                            id="id_department"
++                            label="Jabatan / Unit"
++                            value={data.id_department}
++                            options={options.departments}
++                            onChange={(value) =>
++                                setData('id_department', value)
++                            }
++                            error={errors.id_department}
++                            required
++                            disabled={processing}
++                        />
++
++                        <Field
++                            htmlFor="jawatan"
++                            label="Nama Jawatan"
++                            required
++                            error={errors.jawatan}
++                        >
++                            <div className="relative">
++                                <BriefcaseBusiness className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                <Input
++                                    id="jawatan"
++                                    value={data.jawatan}
++                                    onChange={(event) =>
++                                        setData('jawatan', event.target.value)
++                                    }
++                                    className="pl-9"
++                                    maxLength={100}
++                                    required
++                                    disabled={processing}
++                                    placeholder="Contoh: Eksekutif Sumber Manusia"
++                                    aria-invalid={Boolean(errors.jawatan)}
++                                />
++                            </div>
++                        </Field>
++
++                        <Field
++                            htmlFor="date_lapordiri"
++                            label="Tarikh Berkuat Kuasa / Lapor Diri"
++                            required
++                            error={errors.date_lapordiri}
++                        >
++                            <Input
++                                id="date_lapordiri"
++                                type="date"
++                                value={data.date_lapordiri}
++                                onChange={(event) =>
++                                    setData(
++                                        'date_lapordiri',
++                                        event.target.value,
++                                    )
++                                }
++                                required
++                                disabled={processing}
++                                aria-invalid={Boolean(errors.date_lapordiri)}
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="date_tempohcubaan"
++                            label="Tarikh Tamat Tempoh Percubaan"
++                            error={errors.date_tempohcubaan}
++                            description="Kosongkan jika tidak berkenaan."
++                        >
++                            <Input
++                                id="date_tempohcubaan"
++                                type="date"
++                                value={data.date_tempohcubaan}
++                                min={data.date_lapordiri || undefined}
++                                onChange={(event) =>
++                                    setData(
++                                        'date_tempohcubaan',
++                                        event.target.value,
++                                    )
++                                }
++                                disabled={processing}
++                                aria-invalid={Boolean(errors.date_tempohcubaan)}
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="jumlahcuti"
++                            label="Kelayakan Cuti Tahunan"
++                            error={errors.jumlahcuti}
++                            description="Masukkan bilangan hari, maksimum 365."
++                        >
++                            <div className="relative">
++                                <CalendarDays className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                <Input
++                                    id="jumlahcuti"
++                                    type="number"
++                                    inputMode="numeric"
++                                    min="0"
++                                    max="365"
++                                    value={data.jumlahcuti}
++                                    onChange={(event) =>
++                                        setData(
++                                            'jumlahcuti',
++                                            event.target.value,
++                                        )
++                                    }
++                                    className="pl-9"
++                                    disabled={processing}
++                                    placeholder="Contoh: 20"
++                                    aria-invalid={Boolean(errors.jumlahcuti)}
++                                />
++                            </div>
++                        </Field>
++                    </CardContent>
++                </Card>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <Banknote className="size-5 text-muted-foreground" />
++                            Gaji & Maklumat Caruman
++                        </CardTitle>
++                        <CardDescription>
++                            Maklumat sensitif ini hanya boleh diakses oleh role
++                            yang mempunyai kebenaran payroll.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="grid gap-5 md:grid-cols-2">
++                        <Field
++                            htmlFor="salary"
++                            label="Gaji Asas (RM)"
++                            error={errors.salary}
++                        >
++                            <div className="relative">
++                                <Banknote className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                <Input
++                                    id="salary"
++                                    type="number"
++                                    inputMode="decimal"
++                                    min="0"
++                                    max="99999999.99"
++                                    step="0.01"
++                                    value={data.salary}
++                                    onChange={(event) =>
++                                        setData('salary', event.target.value)
++                                    }
++                                    className="pl-9"
++                                    disabled={processing}
++                                    placeholder="Contoh: 3500.00"
++                                    aria-invalid={Boolean(errors.salary)}
++                                />
++                            </div>
++                        </Field>
++
++                        <ReferenceSelect
++                            id="id_bank"
++                            label="Bank"
++                            value={data.id_bank}
++                            options={options.banks}
++                            onChange={(value) => setData('id_bank', value)}
++                            error={errors.id_bank}
++                            disabled={processing}
++                        />
++
++                        <Field
++                            htmlFor="noakaun"
++                            label="No. Akaun Bank"
++                            error={errors.noakaun}
++                        >
++                            <div className="relative">
++                                <Landmark className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                <Input
++                                    id="noakaun"
++                                    value={data.noakaun}
++                                    onChange={(event) =>
++                                        setData('noakaun', event.target.value)
++                                    }
++                                    className="pl-9"
++                                    maxLength={20}
++                                    disabled={processing}
++                                    autoComplete="off"
++                                    aria-invalid={Boolean(errors.noakaun)}
++                                />
++                            </div>
++                        </Field>
++
++                        <Field
++                            htmlFor="noepf"
++                            label="No. KWSP"
++                            error={errors.noepf}
++                        >
++                            <Input
++                                id="noepf"
++                                value={data.noepf}
++                                onChange={(event) =>
++                                    setData('noepf', event.target.value)
++                                }
++                                maxLength={20}
++                                disabled={processing}
++                                autoComplete="off"
++                                aria-invalid={Boolean(errors.noepf)}
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="nosocso"
++                            label="No. PERKESO"
++                            error={errors.nosocso}
++                        >
++                            <Input
++                                id="nosocso"
++                                value={data.nosocso}
++                                onChange={(event) =>
++                                    setData('nosocso', event.target.value)
++                                }
++                                maxLength={20}
++                                disabled={processing}
++                                autoComplete="off"
++                                aria-invalid={Boolean(errors.nosocso)}
++                            />
++                        </Field>
++                    </CardContent>
++                </Card>
++
++                <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
++                    <Button asChild type="button" variant="outline">
++                        <Link
++                            href={
++                                isEditing && positionId !== undefined
++                                    ? `/jawatan/${positionId}`
++                                    : '/jawatan'
++                            }
++                        >
++                            Batal
++                        </Link>
++                    </Button>
++                    <Button type="submit" disabled={processing}>
++                        <Save />
++                        {isEditing
++                            ? 'Semak Pertukaran'
++                            : 'Semak & Simpan Penempatan'}
++                    </Button>
++                </div>
++            </form>
++
++            <Dialog open={confirmationOpen} onOpenChange={setConfirmationOpen}>
++                <DialogContent>
++                    <DialogHeader>
++                        <DialogTitle>
++                            {isEditing
++                                ? 'Sahkan pertukaran jawatan?'
++                                : 'Sahkan penempatan pekerja?'}
++                        </DialogTitle>
++                        <DialogDescription>
++                            {isEditing
++                                ? 'Rekod jawatan semasa akan dipindahkan ke sejarah dan satu rekod penempatan baharu akan diwujudkan.'
++                                : 'Jika pekerja mempunyai jawatan aktif, rekod lama akan dipindahkan ke sejarah sebelum penempatan ini diaktifkan.'}{' '}
++                            Tindakan ini akan direkodkan dalam Audit Trail.
++                        </DialogDescription>
++                    </DialogHeader>
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button variant="outline" disabled={processing}>
++                                Semak Semula
++                            </Button>
++                        </DialogClose>
++                        <Button
++                            type="button"
++                            onClick={submit}
++                            disabled={processing}
++                        >
++                            <Save />
++                            {processing ? 'Sedang disimpan...' : 'Ya, Simpan'}
++                        </Button>
++                    </DialogFooter>
++                </DialogContent>
++            </Dialog>
++        </div>
++    );
++}
+diff --git a/resources/js/pages/MaklumatPekerja/Show.tsx b/resources/js/pages/MaklumatPekerja/Show.tsx
+index 45d49a0cdbf2163b26ec04bea936737bcfafa611..0b577f1965692b47e76bddb210dcaadb47eb5380 100644
+--- a/resources/js/pages/MaklumatPekerja/Show.tsx
++++ b/resources/js/pages/MaklumatPekerja/Show.tsx
+@@ -13,6 +13,7 @@ import {
+     Flag,
+     Globe2,
+     Heart,
++    History,
+     IdCard,
+     Landmark,
+     Mail,
+@@ -66,6 +67,8 @@ type Employment = {
+     no_kwsp?: string | null;
+     no_perkeso?: string | null;
+     kelayakan_cuti: string | null;
++    aktif?: number;
++    tarikh_tamat?: string | null;
+ };
+ 
+ type Statistics = {
+@@ -113,6 +116,7 @@ type PayrollRecord = {
+ type EmployeeProfileProps = {
+     pekerja: Employee;
+     jawatan: Employment | null;
++    jawatanHistory: Employment[];
+     statistics: Statistics;
+     recentAttendance: AttendanceRecord[];
+     recentLeave: LeaveRecord[];
+@@ -120,6 +124,7 @@ type EmployeeProfileProps = {
+     recentPayroll: PayrollRecord[];
+     canViewPayroll: boolean;
+     canManage: boolean;
++    canManagePositions: boolean;
+ };
+ 
+ type InformationItemProps = {
+@@ -281,6 +286,7 @@ function EmptyRecords({ label }: { label: string }) {
+ export default function EmployeeProfile({
+     pekerja,
+     jawatan,
++    jawatanHistory,
+     statistics,
+     recentAttendance,
+     recentLeave,
+@@ -288,6 +294,7 @@ export default function EmployeeProfile({
+     recentPayroll,
+     canViewPayroll,
+     canManage,
++    canManagePositions,
+ }: EmployeeProfileProps) {
+     const employeeSearch = encodeURIComponent(
+         pekerja.employee_id || pekerja.nama || '',
+@@ -305,14 +312,32 @@ export default function EmployeeProfile({
+                             Kembali ke Senarai Pekerja
+                         </Link>
+                     </Button>
+-                    {canManage && (
+-                        <Button asChild size="sm">
+-                            <Link href={`/pekerja/${pekerja.id}/edit`}>
+-                                <Pencil />
+-                                Edit Pekerja
+-                            </Link>
+-                        </Button>
+-                    )}
++                    <div className="flex flex-col gap-2 sm:flex-row">
++                        {canManagePositions && (
++                            <Button asChild variant="outline" size="sm">
++                                <Link
++                                    href={
++                                        jawatan
++                                            ? `/jawatan/${jawatan.id}/edit`
++                                            : `/jawatan/create?employee_id=${pekerja.id}`
++                                    }
++                                >
++                                    <BriefcaseBusiness />
++                                    {jawatan
++                                        ? 'Tukar Jawatan'
++                                        : 'Tetapkan Jawatan'}
++                                </Link>
++                            </Button>
++                        )}
++                        {canManage && (
++                            <Button asChild size="sm">
++                                <Link href={`/pekerja/${pekerja.id}/edit`}>
++                                    <Pencil />
++                                    Edit Pekerja
++                                </Link>
++                            </Button>
++                        )}
++                    </div>
+                 </div>
+ 
+                 <Card className="overflow-hidden">
+@@ -408,6 +433,82 @@ export default function EmployeeProfile({
+                         })}
+                 </div>
+ 
++                <Card>
++                    <CardHeader className="flex-row items-start justify-between">
++                        <div className="space-y-1.5">
++                            <CardTitle className="flex items-center gap-2">
++                                <History className="size-5 text-muted-foreground" />
++                                Sejarah Jawatan
++                            </CardTitle>
++                            <CardDescription>
++                                Rekod penempatan semasa dan terdahulu tanpa
++                                menimpa sejarah.
++                            </CardDescription>
++                        </div>
++                        <Link
++                            href={`/jawatan?search=${employeeSearch}`}
++                            className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                        >
++                            Lihat semua
++                        </Link>
++                    </CardHeader>
++                    <CardContent className="space-y-3">
++                        {jawatanHistory.length > 0 ? (
++                            jawatanHistory.map((record) => (
++                                <div
++                                    key={record.id}
++                                    className="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
++                                >
++                                    <div className="min-w-0">
++                                        <div className="flex flex-wrap items-center gap-2">
++                                            <p className="font-medium">
++                                                {displayValue(record.jawatan)}
++                                            </p>
++                                            <Badge
++                                                variant={
++                                                    Number(record.aktif) === 1
++                                                        ? 'secondary'
++                                                        : 'outline'
++                                                }
++                                            >
++                                                {Number(record.aktif) === 1
++                                                    ? 'Aktif'
++                                                    : 'Sejarah'}
++                                            </Badge>
++                                        </div>
++                                        <p className="mt-1 text-sm text-muted-foreground">
++                                            {displayValue(record.jabatan)} ·{' '}
++                                            {formatDate(
++                                                record.tarikh_lapor_diri,
++                                            )}
++                                            {Number(record.aktif) !== 1
++                                                ? ` hingga ${formatDate(
++                                                      record.tarikh_tamat ??
++                                                          null,
++                                                  )}`
++                                                : ''}
++                                        </p>
++                                        {canViewPayroll && (
++                                            <p className="mt-1 text-sm font-medium">
++                                                {formatCurrency(
++                                                    record.gaji_asas ?? null,
++                                                )}
++                                            </p>
++                                        )}
++                                    </div>
++                                    <Button asChild variant="outline" size="sm">
++                                        <Link href={`/jawatan/${record.id}`}>
++                                            Papar Rekod
++                                        </Link>
++                                    </Button>
++                                </div>
++                            ))
++                        ) : (
++                            <EmptyRecords label="sejarah jawatan" />
++                        )}
++                    </CardContent>
++                </Card>
++
+                 <div className="grid gap-6 xl:grid-cols-2">
+                     <Card>
+                         <CardHeader>
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index ce87da675b6344e63eaff9eb4e95fc6d5eca4622..e3b16fa5f98e58ccc7fd32e12e5850b44ae2ae8c 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -84,6 +84,7 @@ const permissionLabels: Record<Permission, string> = {
+     'employees.view': 'Pekerja',
+     'employees.manage': 'Urus Pekerja',
+     'positions.view': 'Jawatan',
++    'positions.manage': 'Urus Jawatan',
+     'attendance.view': 'Kehadiran',
+     'leave.view': 'Cuti',
+     'overtime.view': 'Kerja Lebih Masa',
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index ed1185c0cb377d08404a8fdba0f4cd453094f1e2..71f46c0a5cfc5ab60acd47b2750857ff82e7fff9 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -5,6 +5,7 @@ export type Permission =
+     | 'employees.view'
+     | 'employees.manage'
+     | 'positions.view'
++    | 'positions.manage'
+     | 'attendance.view'
+     | 'leave.view'
+     | 'overtime.view'
+diff --git a/routes/web.php b/routes/web.php
+index 1c9abebbf470d6e042b7cb888f67e4990fc6ee94..ae9c4c24e0d39bc76e3c41b553f5cd2276500c27 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -41,9 +41,29 @@
+         });
+     });
+ 
+-    Route::get('jawatan', [MaklumatJawatanController::class, 'index'])
+-        ->middleware('permission:positions.view')
+-        ->name('jawatan.index');
++    Route::middleware('permission:positions.view')->group(function () {
++        Route::get('jawatan', [MaklumatJawatanController::class, 'index'])
++            ->name('jawatan.index');
++        Route::get('jawatan/create', [MaklumatJawatanController::class, 'create'])
++            ->middleware('permission:positions.manage')
++            ->name('jawatan.create');
++        Route::get('jawatan/{id}', [MaklumatJawatanController::class, 'show'])
++            ->whereNumber('id')
++            ->name('jawatan.show');
++        Route::middleware('permission:positions.manage')->group(function () {
++            Route::post('jawatan', [MaklumatJawatanController::class, 'store'])
++                ->name('jawatan.store');
++            Route::get('jawatan/{id}/edit', [MaklumatJawatanController::class, 'edit'])
++                ->whereNumber('id')
++                ->name('jawatan.edit');
++            Route::put('jawatan/{id}', [MaklumatJawatanController::class, 'update'])
++                ->whereNumber('id')
++                ->name('jawatan.update');
++            Route::delete('jawatan/{id}', [MaklumatJawatanController::class, 'destroy'])
++                ->whereNumber('id')
++                ->name('jawatan.destroy');
++        });
++    });
+     Route::get('kehadiran', [MaklumatKehadiranController::class, 'index'])
+         ->middleware('permission:attendance.view')
+         ->name('kehadiran.index');
+diff --git a/tests/Feature/AuditTrailTest.php b/tests/Feature/AuditTrailTest.php
+index 5e439da58522d5a32970863ed961537fa4ade057..ad0193f4ca38bd2d749aec9f352381dde2ffc499 100644
+--- a/tests/Feature/AuditTrailTest.php
++++ b/tests/Feature/AuditTrailTest.php
+@@ -53,6 +53,22 @@
+         'description' => 'Aktif',
+         'rcd_enable' => 1,
+     ]);
++
++    foreach (['xdepartment', 'xbank'] as $tableName) {
++        Schema::connection('ibco')->create($tableName, function (Blueprint $table) {
++            $table->increments('id');
++            $table->string('description');
++            $table->boolean('rcd_enable')->default(true);
++        });
++    }
++
++    Schema::connection('ibco')->create('maklumatjawatan', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('id_pekerja', 4)->nullable();
++        $table->string('jawatan', 100)->nullable();
++        $table->string('id_department', 2)->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
+ });
+ 
+ afterEach(function () {
+@@ -144,6 +160,47 @@ function createAuditEmployee(array $overrides = []): int
+             ->where('audits.data.0.user.id', $hrAdmin->id));
+ });
+ 
++test('position changes appear in the audit trail with the related employee', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = createAuditEmployee(['rcd_enable' => 1]);
++
++    DB::connection('ibco')->table('xdepartment')->insert([
++        'id' => 1,
++        'description' => 'Teknologi Maklumat',
++        'rcd_enable' => 1,
++    ]);
++    $positionId = DB::connection('ibco')->table('maklumatjawatan')->insertGetId([
++        'id_pekerja' => $employeeId,
++        'jawatan' => 'Pengurus IT',
++        'id_department' => 1,
++        'rcd_enable' => 1,
++    ]);
++
++    AuditLog::query()->create([
++        'user_id' => $hrAdmin->id,
++        'action' => 'position.changed',
++        'auditable_type' => 'maklumatjawatan',
++        'auditable_id' => (string) $positionId,
++        'old_values' => [
++            'jawatan' => 'Eksekutif IT',
++            'id_department' => 1,
++        ],
++        'new_values' => [
++            'jawatan' => 'Pengurus IT',
++            'id_department' => 1,
++        ],
++    ]);
++
++    $this->actingAs($hrAdmin)
++        ->get(route('audit.index', ['action' => 'position.changed']))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->has('audits.data', 1)
++            ->where('audits.data.0.action', 'position.changed')
++            ->where('audits.data.0.employee.id', $employeeId)
++            ->where('audits.data.0.new_values.id_department', 'Teknologi Maklumat'));
++});
++
+ test('hr admin can reactivate an employee and the action is audited', function () {
+     $hrAdmin = User::factory()->hrAdmin()->create([
+         'name' => 'Pentadbir HR Panjang',
+diff --git a/tests/Feature/JawatanCrudTest.php b/tests/Feature/JawatanCrudTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..58de51aea5eb93184bf66c5a938a81e0b4b4ccb1
+--- /dev/null
++++ b/tests/Feature/JawatanCrudTest.php
+@@ -0,0 +1,291 @@
++<?php
++
++use App\Models\User;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('employeeID', 15)->nullable();
++        $table->string('nama')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    Schema::connection('ibco')->create('xdepartment', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('description');
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    Schema::connection('ibco')->create('xbank', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('description');
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    Schema::connection('ibco')->create('maklumatjawatan', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('id_pekerja', 4)->nullable();
++        $table->date('date_lapordiri')->nullable();
++        $table->date('date_tempohcubaan')->nullable();
++        $table->string('id_department', 1)->nullable();
++        $table->string('jawatan', 100)->nullable();
++        $table->decimal('salary', 10, 2)->nullable();
++        $table->string('id_bank', 4)->nullable();
++        $table->string('noakaun', 20)->nullable();
++        $table->string('noepf', 20)->nullable();
++        $table->string('nosocso', 20)->nullable();
++        $table->string('jumlahcuti', 20)->nullable();
++        $table->boolean('rcd_enable')->default(true);
++        $table->string('crt_by', 12)->nullable();
++        $table->date('crt_dt')->nullable();
++        $table->string('mdf_by', 12)->nullable();
++        $table->date('mdf_dt')->nullable();
++    });
++
++    DB::connection('ibco')->table('xdepartment')->insert([
++        ['id' => 1, 'description' => 'Sumber Manusia', 'rcd_enable' => 1],
++        ['id' => 2, 'description' => 'Teknologi Maklumat', 'rcd_enable' => 1],
++    ]);
++    DB::connection('ibco')->table('xbank')->insert([
++        'id' => 1,
++        'description' => 'Maybank',
++        'rcd_enable' => 1,
++    ]);
++});
++
++afterEach(function () {
++    DB::disconnect('ibco');
++});
++
++function createPositionEmployee(array $overrides = []): int
++{
++    return DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => 'EMP001',
++        'nama' => 'Pekerja Jawatan',
++        'rcd_enable' => 1,
++        ...$overrides,
++    ]);
++}
++
++function validPositionPayload(int $employeeId, array $overrides = []): array
++{
++    return [
++        'id_pekerja' => $employeeId,
++        'date_lapordiri' => '2026-07-01',
++        'date_tempohcubaan' => '2026-10-01',
++        'id_department' => 1,
++        'jawatan' => 'Eksekutif HR',
++        'salary' => '3500.00',
++        'id_bank' => 1,
++        'noakaun' => '1234567890',
++        'noepf' => 'EPF001',
++        'nosocso' => 'SOCSO001',
++        'jumlahcuti' => 20,
++        ...$overrides,
++    ];
++}
++
++function createPositionRecord(int $employeeId, array $overrides = []): int
++{
++    return DB::connection('ibco')->table('maklumatjawatan')->insertGetId([
++        ...validPositionPayload($employeeId),
++        'rcd_enable' => 1,
++        'crt_by' => 'Pentadbir',
++        'crt_dt' => '2026-07-01',
++        ...$overrides,
++    ]);
++}
++
++test('hr admin can add a first placement and the action is audited', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create([
++        'name' => 'Pentadbir HR Panjang',
++    ]);
++    $employeeId = createPositionEmployee();
++
++    $response = $this->actingAs($hrAdmin)
++        ->post(route('jawatan.store'), validPositionPayload($employeeId));
++
++    $position = DB::connection('ibco')->table('maklumatjawatan')->first();
++
++    $response->assertRedirect(route('jawatan.show', $position->id));
++
++    $this->assertDatabaseHas('maklumatjawatan', [
++        'id_pekerja' => (string) $employeeId,
++        'jawatan' => 'Eksekutif HR',
++        'rcd_enable' => 1,
++        'crt_by' => 'Pentadbir HR',
++    ], 'ibco');
++
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $hrAdmin->id,
++        'action' => 'position.created',
++        'auditable_type' => 'maklumatjawatan',
++        'auditable_id' => (string) $position->id,
++    ]);
++});
++
++test('adding a new placement archives every active legacy placement', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = createPositionEmployee();
++    createPositionRecord($employeeId, ['jawatan' => 'Jawatan Lama 1']);
++    createPositionRecord($employeeId, ['jawatan' => 'Jawatan Lama 2']);
++
++    $this->actingAs($hrAdmin)
++        ->post(route('jawatan.store'), validPositionPayload($employeeId, [
++            'jawatan' => 'Jawatan Baharu',
++            'date_lapordiri' => '2026-08-01',
++        ]))
++        ->assertRedirect();
++
++    expect(
++        DB::connection('ibco')->table('maklumatjawatan')
++            ->where('id_pekerja', $employeeId)
++            ->where('rcd_enable', 1)
++            ->count(),
++    )->toBe(1);
++
++    $this->assertDatabaseHas('maklumatjawatan', [
++        'id_pekerja' => (string) $employeeId,
++        'jawatan' => 'Jawatan Baharu',
++        'rcd_enable' => 1,
++    ], 'ibco');
++
++    $this->assertDatabaseCount('maklumatjawatan', 3, 'ibco');
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'position.changed',
++        'auditable_type' => 'maklumatjawatan',
++    ]);
++});
++
++test('updating a position creates a new record and preserves the old record', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = createPositionEmployee();
++    $oldPositionId = createPositionRecord($employeeId);
++
++    $this->actingAs($hrAdmin)
++        ->put(route('jawatan.update', $oldPositionId), validPositionPayload(
++            $employeeId,
++            [
++                'jawatan' => 'Pengurus Sumber Manusia',
++                'id_department' => 2,
++                'salary' => '5000.00',
++                'date_lapordiri' => '2026-08-01',
++            ],
++        ))
++        ->assertRedirect();
++
++    $this->assertDatabaseHas('maklumatjawatan', [
++        'id' => $oldPositionId,
++        'jawatan' => 'Eksekutif HR',
++        'rcd_enable' => 0,
++    ], 'ibco');
++    $this->assertDatabaseHas('maklumatjawatan', [
++        'id_pekerja' => (string) $employeeId,
++        'jawatan' => 'Pengurus Sumber Manusia',
++        'id_department' => '2',
++        'rcd_enable' => 1,
++    ], 'ibco');
++    $this->assertDatabaseCount('maklumatjawatan', 2, 'ibco');
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $hrAdmin->id,
++        'action' => 'position.changed',
++        'auditable_type' => 'maklumatjawatan',
++    ]);
++});
++
++test('terminating a position only moves it to history', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeId = createPositionEmployee();
++    $positionId = createPositionRecord($employeeId);
++
++    $this->actingAs($superAdmin)
++        ->delete(route('jawatan.destroy', $positionId))
++        ->assertRedirect(route('jawatan.index', ['status' => 'history']));
++
++    $this->assertDatabaseHas('maklumatjawatan', [
++        'id' => $positionId,
++        'rcd_enable' => 0,
++    ], 'ibco');
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $superAdmin->id,
++        'action' => 'position.terminated',
++        'auditable_id' => (string) $positionId,
++    ]);
++});
++
++test('viewer can view positions but cannot receive payroll fields or manage them', function () {
++    $viewer = User::factory()->create();
++    $employeeId = createPositionEmployee();
++    $positionId = createPositionRecord($employeeId);
++
++    $this->actingAs($viewer)
++        ->get(route('jawatan.index'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('MaklumatJawatan/Index')
++            ->where('canManage', false)
++            ->where('canViewPayroll', false)
++            ->missing('records.data.0.gaji_asas')
++            ->missing('records.data.0.bank'));
++
++    $this->actingAs($viewer)
++        ->get(route('jawatan.show', $positionId))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('MaklumatJawatan/Show')
++            ->missing('jawatan.gaji_asas')
++            ->missing('history.0.gaji_asas'));
++
++    $this->actingAs($viewer)
++        ->get(route('jawatan.create'))
++        ->assertForbidden();
++
++    $this->actingAs($viewer)
++        ->post(route('jawatan.store'), validPositionPayload($employeeId))
++        ->assertForbidden();
++
++    $this->actingAs($viewer)
++        ->delete(route('jawatan.destroy', $positionId))
++        ->assertForbidden();
++});
++
++test('invalid probation date and inactive references are rejected', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = createPositionEmployee();
++
++    DB::connection('ibco')->table('xdepartment')
++        ->where('id', 2)
++        ->update(['rcd_enable' => 0]);
++
++    $this->actingAs($hrAdmin)
++        ->from(route('jawatan.create'))
++        ->post(route('jawatan.store'), validPositionPayload($employeeId, [
++            'date_lapordiri' => '2026-08-01',
++            'date_tempohcubaan' => '2026-07-01',
++            'id_department' => 2,
++        ]))
++        ->assertRedirect(route('jawatan.create'))
++        ->assertSessionHasErrors([
++            'date_tempohcubaan',
++            'id_department',
++        ]);
++
++    $this->assertDatabaseCount('maklumatjawatan', 0, 'ibco');
++    $this->assertDatabaseCount('audit_logs', 0);
++});

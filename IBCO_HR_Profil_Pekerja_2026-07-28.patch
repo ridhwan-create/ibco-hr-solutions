@@ -1,0 +1,1105 @@
+diff --git a/README.md b/README.md
+index d11d99a..1ccd0dc 100644
+--- a/README.md
++++ b/README.md
+@@ -22,6 +22,13 @@ ## Modul index
+ Semua modul index menggunakan carian, pagination dan hanya memaparkan rekod
+ aktif (`rcd_enable = 1`). Paparan ini tidak mengubah rekod dalam database asal.
+ 
++## Profil pekerja
++
++Butang **Papar** pada senarai pekerja membuka profil baca sahaja yang
++menggabungkan maklumat peribadi, jawatan terkini, jabatan, gaji asas, maklumat
++bank serta ringkasan kehadiran, cuti, kerja lebih masa dan payroll. Setiap
++bahagian aktiviti memaparkan sehingga lima rekod terkini daripada `db_spp`.
++
+ ## Sambungan database
+ 
+ Projek menggunakan dua sambungan MySQL. Database utama menyimpan jadual
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index ca8e070..4d783dc 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -45,6 +45,174 @@ public function index(Request $request)
+         ]);
+     }
+ 
++    public function show(int $id)
++    {
++        $connection = DB::connection('ibco');
++
++        $pekerja = $connection->table('maklumatpekerja as p')
++            ->leftJoin('xjantina as jantina', 'p.jantina', '=', 'jantina.id')
++            ->leftJoin('xagama as agama', 'p.agama', '=', 'agama.id')
++            ->leftJoin('xbangsa as bangsa', 'p.bangsa', '=', 'bangsa.id')
++            ->leftJoin('xstatus as status', 'p.status', '=', 'status.id')
++            ->where('p.id', $id)
++            ->where('p.rcd_enable', 1)
++            ->select([
++                'p.id',
++                'p.employeeID as employee_id',
++                'p.nama',
++                'p.nric',
++                'p.alamat',
++                'p.tarikhlahir as tarikh_lahir',
++                'p.kewarganegaraan',
++                'p.notel as no_telefon',
++                'p.email',
++                'jantina.description as jantina',
++                'agama.description as agama',
++                'bangsa.description as bangsa',
++                'p.statusperkahwinan as status_perkahwinan_id',
++                'status.description as status',
++            ])
++            ->first();
++
++        abort_if($pekerja === null, 404);
++
++        $statusPerkahwinan = $pekerja->status_perkahwinan_id
++            ? $connection->table('xstatusperkahwinan')
++                ->where('id', $pekerja->status_perkahwinan_id)
++                ->value('description')
++            : null;
++
++        unset($pekerja->status_perkahwinan_id);
++        $pekerja->status_perkahwinan = $statusPerkahwinan;
++
++        $jawatan = $connection->table('maklumatjawatan as j')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.id_pekerja', $id)
++            ->where('j.rcd_enable', 1)
++            ->select([
++                'j.id',
++                'j.jawatan',
++                'd.description as jabatan',
++                'j.date_lapordiri as tarikh_lapor_diri',
++                'j.date_tempohcubaan as tarikh_tamat_tempoh_cubaan',
++                'j.salary as gaji_asas',
++                'b.description as bank',
++                'j.noakaun as no_akaun',
++                'j.noepf as no_kwsp',
++                'j.nosocso as no_perkeso',
++                'j.jumlahcuti as kelayakan_cuti',
++            ])
++            ->orderByDesc('j.id')
++            ->first();
++
++        $statistics = [
++            'kehadiran' => $connection->table('maklumatkehadiran')
++                ->where('id_pekerja', $id)
++                ->where('rcd_enable', 1)
++                ->count(),
++            'cuti' => $connection->table('maklumatcuti')
++                ->where('id_pekerja', $id)
++                ->where('rcd_enable', 1)
++                ->count(),
++            'kerja_lebih_masa' => $connection->table('maklumatot')
++                ->where('id_pekerja', $id)
++                ->where('rcd_enable', 1)
++                ->count(),
++            'payroll' => $connection->table('maklumatpayroll')
++                ->where(function ($query) use ($id, $pekerja) {
++                    $query->where('id_pekerja', $id)
++                        ->when($pekerja->employee_id, function ($query) use ($pekerja) {
++                            $query->orWhere('employeeID', $pekerja->employee_id);
++                        });
++                })
++                ->where('rcd_enable', 1)
++                ->count(),
++        ];
++
++        $recentAttendance = $connection->table('maklumatkehadiran as k')
++            ->leftJoin('xpilihanjam as pj', 'k.pilihan_jam', '=', 'pj.id')
++            ->where('k.id_pekerja', $id)
++            ->where('k.rcd_enable', 1)
++            ->select([
++                'k.id',
++                'pj.description as pilihan_jam',
++                'k.waktu_masuk',
++                'k.waktu_keluar',
++                'k.catatan',
++            ])
++            ->orderByDesc('k.waktu_masuk')
++            ->orderByDesc('k.id')
++            ->limit(5)
++            ->get();
++
++        $recentLeave = $connection->table('maklumatcuti as c')
++            ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
++            ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
++            ->where('c.id_pekerja', $id)
++            ->where('c.rcd_enable', 1)
++            ->select([
++                'c.id',
++                'sc.description as jenis_cuti',
++                'c.date_mulacuti as tarikh_mula',
++                'c.date_tamatcuti as tarikh_tamat',
++                'c.bil_cutidipohon as bilangan_hari',
++                'st.description as status_permohonan',
++            ])
++            ->orderByDesc('c.date_mulacuti')
++            ->orderByDesc('c.id')
++            ->limit(5)
++            ->get();
++
++        $recentOvertime = $connection->table('maklumatot as ot')
++            ->leftJoin('xjenisot as jot', 'ot.jenis_ot', '=', 'jot.id')
++            ->where('ot.id_pekerja', $id)
++            ->where('ot.rcd_enable', 1)
++            ->select([
++                'ot.id',
++                'jot.description as jenis_ot',
++                'ot.tarikh',
++                'ot.waktu_masuk',
++                'ot.waktu_keluar',
++                'ot.catatan',
++            ])
++            ->orderByDesc('ot.tarikh')
++            ->orderByDesc('ot.id')
++            ->limit(5)
++            ->get();
++
++        $recentPayroll = $connection->table('maklumatpayroll as py')
++            ->where(function ($query) use ($id, $pekerja) {
++                $query->where('py.id_pekerja', $id)
++                    ->when($pekerja->employee_id, function ($query) use ($pekerja) {
++                        $query->orWhere('py.employeeID', $pekerja->employee_id);
++                    });
++            })
++            ->where('py.rcd_enable', 1)
++            ->select([
++                'py.id',
++                'py.pay_period as tempoh_gaji',
++                'py.bulan',
++                'py.no_kwsp',
++                'py.no_socso',
++                'py.no_akaun',
++            ])
++            ->orderByDesc('py.pay_period')
++            ->orderByDesc('py.id')
++            ->limit(5)
++            ->get();
++
++        return Inertia::render('MaklumatPekerja/Show', [
++            'pekerja' => $pekerja,
++            'jawatan' => $jawatan,
++            'statistics' => $statistics,
++            'recentAttendance' => $recentAttendance,
++            'recentLeave' => $recentLeave,
++            'recentOvertime' => $recentOvertime,
++            'recentPayroll' => $recentPayroll,
++        ]);
++    }
++
+     public function create()
+     {
+         return Inertia::render('MaklumatPekerja/Create');
+diff --git a/resources/js/components/records-index.tsx b/resources/js/components/records-index.tsx
+index 82f3df2..796b548 100644
+--- a/resources/js/components/records-index.tsx
++++ b/resources/js/components/records-index.tsx
+@@ -1,8 +1,9 @@
+-import { Head, router } from '@inertiajs/react';
+-import { Database, Search } from 'lucide-react';
++import { Head, Link, router } from '@inertiajs/react';
++import { Database, Eye, Search } from 'lucide-react';
+ import { useEffect, useState } from 'react';
+ import HeadingSmall from '@/components/heading-small';
+ import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+ import { Input } from '@/components/ui/input';
+ import {
+@@ -27,6 +28,7 @@ export type RecordPageConfig = {
+     title: string;
+     description: string;
+     routePath: string;
++    detailRoutePath?: string;
+     searchPlaceholder: string;
+     columns: RecordColumn[];
+ };
+@@ -198,6 +200,11 @@ export default function RecordsIndex({
+                                             {column.label}
+                                         </TableHead>
+                                     ))}
++                                    {config.detailRoutePath && (
++                                        <TableHead className="w-28 text-right">
++                                            Tindakan
++                                        </TableHead>
++                                    )}
+                                 </TableRow>
+                             </TableHeader>
+                             <TableBody>
+@@ -252,12 +259,31 @@ export default function RecordsIndex({
+                                                     )}
+                                                 </TableCell>
+                                             ))}
++                                            {config.detailRoutePath && (
++                                                <TableCell className="text-right">
++                                                    <Button
++                                                        asChild
++                                                        variant="outline"
++                                                        size="sm"
++                                                    >
++                                                        <Link
++                                                            href={`${config.detailRoutePath}/${record.id}`}
++                                                        >
++                                                            <Eye />
++                                                            Papar
++                                                        </Link>
++                                                    </Button>
++                                                </TableCell>
++                                            )}
+                                         </TableRow>
+                                     ))
+                                 ) : (
+                                     <TableRow>
+                                         <TableCell
+-                                            colSpan={config.columns.length + 1}
++                                            colSpan={
++                                                config.columns.length +
++                                                (config.detailRoutePath ? 2 : 1)
++                                            }
+                                             className="h-28 text-center text-muted-foreground"
+                                         >
+                                             Tiada rekod ditemui.
+@@ -295,6 +321,20 @@ export default function RecordsIndex({
+                                             </span>
+                                         </div>
+                                     ))}
++                                    {config.detailRoutePath && (
++                                        <Button
++                                            asChild
++                                            variant="outline"
++                                            className="mt-1 w-full"
++                                        >
++                                            <Link
++                                                href={`${config.detailRoutePath}/${record.id}`}
++                                            >
++                                                <Eye />
++                                                Papar Profil
++                                            </Link>
++                                        </Button>
++                                    )}
+                                 </CardContent>
+                             </Card>
+                         ))
+diff --git a/resources/js/pages/MaklumatPekerja/Index.tsx b/resources/js/pages/MaklumatPekerja/Index.tsx
+index ecd2b5f..e157acd 100644
+--- a/resources/js/pages/MaklumatPekerja/Index.tsx
++++ b/resources/js/pages/MaklumatPekerja/Index.tsx
+@@ -8,6 +8,7 @@ const config: RecordPageConfig = {
+     title: 'Maklumat Pekerja',
+     description: 'Senarai pekerja aktif yang direkodkan dalam sistem.',
+     routePath: '/pekerja',
++    detailRoutePath: '/pekerja',
+     searchPlaceholder: 'Cari nama, ID, NRIC atau e-mel...',
+     columns: [
+         { key: 'employee_id', label: 'ID Pekerja' },
+diff --git a/resources/js/pages/MaklumatPekerja/Show.tsx b/resources/js/pages/MaklumatPekerja/Show.tsx
+new file mode 100644
+index 0000000..ec5ced2
+--- /dev/null
++++ b/resources/js/pages/MaklumatPekerja/Show.tsx
+@@ -0,0 +1,786 @@
++import { Head, Link } from '@inertiajs/react';
++import {
++    ArrowLeft,
++    Banknote,
++    BriefcaseBusiness,
++    Building2,
++    Cake,
++    CalendarCheck2,
++    CalendarDays,
++    Clock3,
++    CreditCard,
++    Database,
++    Flag,
++    Globe2,
++    Heart,
++    IdCard,
++    Landmark,
++    Mail,
++    MapPin,
++    Phone,
++    ShieldCheck,
++    UserRound,
++    UsersRound,
++} from 'lucide-react';
++import type { LucideIcon } from 'lucide-react';
++import { Avatar, AvatarFallback } from '@/components/ui/avatar';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++
++type NullableValue = string | number | null;
++
++type Employee = {
++    id: number;
++    employee_id: string | null;
++    nama: string | null;
++    nric: string | null;
++    alamat: string | null;
++    tarikh_lahir: string | null;
++    kewarganegaraan: string | null;
++    no_telefon: string | null;
++    email: string | null;
++    jantina: string | null;
++    agama: string | null;
++    bangsa: string | null;
++    status_perkahwinan: string | null;
++    status: string | null;
++};
++
++type Employment = {
++    id: number;
++    jawatan: string | null;
++    jabatan: string | null;
++    tarikh_lapor_diri: string | null;
++    tarikh_tamat_tempoh_cubaan: string | null;
++    gaji_asas: string | number | null;
++    bank: string | null;
++    no_akaun: string | null;
++    no_kwsp: string | null;
++    no_perkeso: string | null;
++    kelayakan_cuti: string | null;
++};
++
++type Statistics = {
++    kehadiran: number;
++    cuti: number;
++    kerja_lebih_masa: number;
++    payroll: number;
++};
++
++type AttendanceRecord = {
++    id: number;
++    pilihan_jam: string | null;
++    waktu_masuk: string | null;
++    waktu_keluar: string | null;
++    catatan: string | null;
++};
++
++type LeaveRecord = {
++    id: number;
++    jenis_cuti: string | null;
++    tarikh_mula: string | null;
++    tarikh_tamat: string | null;
++    bilangan_hari: string | null;
++    status_permohonan: string | null;
++};
++
++type OvertimeRecord = {
++    id: number;
++    jenis_ot: string | null;
++    tarikh: string | null;
++    waktu_masuk: string | null;
++    waktu_keluar: string | null;
++    catatan: string | null;
++};
++
++type PayrollRecord = {
++    id: number;
++    tempoh_gaji: string | null;
++    bulan: string | null;
++    no_kwsp: string | null;
++    no_socso: string | null;
++    no_akaun: string | null;
++};
++
++type EmployeeProfileProps = {
++    pekerja: Employee;
++    jawatan: Employment | null;
++    statistics: Statistics;
++    recentAttendance: AttendanceRecord[];
++    recentLeave: LeaveRecord[];
++    recentOvertime: OvertimeRecord[];
++    recentPayroll: PayrollRecord[];
++};
++
++type InformationItemProps = {
++    icon: LucideIcon;
++    label: string;
++    value: NullableValue;
++    fullWidth?: boolean;
++    type?: 'date' | 'currency';
++};
++
++type SummaryCard = {
++    key: keyof Statistics;
++    label: string;
++    description: string;
++    icon: LucideIcon;
++    iconClassName: string;
++};
++
++const summaryCards: SummaryCard[] = [
++    {
++        key: 'kehadiran',
++        label: 'Kehadiran',
++        description: 'Jumlah rekod aktif',
++        icon: CalendarCheck2,
++        iconClassName:
++            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
++    },
++    {
++        key: 'cuti',
++        label: 'Cuti',
++        description: 'Jumlah permohonan',
++        icon: CalendarDays,
++        iconClassName: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
++    },
++    {
++        key: 'kerja_lebih_masa',
++        label: 'Kerja Lebih Masa',
++        description: 'Jumlah rekod OT',
++        icon: Clock3,
++        iconClassName: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
++    },
++    {
++        key: 'payroll',
++        label: 'Payroll',
++        description: 'Jumlah rekod gaji',
++        icon: Banknote,
++        iconClassName: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
++    },
++];
++
++function displayValue(value: NullableValue): string {
++    if (value === null || value === undefined || value === '') {
++        return '-';
++    }
++
++    return String(value);
++}
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const parts = value.slice(0, 10).split('-');
++
++    if (parts.length !== 3) {
++        return value;
++    }
++
++    return `${parts[2]}/${parts[1]}/${parts[0]}`;
++}
++
++function formatDateTime(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const time = value.slice(11, 16);
++
++    return time ? `${formatDate(value)}, ${time}` : formatDate(value);
++}
++
++function formatTime(value: string | null): string {
++    return value ? value.slice(0, 5) : '-';
++}
++
++function formatCurrency(value: NullableValue): string {
++    if (value === null || value === undefined || value === '') {
++        return '-';
++    }
++
++    const amount = Number(value);
++
++    if (Number.isNaN(amount)) {
++        return String(value);
++    }
++
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++    }).format(amount);
++}
++
++function getInitials(name: string | null): string {
++    if (!name) {
++        return 'P';
++    }
++
++    return name
++        .trim()
++        .split(/\s+/)
++        .slice(0, 2)
++        .map((word) => word.charAt(0))
++        .join('')
++        .toUpperCase();
++}
++
++function InformationItem({
++    icon: Icon,
++    label,
++    value,
++    fullWidth = false,
++    type,
++}: InformationItemProps) {
++    const formattedValue =
++        type === 'date'
++            ? formatDate(value === null ? null : String(value))
++            : type === 'currency'
++              ? formatCurrency(value)
++              : displayValue(value);
++
++    return (
++        <div
++            className={`flex gap-3 rounded-lg border bg-muted/20 p-3 ${
++                fullWidth ? 'sm:col-span-2' : ''
++            }`}
++        >
++            <div className="mt-0.5 rounded-md bg-background p-2 text-muted-foreground shadow-sm">
++                <Icon className="size-4" />
++            </div>
++            <div className="min-w-0">
++                <p className="text-xs text-muted-foreground">{label}</p>
++                <p className="mt-1 text-sm font-medium break-words">
++                    {formattedValue}
++                </p>
++            </div>
++        </div>
++    );
++}
++
++function EmptyRecords({ label }: { label: string }) {
++    return (
++        <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
++            Tiada rekod {label} untuk pekerja ini.
++        </div>
++    );
++}
++
++export default function EmployeeProfile({
++    pekerja,
++    jawatan,
++    statistics,
++    recentAttendance,
++    recentLeave,
++    recentOvertime,
++    recentPayroll,
++}: EmployeeProfileProps) {
++    const employeeSearch = encodeURIComponent(
++        pekerja.employee_id || pekerja.nama || '',
++    );
++
++    return (
++        <>
++            <Head title={`Profil ${pekerja.nama || 'Pekerja'}`} />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div>
++                    <Button asChild variant="outline" size="sm">
++                        <Link href="/pekerja">
++                            <ArrowLeft />
++                            Kembali ke Senarai Pekerja
++                        </Link>
++                    </Button>
++                </div>
++
++                <Card className="overflow-hidden">
++                    <div className="h-2 bg-gradient-to-r from-blue-600 via-cyan-500 to-emerald-500" />
++                    <CardContent className="flex flex-col gap-5 pt-1 sm:flex-row sm:items-center sm:justify-between">
++                        <div className="flex min-w-0 flex-col items-start gap-4 sm:flex-row sm:items-center">
++                            <Avatar className="size-20 border-4 border-background shadow">
++                                <AvatarFallback className="bg-primary text-xl font-semibold text-primary-foreground">
++                                    {getInitials(pekerja.nama)}
++                                </AvatarFallback>
++                            </Avatar>
++
++                            <div className="min-w-0 space-y-2">
++                                <div>
++                                    <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
++                                        {displayValue(pekerja.nama)}
++                                    </h1>
++                                    <p className="mt-1 text-sm text-muted-foreground">
++                                        {displayValue(jawatan?.jawatan ?? null)}
++                                        {jawatan?.jabatan
++                                            ? ` · ${jawatan.jabatan}`
++                                            : ''}
++                                    </p>
++                                </div>
++                                <div className="flex flex-wrap gap-2">
++                                    <Badge
++                                        variant="outline"
++                                        className="gap-1.5"
++                                    >
++                                        <IdCard className="size-3.5" />
++                                        {displayValue(pekerja.employee_id)}
++                                    </Badge>
++                                    <Badge
++                                        variant="secondary"
++                                        className="gap-1.5"
++                                    >
++                                        <ShieldCheck className="size-3.5" />
++                                        {displayValue(pekerja.status)}
++                                    </Badge>
++                                </div>
++                            </div>
++                        </div>
++
++                        <div className="flex flex-wrap gap-2 sm:max-w-xs sm:justify-end">
++                            <Badge
++                                variant="secondary"
++                                className="gap-1.5 font-normal"
++                            >
++                                <Database className="size-3.5" />
++                                Sumber data: db_spp
++                            </Badge>
++                            <Badge variant="outline" className="font-normal">
++                                Paparan baca sahaja
++                            </Badge>
++                        </div>
++                    </CardContent>
++                </Card>
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                    {summaryCards.map((item) => {
++                        const Icon = item.icon;
++
++                        return (
++                            <Card key={item.key} className="gap-4">
++                                <CardHeader className="flex-row items-start justify-between">
++                                    <div className="space-y-1.5">
++                                        <CardDescription>
++                                            {item.label}
++                                        </CardDescription>
++                                        <CardTitle className="text-3xl tabular-nums">
++                                            {statistics[
++                                                item.key
++                                            ].toLocaleString('ms-MY')}
++                                        </CardTitle>
++                                    </div>
++                                    <div
++                                        className={`rounded-lg p-2.5 ${item.iconClassName}`}
++                                    >
++                                        <Icon className="size-5" />
++                                    </div>
++                                </CardHeader>
++                                <CardContent className="text-sm text-muted-foreground">
++                                    {item.description}
++                                </CardContent>
++                            </Card>
++                        );
++                    })}
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-2">
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <UserRound className="size-5 text-muted-foreground" />
++                                Maklumat Peribadi
++                            </CardTitle>
++                            <CardDescription>
++                                Identiti dan maklumat hubungan pekerja.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-3 sm:grid-cols-2">
++                            <InformationItem
++                                icon={IdCard}
++                                label="No. Kad Pengenalan"
++                                value={pekerja.nric}
++                            />
++                            <InformationItem
++                                icon={Cake}
++                                label="Tarikh Lahir"
++                                value={pekerja.tarikh_lahir}
++                                type="date"
++                            />
++                            <InformationItem
++                                icon={UserRound}
++                                label="Jantina"
++                                value={pekerja.jantina}
++                            />
++                            <InformationItem
++                                icon={Heart}
++                                label="Status Perkahwinan"
++                                value={pekerja.status_perkahwinan}
++                            />
++                            <InformationItem
++                                icon={Globe2}
++                                label="Agama"
++                                value={pekerja.agama}
++                            />
++                            <InformationItem
++                                icon={UsersRound}
++                                label="Bangsa"
++                                value={pekerja.bangsa}
++                            />
++                            <InformationItem
++                                icon={Flag}
++                                label="Kewarganegaraan"
++                                value={pekerja.kewarganegaraan}
++                            />
++                            <InformationItem
++                                icon={Phone}
++                                label="No. Telefon"
++                                value={pekerja.no_telefon}
++                            />
++                            <InformationItem
++                                icon={Mail}
++                                label="E-mel"
++                                value={pekerja.email}
++                                fullWidth
++                            />
++                            <InformationItem
++                                icon={MapPin}
++                                label="Alamat"
++                                value={pekerja.alamat}
++                                fullWidth
++                            />
++                        </CardContent>
++                    </Card>
++
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <BriefcaseBusiness className="size-5 text-muted-foreground" />
++                                Maklumat Pekerjaan
++                            </CardTitle>
++                            <CardDescription>
++                                Rekod jawatan aktif paling terkini.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent>
++                            {jawatan ? (
++                                <div className="grid gap-3 sm:grid-cols-2">
++                                    <InformationItem
++                                        icon={BriefcaseBusiness}
++                                        label="Jawatan"
++                                        value={jawatan.jawatan}
++                                    />
++                                    <InformationItem
++                                        icon={Building2}
++                                        label="Jabatan"
++                                        value={jawatan.jabatan}
++                                    />
++                                    <InformationItem
++                                        icon={CalendarCheck2}
++                                        label="Tarikh Lapor Diri"
++                                        value={jawatan.tarikh_lapor_diri}
++                                        type="date"
++                                    />
++                                    <InformationItem
++                                        icon={CalendarDays}
++                                        label="Tamat Tempoh Percubaan"
++                                        value={
++                                            jawatan.tarikh_tamat_tempoh_cubaan
++                                        }
++                                        type="date"
++                                    />
++                                    <InformationItem
++                                        icon={Banknote}
++                                        label="Gaji Asas"
++                                        value={jawatan.gaji_asas}
++                                        type="currency"
++                                    />
++                                    <InformationItem
++                                        icon={CalendarDays}
++                                        label="Kelayakan Cuti"
++                                        value={jawatan.kelayakan_cuti}
++                                    />
++                                    <InformationItem
++                                        icon={Landmark}
++                                        label="Bank"
++                                        value={jawatan.bank}
++                                    />
++                                    <InformationItem
++                                        icon={CreditCard}
++                                        label="No. Akaun"
++                                        value={jawatan.no_akaun}
++                                    />
++                                    <InformationItem
++                                        icon={IdCard}
++                                        label="No. KWSP"
++                                        value={jawatan.no_kwsp}
++                                    />
++                                    <InformationItem
++                                        icon={ShieldCheck}
++                                        label="No. PERKESO"
++                                        value={jawatan.no_perkeso}
++                                    />
++                                </div>
++                            ) : (
++                                <EmptyRecords label="jawatan aktif" />
++                            )}
++                        </CardContent>
++                    </Card>
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-2">
++                    <Card>
++                        <CardHeader className="flex-row items-start justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle className="flex items-center gap-2">
++                                    <CalendarCheck2 className="size-5 text-muted-foreground" />
++                                    Kehadiran Terkini
++                                </CardTitle>
++                                <CardDescription>
++                                    Lima rekod masuk atau keluar paling baharu.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href={`/kehadiran?search=${employeeSearch}`}
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentAttendance.length > 0 ? (
++                                recentAttendance.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="border-b py-3 last:border-0"
++                                    >
++                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
++                                            <div>
++                                                <p className="text-sm font-medium">
++                                                    {formatDateTime(
++                                                        record.waktu_masuk,
++                                                    )}
++                                                </p>
++                                                <p className="mt-1 text-xs text-muted-foreground">
++                                                    Keluar:{' '}
++                                                    {formatDateTime(
++                                                        record.waktu_keluar,
++                                                    )}
++                                                </p>
++                                            </div>
++                                            {record.pilihan_jam && (
++                                                <Badge variant="outline">
++                                                    {record.pilihan_jam}
++                                                </Badge>
++                                            )}
++                                        </div>
++                                        {record.catatan && (
++                                            <p className="mt-2 text-xs text-muted-foreground">
++                                                {record.catatan}
++                                            </p>
++                                        )}
++                                    </div>
++                                ))
++                            ) : (
++                                <EmptyRecords label="kehadiran" />
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <Card>
++                        <CardHeader className="flex-row items-start justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle className="flex items-center gap-2">
++                                    <CalendarDays className="size-5 text-muted-foreground" />
++                                    Cuti Terkini
++                                </CardTitle>
++                                <CardDescription>
++                                    Lima permohonan cuti paling baharu.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href={`/cuti?search=${employeeSearch}`}
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentLeave.length > 0 ? (
++                                recentLeave.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="border-b py-3 last:border-0"
++                                    >
++                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
++                                            <div>
++                                                <p className="text-sm font-medium">
++                                                    {displayValue(
++                                                        record.jenis_cuti,
++                                                    )}
++                                                </p>
++                                                <p className="mt-1 text-xs text-muted-foreground">
++                                                    {formatDate(
++                                                        record.tarikh_mula,
++                                                    )}{' '}
++                                                    hingga{' '}
++                                                    {formatDate(
++                                                        record.tarikh_tamat,
++                                                    )}
++                                                </p>
++                                            </div>
++                                            <Badge variant="outline">
++                                                {displayValue(
++                                                    record.status_permohonan,
++                                                )}
++                                            </Badge>
++                                        </div>
++                                        <p className="mt-2 text-xs text-muted-foreground">
++                                            Bilangan hari:{' '}
++                                            {displayValue(record.bilangan_hari)}
++                                        </p>
++                                    </div>
++                                ))
++                            ) : (
++                                <EmptyRecords label="cuti" />
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <Card>
++                        <CardHeader className="flex-row items-start justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle className="flex items-center gap-2">
++                                    <Clock3 className="size-5 text-muted-foreground" />
++                                    Kerja Lebih Masa Terkini
++                                </CardTitle>
++                                <CardDescription>
++                                    Lima rekod OT paling baharu.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href={`/kerja-lebih-masa?search=${employeeSearch}`}
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentOvertime.length > 0 ? (
++                                recentOvertime.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="border-b py-3 last:border-0"
++                                    >
++                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
++                                            <div>
++                                                <p className="text-sm font-medium">
++                                                    {formatDate(record.tarikh)}
++                                                </p>
++                                                <p className="mt-1 text-xs text-muted-foreground">
++                                                    {formatTime(
++                                                        record.waktu_masuk,
++                                                    )}{' '}
++                                                    hingga{' '}
++                                                    {formatTime(
++                                                        record.waktu_keluar,
++                                                    )}
++                                                </p>
++                                            </div>
++                                            <Badge variant="outline">
++                                                {displayValue(record.jenis_ot)}
++                                            </Badge>
++                                        </div>
++                                        {record.catatan && (
++                                            <p className="mt-2 text-xs text-muted-foreground">
++                                                {record.catatan}
++                                            </p>
++                                        )}
++                                    </div>
++                                ))
++                            ) : (
++                                <EmptyRecords label="kerja lebih masa" />
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <Card>
++                        <CardHeader className="flex-row items-start justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle className="flex items-center gap-2">
++                                    <Banknote className="size-5 text-muted-foreground" />
++                                    Payroll Terkini
++                                </CardTitle>
++                                <CardDescription>
++                                    Lima rekod payroll paling baharu.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href={`/payroll?search=${employeeSearch}`}
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentPayroll.length > 0 ? (
++                                recentPayroll.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="border-b py-3 last:border-0"
++                                    >
++                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
++                                            <div>
++                                                <p className="text-sm font-medium">
++                                                    Tempoh{' '}
++                                                    {formatDate(
++                                                        record.tempoh_gaji,
++                                                    )}
++                                                </p>
++                                                <p className="mt-1 text-xs text-muted-foreground">
++                                                    Bulan:{' '}
++                                                    {displayValue(record.bulan)}
++                                                </p>
++                                            </div>
++                                            <Badge variant="outline">
++                                                Rekod #{record.id}
++                                            </Badge>
++                                        </div>
++                                        <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-3">
++                                            <span>
++                                                Akaun:{' '}
++                                                {displayValue(record.no_akaun)}
++                                            </span>
++                                            <span>
++                                                KWSP:{' '}
++                                                {displayValue(record.no_kwsp)}
++                                            </span>
++                                            <span>
++                                                PERKESO:{' '}
++                                                {displayValue(record.no_socso)}
++                                            </span>
++                                        </div>
++                                    </div>
++                                ))
++                            ) : (
++                                <EmptyRecords label="payroll" />
++                            )}
++                        </CardContent>
++                    </Card>
++                </div>
++            </div>
++        </>
++    );
++}
++
++EmployeeProfile.layout = {
++    breadcrumbs: [
++        { title: 'Pekerja', href: '/pekerja' },
++        { title: 'Profil Pekerja', href: '#' },
++    ],
++};
+diff --git a/routes/web.php b/routes/web.php
+index 56d036b..9d5e08e 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -16,6 +16,9 @@
+     Route::get('dashboard', [DashboardController::class, 'index'])->name('dashboard');
+ 
+     Route::get('pekerja', [MaklumatPekerjaController::class, 'index'])->name('pekerja.index');
++    Route::get('pekerja/{id}', [MaklumatPekerjaController::class, 'show'])
++        ->whereNumber('id')
++        ->name('pekerja.show');
+     Route::get('jawatan', [MaklumatJawatanController::class, 'index'])->name('jawatan.index');
+     Route::get('kehadiran', [MaklumatKehadiranController::class, 'index'])->name('kehadiran.index');
+     Route::get('cuti', [MaklumatCutiController::class, 'index'])->name('cuti.index');

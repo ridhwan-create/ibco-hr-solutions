@@ -1,0 +1,1878 @@
+diff --git a/README.md b/README.md
+index 9bfd174..9bef381 100644
+--- a/README.md
++++ b/README.md
+@@ -21,7 +21,26 @@ ## Modul index
+ - Roles & Permissions
+ 
+ Semua modul index menggunakan carian, pagination dan hanya memaparkan rekod
+-aktif (`rcd_enable = 1`). Paparan ini tidak mengubah rekod dalam database asal.
++aktif (`rcd_enable = 1`).
++
++## CRUD pekerja
++
++Super Admin dan HR Admin boleh:
++
++- menambah pekerja;
++- mengemas kini semua maklumat asas pekerja;
++- memilih jantina, agama, bangsa, status perkahwinan dan status pekerja
++  daripada jadual rujukan `db_spp`; dan
++- menyahaktifkan pekerja menggunakan `rcd_enable = 0` tanpa memadam rekod
++  secara kekal.
++
++ID pekerja dan NRIC diperiksa untuk mengelakkan rekod pendua. Borang
++memerlukan pengesahan sebelum data disimpan, manakala Viewer / Manager kekal
++dengan akses paparan sahaja.
++
++Semua tindakan tambah, kemas kini dan nyahaktif direkodkan dalam jadual
++`audit_logs` pada database sistem, termasuk pengguna, masa, nilai yang berubah,
++alamat IP dan user agent.
+ 
+ ## Profil pekerja
+ 
+@@ -38,7 +57,8 @@ ## Roles & Permissions
+ Kawalan akses disimpan dalam jadual `users` pada database sistem:
+ 
+ - **Super Admin** — akses penuh termasuk pengurusan pengguna dan role.
+-- **HR Admin** — akses semua modul HR termasuk payroll dan laporan.
++- **HR Admin** — akses semua modul HR termasuk CRUD pekerja, payroll dan
++  laporan.
+ - **Viewer / Manager** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
+   dan Kerja Lebih Masa sahaja.
+ 
+@@ -70,6 +90,8 @@ ## Sambungan database
+ DB_PASSWORD_IBCO=
+ ```
+ 
+-Selepas mengubah `.env`, jalankan `php artisan optimize:clear`. Gunakan akaun
+-database dengan akses minimum yang diperlukan. Connection `ibco` hanya
+-memerlukan akses baca untuk Dashboard dan tujuh paparan index semasa.
++Selepas mengubah `.env`, jalankan `php artisan optimize:clear`. Jalankan
++`php artisan migrate` untuk menyediakan role dan audit log pada database
++sistem. Gunakan akaun database dengan akses minimum yang diperlukan.
++Connection `ibco` memerlukan akses `SELECT`, `INSERT` dan `UPDATE` untuk CRUD
++pekerja; operasi `DELETE` tidak digunakan.
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index 99e20b9..ddff53a 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -17,6 +17,7 @@ public function permissions(): array
+             self::SuperAdmin => [
+                 'dashboard.view',
+                 'employees.view',
++                'employees.manage',
+                 'positions.view',
+                 'attendance.view',
+                 'leave.view',
+@@ -28,6 +29,7 @@ public function permissions(): array
+             self::HrAdmin => [
+                 'dashboard.view',
+                 'employees.view',
++                'employees.manage',
+                 'positions.view',
+                 'attendance.view',
+                 'leave.view',
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index 70cde26..7ef267c 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -2,14 +2,35 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Http\Requests\SaveMaklumatPekerjaRequest;
+ use App\Models\MaklumatPekerja;
++use App\Support\AuditLogger;
++use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
+ use Inertia\Inertia;
++use Inertia\Response;
+ 
+ class MaklumatPekerjaController extends Controller
+ {
+-    public function index(Request $request)
++    private const EDITABLE_FIELDS = [
++        'employeeID',
++        'nric',
++        'nama',
++        'alamat',
++        'jantina',
++        'tarikhlahir',
++        'agama',
++        'bangsa',
++        'kewarganegaraan',
++        'statusperkahwinan',
++        'notel',
++        'email',
++        'status',
++    ];
++
++    public function index(Request $request): Response
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+@@ -42,10 +63,11 @@ public function index(Request $request)
+             'filters' => [
+                 'search' => $search,
+             ],
++            'canManage' => $request->user()->hasPermission('employees.manage'),
+         ]);
+     }
+ 
+-    public function show(Request $request, int $id)
++    public function show(Request $request, int $id): Response
+     {
+         $connection = DB::connection('ibco');
+         $canViewPayroll = $request->user()->hasPermission('payroll.view');
+@@ -225,67 +247,174 @@ public function show(Request $request, int $id)
+             'recentOvertime' => $recentOvertime,
+             'recentPayroll' => $recentPayroll,
+             'canViewPayroll' => $canViewPayroll,
++            'canManage' => $request->user()->hasPermission('employees.manage'),
+         ]);
+     }
+ 
+-    public function create()
++    public function create(): Response
+     {
+-        return Inertia::render('MaklumatPekerja/Create');
++        return Inertia::render('MaklumatPekerja/Create', [
++            'options' => $this->formOptions(),
++        ]);
+     }
+ 
+-    public function store(Request $request)
++    public function store(SaveMaklumatPekerjaRequest $request): RedirectResponse
+     {
+-        $validated = $request->validate([
+-            'nric' => 'required|string|max:255',
+-            'employeeID' => 'required|string|max:15',
+-            'nama' => 'required|string|max:255',
+-            'email' => 'nullable|email|max:255',
+-            'notel' => 'nullable|string|max:20',
+-        ]);
+-
+-        $validated['crt_dt'] = now();
+-        $validated['crt_by'] = auth()->user()->name ?? 'System';
+-
+-        MaklumatPekerja::create($validated);
+-
+-        return redirect()->route('pekerja.index')->with('toast', ['type' => 'success', 'message' => 'Pekerja berjaya ditambah!']);
++        $payload = $request->safe()->only(self::EDITABLE_FIELDS);
++        $payload['rcd_enable'] = 1;
++        $payload['crt_dt'] = now()->toDateString();
++        $payload['crt_by'] = $this->actorName($request);
++
++        $pekerja = DB::connection('ibco')->transaction(
++            fn () => MaklumatPekerja::query()->create($payload),
++        );
++
++        AuditLogger::record(
++            $request,
++            'employee.created',
++            'maklumatpekerja',
++            $pekerja->getKey(),
++            newValues: $pekerja->only([...self::EDITABLE_FIELDS, 'rcd_enable']),
++        );
++
++        return redirect()
++            ->route('pekerja.show', $pekerja->getKey())
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Pekerja berjaya ditambah.',
++            ]);
+     }
+ 
+-    public function edit($id)
++    public function edit(int $id): Response
+     {
+-        $pekerja = MaklumatPekerja::findOrFail($id);
++        $pekerja = $this->findActiveEmployee($id);
+ 
+         return Inertia::render('MaklumatPekerja/Edit', [
+-            'pekerja' => $pekerja,
++            'pekerja' => [
++                'id' => $pekerja->getKey(),
++                ...$pekerja->only(self::EDITABLE_FIELDS),
++            ],
++            'options' => $this->formOptions(),
+         ]);
+     }
+ 
+-    public function update(Request $request, $id)
++    public function update(SaveMaklumatPekerjaRequest $request, int $id): RedirectResponse
+     {
+-        $pekerja = MaklumatPekerja::findOrFail($id);
+-
+-        $validated = $request->validate([
+-            'nric' => 'required|string|max:255',
+-            'employeeID' => 'required|string|max:15',
+-            'nama' => 'required|string|max:255',
+-            'email' => 'nullable|email|max:255',
+-            'notel' => 'nullable|string|max:20',
+-        ]);
++        $pekerja = $this->findActiveEmployee($id);
++        $oldValues = $pekerja->only(self::EDITABLE_FIELDS);
++
++        $pekerja->fill($request->safe()->only(self::EDITABLE_FIELDS));
++        $changedFields = array_keys(
++            array_intersect_key(
++                $pekerja->getDirty(),
++                array_flip(self::EDITABLE_FIELDS),
++            ),
++        );
++
++        if ($changedFields === []) {
++            return redirect()
++                ->route('pekerja.show', $pekerja->getKey())
++                ->with('toast', [
++                    'type' => 'info',
++                    'message' => 'Tiada perubahan pada maklumat pekerja.',
++                ]);
++        }
+ 
+-        $validated['mdf_dt'] = now();
+-        $validated['mdf_by'] = auth()->user()->name ?? 'System';
++        DB::connection('ibco')->transaction(function () use ($pekerja, $request) {
++            $pekerja->forceFill([
++                'mdf_dt' => now()->toDateString(),
++                'mdf_by' => $this->actorName($request),
++            ])->save();
++        });
++
++        AuditLogger::record(
++            $request,
++            'employee.updated',
++            'maklumatpekerja',
++            $pekerja->getKey(),
++            oldValues: array_intersect_key($oldValues, array_flip($changedFields)),
++            newValues: $pekerja->only($changedFields),
++        );
++
++        return redirect()
++            ->route('pekerja.show', $pekerja->getKey())
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Maklumat pekerja berjaya dikemas kini.',
++            ]);
++    }
+ 
+-        $pekerja->update($validated);
++    public function destroy(Request $request, int $id): RedirectResponse
++    {
++        $pekerja = $this->findActiveEmployee($id);
++
++        DB::connection('ibco')->transaction(function () use ($pekerja, $request) {
++            $pekerja->forceFill([
++                'rcd_enable' => 0,
++                'mdf_dt' => now()->toDateString(),
++                'mdf_by' => $this->actorName($request),
++            ])->save();
++        });
++
++        AuditLogger::record(
++            $request,
++            'employee.deactivated',
++            'maklumatpekerja',
++            $pekerja->getKey(),
++            oldValues: ['rcd_enable' => 1],
++            newValues: ['rcd_enable' => 0],
++        );
++
++        return redirect()
++            ->route('pekerja.index')
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Pekerja berjaya dinyahaktifkan.',
++            ]);
++    }
+ 
+-        return redirect()->route('pekerja.index')->with('toast', ['type' => 'success', 'message' => 'Pekerja berjaya dikemaskini!']);
++    private function findActiveEmployee(int $id): MaklumatPekerja
++    {
++        return MaklumatPekerja::query()
++            ->whereKey($id)
++            ->where('rcd_enable', 1)
++            ->firstOrFail();
+     }
+ 
+-    public function destroy($id)
++    /**
++     * @return array<string, mixed>
++     */
++    private function formOptions(): array
+     {
+-        $pekerja = MaklumatPekerja::findOrFail($id);
++        return [
++            'jantina' => $this->referenceOptions('xjantina'),
++            'agama' => $this->referenceOptions('xagama'),
++            'bangsa' => $this->referenceOptions('xbangsa'),
++            'statusPerkahwinan' => $this->referenceOptions('xstatusperkahwinan'),
++            'status' => $this->referenceOptions('xstatus'),
++        ];
++    }
+ 
+-        $pekerja->update(['rcd_enable' => 0]);
++    /**
++     * @return array<int, array{value: string, label: string}>
++     */
++    private function referenceOptions(string $table): array
++    {
++        return DB::connection('ibco')
++            ->table($table)
++            ->where('rcd_enable', 1)
++            ->orderBy('description')
++            ->get(['id', 'description'])
++            ->map(fn ($option) => [
++                'value' => (string) $option->id,
++                'label' => (string) $option->description,
++            ])
++            ->values()
++            ->all();
++    }
+ 
+-        return redirect()->route('pekerja.index')->with('toast', ['type' => 'success', 'message' => 'Pekerja berjaya dipadam!']);
++    private function actorName(Request $request): string
++    {
++        return Str::limit($request->user()?->name ?? 'System', 12, '');
+     }
+ }
+diff --git a/app/Http/Requests/SaveMaklumatPekerjaRequest.php b/app/Http/Requests/SaveMaklumatPekerjaRequest.php
+new file mode 100644
+index 0000000..65a0bc4
+--- /dev/null
++++ b/app/Http/Requests/SaveMaklumatPekerjaRequest.php
+@@ -0,0 +1,124 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class SaveMaklumatPekerjaRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('employees.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, mixed>>
++     */
++    public function rules(): array
++    {
++        $employeeId = $this->route('id');
++
++        return [
++            'employeeID' => [
++                'required',
++                'string',
++                'max:15',
++                Rule::unique('ibco.maklumatpekerja', 'employeeID')->ignore($employeeId),
++            ],
++            'nric' => [
++                'required',
++                'digits:12',
++                Rule::unique('ibco.maklumatpekerja', 'nric')->ignore($employeeId),
++            ],
++            'nama' => ['required', 'string', 'max:255'],
++            'alamat' => ['nullable', 'string', 'max:255'],
++            'jantina' => [
++                'nullable',
++                Rule::exists('ibco.xjantina', 'id')->where('rcd_enable', 1),
++            ],
++            'tarikhlahir' => ['nullable', 'date', 'before_or_equal:today'],
++            'agama' => [
++                'nullable',
++                Rule::exists('ibco.xagama', 'id')->where('rcd_enable', 1),
++            ],
++            'bangsa' => [
++                'nullable',
++                Rule::exists('ibco.xbangsa', 'id')->where('rcd_enable', 1),
++            ],
++            'kewarganegaraan' => ['nullable', 'string', 'max:255'],
++            'statusperkahwinan' => [
++                'nullable',
++                Rule::exists('ibco.xstatusperkahwinan', 'id')->where('rcd_enable', 1),
++            ],
++            'notel' => ['nullable', 'string', 'max:20'],
++            'email' => ['nullable', 'email:rfc', 'max:255'],
++            'status' => [
++                'required',
++                Rule::exists('ibco.xstatus', 'id')->where('rcd_enable', 1),
++            ],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function attributes(): array
++    {
++        return [
++            'employeeID' => 'ID pekerja',
++            'nric' => 'nombor kad pengenalan',
++            'nama' => 'nama pekerja',
++            'alamat' => 'alamat',
++            'jantina' => 'jantina',
++            'tarikhlahir' => 'tarikh lahir',
++            'agama' => 'agama',
++            'bangsa' => 'bangsa',
++            'kewarganegaraan' => 'kewarganegaraan',
++            'statusperkahwinan' => 'status perkahwinan',
++            'notel' => 'nombor telefon',
++            'email' => 'e-mel',
++            'status' => 'status pekerja',
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'employeeID.unique' => 'ID pekerja ini telah digunakan.',
++            'nric.digits' => 'Nombor kad pengenalan mesti mengandungi 12 digit.',
++            'nric.unique' => 'Nombor kad pengenalan ini telah digunakan.',
++            'tarikhlahir.before_or_equal' => 'Tarikh lahir tidak boleh melebihi tarikh hari ini.',
++        ];
++    }
++
++    protected function prepareForValidation(): void
++    {
++        $stringFields = [
++            'employeeID',
++            'nama',
++            'alamat',
++            'kewarganegaraan',
++            'notel',
++            'email',
++        ];
++
++        $normalized = collect($stringFields)
++            ->filter(fn (string $field) => $this->has($field))
++            ->mapWithKeys(function (string $field) {
++                $value = $this->input($field);
++
++                return [$field => is_string($value) ? trim($value) : $value];
++            })
++            ->all();
++
++        if ($this->has('nric') && is_string($this->input('nric'))) {
++            $normalized['nric'] = preg_replace('/[\s-]+/', '', $this->input('nric'));
++        }
++
++        $this->merge($normalized);
++    }
++}
+diff --git a/app/Models/AuditLog.php b/app/Models/AuditLog.php
+new file mode 100644
+index 0000000..97ca6d3
+--- /dev/null
++++ b/app/Models/AuditLog.php
+@@ -0,0 +1,30 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++
++class AuditLog extends Model
++{
++    protected $fillable = [
++        'user_id',
++        'action',
++        'auditable_type',
++        'auditable_id',
++        'old_values',
++        'new_values',
++        'ip_address',
++        'user_agent',
++    ];
++
++    /**
++     * @return array<string, string>
++     */
++    protected function casts(): array
++    {
++        return [
++            'old_values' => 'array',
++            'new_values' => 'array',
++        ];
++    }
++}
+diff --git a/app/Support/AuditLogger.php b/app/Support/AuditLogger.php
+new file mode 100644
+index 0000000..509572d
+--- /dev/null
++++ b/app/Support/AuditLogger.php
+@@ -0,0 +1,33 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\AuditLog;
++use Illuminate\Http\Request;
++
++class AuditLogger
++{
++    /**
++     * @param  array<string, mixed>  $oldValues
++     * @param  array<string, mixed>  $newValues
++     */
++    public static function record(
++        Request $request,
++        string $action,
++        string $auditableType,
++        int|string $auditableId,
++        array $oldValues = [],
++        array $newValues = [],
++    ): AuditLog {
++        return AuditLog::query()->create([
++            'user_id' => $request->user()?->getAuthIdentifier(),
++            'action' => $action,
++            'auditable_type' => $auditableType,
++            'auditable_id' => (string) $auditableId,
++            'old_values' => $oldValues ?: null,
++            'new_values' => $newValues ?: null,
++            'ip_address' => $request->ip(),
++            'user_agent' => $request->userAgent(),
++        ]);
++    }
++}
+diff --git a/database/migrations/2026_07_28_010000_create_audit_logs_table.php b/database/migrations/2026_07_28_010000_create_audit_logs_table.php
+new file mode 100644
+index 0000000..0490121
+--- /dev/null
++++ b/database/migrations/2026_07_28_010000_create_audit_logs_table.php
+@@ -0,0 +1,31 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('audit_logs', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
++            $table->string('action', 64)->index();
++            $table->string('auditable_type', 100);
++            $table->string('auditable_id', 64);
++            $table->json('old_values')->nullable();
++            $table->json('new_values')->nullable();
++            $table->string('ip_address', 45)->nullable();
++            $table->text('user_agent')->nullable();
++            $table->timestamps();
++
++            $table->index(['auditable_type', 'auditable_id']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('audit_logs');
++    }
++};
+diff --git a/resources/js/components/records-index.tsx b/resources/js/components/records-index.tsx
+index 796b548..46c4403 100644
+--- a/resources/js/components/records-index.tsx
++++ b/resources/js/components/records-index.tsx
+@@ -1,10 +1,19 @@
+ import { Head, Link, router } from '@inertiajs/react';
+-import { Database, Eye, Search } from 'lucide-react';
++import { Database, Eye, Pencil, Plus, Search, UserMinus } from 'lucide-react';
+ import { useEffect, useState } from 'react';
+ import HeadingSmall from '@/components/heading-small';
+ import { Badge } from '@/components/ui/badge';
+ import { Button } from '@/components/ui/button';
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++} from '@/components/ui/dialog';
+ import { Input } from '@/components/ui/input';
+ import {
+     Table,
+@@ -29,6 +38,10 @@ export type RecordPageConfig = {
+     description: string;
+     routePath: string;
+     detailRoutePath?: string;
++    createRoutePath?: string;
++    editRoutePath?: string;
++    deleteRoutePath?: string;
++    entityLabel?: string;
+     searchPlaceholder: string;
+     columns: RecordColumn[];
+ };
+@@ -52,6 +65,7 @@ export type RecordsIndexPageProps = {
+     filters: {
+         search?: string;
+     };
++    canManage?: boolean;
+ };
+ 
+ function formatDate(value: string): string {
+@@ -101,12 +115,137 @@ function paginationLabel(label: string): string {
+         .replace('Next &raquo;', 'Seterusnya');
+ }
+ 
++function RecordActions({
++    record,
++    config,
++    canManage,
++    mobile = false,
++}: {
++    record: Record<string, RecordValue>;
++    config: RecordPageConfig;
++    canManage: boolean;
++    mobile?: boolean;
++}) {
++    const [confirmationOpen, setConfirmationOpen] = useState(false);
++    const [deactivating, setDeactivating] = useState(false);
++    const recordId = String(record.id);
++    const recordName = String(
++        record.nama ?? record.employee_id ?? `${config.entityLabel} ini`,
++    );
++
++    const deactivate = () => {
++        if (!config.deleteRoutePath) {
++            return;
++        }
++
++        router.delete(`${config.deleteRoutePath}/${recordId}`, {
++            preserveScroll: true,
++            onStart: () => setDeactivating(true),
++            onFinish: () => {
++                setDeactivating(false);
++                setConfirmationOpen(false);
++            },
++        });
++    };
++
++    return (
++        <div
++            className={
++                mobile ? 'grid grid-cols-2 gap-2' : 'flex justify-end gap-2'
++            }
++        >
++            {config.detailRoutePath && (
++                <Button
++                    asChild
++                    variant="outline"
++                    size="sm"
++                    className={mobile ? 'col-span-2' : undefined}
++                >
++                    <Link href={`${config.detailRoutePath}/${recordId}`}>
++                        <Eye />
++                        {mobile ? 'Papar Profil' : 'Papar'}
++                    </Link>
++                </Button>
++            )}
++
++            {canManage && config.editRoutePath && (
++                <Button asChild variant="outline" size="sm">
++                    <Link href={`${config.editRoutePath}/${recordId}/edit`}>
++                        <Pencil />
++                        Edit
++                    </Link>
++                </Button>
++            )}
++
++            {canManage && config.deleteRoutePath && (
++                <>
++                    <Button
++                        type="button"
++                        variant="destructive"
++                        size="sm"
++                        onClick={() => setConfirmationOpen(true)}
++                    >
++                        <UserMinus />
++                        Nyahaktif
++                    </Button>
++
++                    <Dialog
++                        open={confirmationOpen}
++                        onOpenChange={setConfirmationOpen}
++                    >
++                        <DialogContent>
++                            <DialogHeader>
++                                <DialogTitle>
++                                    Nyahaktifkan {config.entityLabel ?? 'rekod'}
++                                    ?
++                                </DialogTitle>
++                                <DialogDescription>
++                                    {recordName} akan disembunyikan daripada
++                                    senarai aktif. Rekod tidak dipadam secara
++                                    kekal dan tindakan ini akan direkodkan dalam
++                                    audit log.
++                                </DialogDescription>
++                            </DialogHeader>
++                            <DialogFooter>
++                                <DialogClose asChild>
++                                    <Button
++                                        variant="outline"
++                                        disabled={deactivating}
++                                    >
++                                        Batal
++                                    </Button>
++                                </DialogClose>
++                                <Button
++                                    type="button"
++                                    variant="destructive"
++                                    onClick={deactivate}
++                                    disabled={deactivating}
++                                >
++                                    <UserMinus />
++                                    {deactivating
++                                        ? 'Sedang diproses...'
++                                        : 'Ya, Nyahaktifkan'}
++                                </Button>
++                            </DialogFooter>
++                        </DialogContent>
++                    </Dialog>
++                </>
++            )}
++        </div>
++    );
++}
++
+ export default function RecordsIndex({
+     records,
+     filters,
+     config,
++    canManage = false,
+ }: RecordsIndexPageProps & { config: RecordPageConfig }) {
+     const [search, setSearch] = useState(filters.search ?? '');
++    const hasActions = Boolean(
++        config.detailRoutePath ||
++        (canManage && (config.editRoutePath || config.deleteRoutePath)),
++    );
+ 
+     useEffect(() => {
+         if (search === (filters.search ?? '')) {
+@@ -168,15 +307,27 @@ export default function RecordsIndex({
+                         </Badge>
+                     </div>
+ 
+-                    <div className="relative w-full lg:max-w-sm">
+-                        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+-                        <Input
+-                            value={search}
+-                            onChange={(event) => setSearch(event.target.value)}
+-                            placeholder={config.searchPlaceholder}
+-                            className="pl-9"
+-                            aria-label={`Cari ${config.title.toLowerCase()}`}
+-                        />
++                    <div className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-xl lg:justify-end">
++                        {canManage && config.createRoutePath && (
++                            <Button asChild>
++                                <Link href={config.createRoutePath}>
++                                    <Plus />
++                                    Tambah Pekerja
++                                </Link>
++                            </Button>
++                        )}
++                        <div className="relative w-full lg:max-w-sm">
++                            <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                            <Input
++                                value={search}
++                                onChange={(event) =>
++                                    setSearch(event.target.value)
++                                }
++                                placeholder={config.searchPlaceholder}
++                                className="pl-9"
++                                aria-label={`Cari ${config.title.toLowerCase()}`}
++                            />
++                        </div>
+                     </div>
+                 </div>
+ 
+@@ -200,8 +351,8 @@ export default function RecordsIndex({
+                                             {column.label}
+                                         </TableHead>
+                                     ))}
+-                                    {config.detailRoutePath && (
+-                                        <TableHead className="w-28 text-right">
++                                    {hasActions && (
++                                        <TableHead className="min-w-72 text-right">
+                                             Tindakan
+                                         </TableHead>
+                                     )}
+@@ -259,20 +410,13 @@ export default function RecordsIndex({
+                                                     )}
+                                                 </TableCell>
+                                             ))}
+-                                            {config.detailRoutePath && (
++                                            {hasActions && (
+                                                 <TableCell className="text-right">
+-                                                    <Button
+-                                                        asChild
+-                                                        variant="outline"
+-                                                        size="sm"
+-                                                    >
+-                                                        <Link
+-                                                            href={`${config.detailRoutePath}/${record.id}`}
+-                                                        >
+-                                                            <Eye />
+-                                                            Papar
+-                                                        </Link>
+-                                                    </Button>
++                                                    <RecordActions
++                                                        record={record}
++                                                        config={config}
++                                                        canManage={canManage}
++                                                    />
+                                                 </TableCell>
+                                             )}
+                                         </TableRow>
+@@ -282,7 +426,7 @@ export default function RecordsIndex({
+                                         <TableCell
+                                             colSpan={
+                                                 config.columns.length +
+-                                                (config.detailRoutePath ? 2 : 1)
++                                                (hasActions ? 2 : 1)
+                                             }
+                                             className="h-28 text-center text-muted-foreground"
+                                         >
+@@ -321,19 +465,15 @@ export default function RecordsIndex({
+                                             </span>
+                                         </div>
+                                     ))}
+-                                    {config.detailRoutePath && (
+-                                        <Button
+-                                            asChild
+-                                            variant="outline"
+-                                            className="mt-1 w-full"
+-                                        >
+-                                            <Link
+-                                                href={`${config.detailRoutePath}/${record.id}`}
+-                                            >
+-                                                <Eye />
+-                                                Papar Profil
+-                                            </Link>
+-                                        </Button>
++                                    {hasActions && (
++                                        <div className="mt-1">
++                                            <RecordActions
++                                                record={record}
++                                                config={config}
++                                                canManage={canManage}
++                                                mobile
++                                            />
++                                        </div>
+                                     )}
+                                 </CardContent>
+                             </Card>
+diff --git a/resources/js/pages/MaklumatPekerja/Create.tsx b/resources/js/pages/MaklumatPekerja/Create.tsx
+new file mode 100644
+index 0000000..3574519
+--- /dev/null
++++ b/resources/js/pages/MaklumatPekerja/Create.tsx
+@@ -0,0 +1,46 @@
++import { Head } from '@inertiajs/react';
++import PekerjaForm from './partials/pekerja-form';
++import type {
++    EmployeeFormData,
++    EmployeeFormOptions,
++} from './partials/pekerja-form';
++
++type CreateEmployeeProps = {
++    options: EmployeeFormOptions;
++};
++
++const initialValues: EmployeeFormData = {
++    employeeID: '',
++    nric: '',
++    nama: '',
++    alamat: '',
++    jantina: '',
++    tarikhlahir: '',
++    agama: '',
++    bangsa: '',
++    kewarganegaraan: 'Malaysia',
++    statusperkahwinan: '',
++    notel: '',
++    email: '',
++    status: '',
++};
++
++export default function CreateEmployee({ options }: CreateEmployeeProps) {
++    return (
++        <>
++            <Head title="Tambah Pekerja" />
++            <PekerjaForm
++                mode="create"
++                options={options}
++                initialValues={initialValues}
++            />
++        </>
++    );
++}
++
++CreateEmployee.layout = {
++    breadcrumbs: [
++        { title: 'Pekerja', href: '/pekerja' },
++        { title: 'Tambah Pekerja', href: '/pekerja/create' },
++    ],
++};
+diff --git a/resources/js/pages/MaklumatPekerja/Edit.tsx b/resources/js/pages/MaklumatPekerja/Edit.tsx
+new file mode 100644
+index 0000000..c6b0e44
+--- /dev/null
++++ b/resources/js/pages/MaklumatPekerja/Edit.tsx
+@@ -0,0 +1,52 @@
++import { Head } from '@inertiajs/react';
++import PekerjaForm from './partials/pekerja-form';
++import type {
++    EmployeeFormData,
++    EmployeeFormOptions,
++} from './partials/pekerja-form';
++
++type EmployeeRecord = {
++    id: number;
++} & Partial<EmployeeFormData>;
++
++type EditEmployeeProps = {
++    pekerja: EmployeeRecord;
++    options: EmployeeFormOptions;
++};
++
++const toFormValues = (pekerja: EmployeeRecord): EmployeeFormData => ({
++    employeeID: String(pekerja.employeeID ?? ''),
++    nric: String(pekerja.nric ?? ''),
++    nama: String(pekerja.nama ?? ''),
++    alamat: String(pekerja.alamat ?? ''),
++    jantina: String(pekerja.jantina ?? ''),
++    tarikhlahir: String(pekerja.tarikhlahir ?? '').slice(0, 10),
++    agama: String(pekerja.agama ?? ''),
++    bangsa: String(pekerja.bangsa ?? ''),
++    kewarganegaraan: String(pekerja.kewarganegaraan ?? ''),
++    statusperkahwinan: String(pekerja.statusperkahwinan ?? ''),
++    notel: String(pekerja.notel ?? ''),
++    email: String(pekerja.email ?? ''),
++    status: String(pekerja.status ?? ''),
++});
++
++export default function EditEmployee({ pekerja, options }: EditEmployeeProps) {
++    return (
++        <>
++            <Head title={`Edit ${pekerja.nama || 'Pekerja'}`} />
++            <PekerjaForm
++                mode="edit"
++                options={options}
++                initialValues={toFormValues(pekerja)}
++                employeeId={pekerja.id}
++            />
++        </>
++    );
++}
++
++EditEmployee.layout = {
++    breadcrumbs: [
++        { title: 'Pekerja', href: '/pekerja' },
++        { title: 'Edit Pekerja', href: '#' },
++    ],
++};
+diff --git a/resources/js/pages/MaklumatPekerja/Index.tsx b/resources/js/pages/MaklumatPekerja/Index.tsx
+index e157acd..4632310 100644
+--- a/resources/js/pages/MaklumatPekerja/Index.tsx
++++ b/resources/js/pages/MaklumatPekerja/Index.tsx
+@@ -9,6 +9,10 @@ const config: RecordPageConfig = {
+     description: 'Senarai pekerja aktif yang direkodkan dalam sistem.',
+     routePath: '/pekerja',
+     detailRoutePath: '/pekerja',
++    createRoutePath: '/pekerja/create',
++    editRoutePath: '/pekerja',
++    deleteRoutePath: '/pekerja',
++    entityLabel: 'pekerja',
+     searchPlaceholder: 'Cari nama, ID, NRIC atau e-mel...',
+     columns: [
+         { key: 'employee_id', label: 'ID Pekerja' },
+diff --git a/resources/js/pages/MaklumatPekerja/Show.tsx b/resources/js/pages/MaklumatPekerja/Show.tsx
+index a8113a5..45d49a0 100644
+--- a/resources/js/pages/MaklumatPekerja/Show.tsx
++++ b/resources/js/pages/MaklumatPekerja/Show.tsx
+@@ -17,6 +17,7 @@ import {
+     Landmark,
+     Mail,
+     MapPin,
++    Pencil,
+     Phone,
+     ShieldCheck,
+     UserRound,
+@@ -118,6 +119,7 @@ type EmployeeProfileProps = {
+     recentOvertime: OvertimeRecord[];
+     recentPayroll: PayrollRecord[];
+     canViewPayroll: boolean;
++    canManage: boolean;
+ };
+ 
+ type InformationItemProps = {
+@@ -285,6 +287,7 @@ export default function EmployeeProfile({
+     recentOvertime,
+     recentPayroll,
+     canViewPayroll,
++    canManage,
+ }: EmployeeProfileProps) {
+     const employeeSearch = encodeURIComponent(
+         pekerja.employee_id || pekerja.nama || '',
+@@ -295,13 +298,21 @@ export default function EmployeeProfile({
+             <Head title={`Profil ${pekerja.nama || 'Pekerja'}`} />
+ 
+             <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
+-                <div>
++                <div className="flex flex-wrap items-center justify-between gap-3">
+                     <Button asChild variant="outline" size="sm">
+                         <Link href="/pekerja">
+                             <ArrowLeft />
+                             Kembali ke Senarai Pekerja
+                         </Link>
+                     </Button>
++                    {canManage && (
++                        <Button asChild size="sm">
++                            <Link href={`/pekerja/${pekerja.id}/edit`}>
++                                <Pencil />
++                                Edit Pekerja
++                            </Link>
++                        </Button>
++                    )}
+                 </div>
+ 
+                 <Card className="overflow-hidden">
+@@ -354,7 +365,9 @@ export default function EmployeeProfile({
+                                 Sumber data: db_spp
+                             </Badge>
+                             <Badge variant="outline" className="font-normal">
+-                                Paparan baca sahaja
++                                {canManage
++                                    ? 'Akses kemas kini dibenarkan'
++                                    : 'Paparan baca sahaja'}
+                             </Badge>
+                         </div>
+                     </CardContent>
+diff --git a/resources/js/pages/MaklumatPekerja/partials/pekerja-form.tsx b/resources/js/pages/MaklumatPekerja/partials/pekerja-form.tsx
+new file mode 100644
+index 0000000..ff57fd1
+--- /dev/null
++++ b/resources/js/pages/MaklumatPekerja/partials/pekerja-form.tsx
+@@ -0,0 +1,532 @@
++import { Link, useForm } from '@inertiajs/react';
++import { AlertCircle, Database, Save, UserRound } from 'lucide-react';
++import { useState } from 'react';
++import type { FormEvent, ReactNode } from 'react';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++} from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++
++export type ReferenceOption = {
++    value: string;
++    label: string;
++};
++
++export type EmployeeFormOptions = {
++    jantina: ReferenceOption[];
++    agama: ReferenceOption[];
++    bangsa: ReferenceOption[];
++    statusPerkahwinan: ReferenceOption[];
++    status: ReferenceOption[];
++};
++
++export type EmployeeFormData = {
++    employeeID: string;
++    nric: string;
++    nama: string;
++    alamat: string;
++    jantina: string;
++    tarikhlahir: string;
++    agama: string;
++    bangsa: string;
++    kewarganegaraan: string;
++    statusperkahwinan: string;
++    notel: string;
++    email: string;
++    status: string;
++};
++
++type EmployeeFormProps = {
++    mode: 'create' | 'edit';
++    options: EmployeeFormOptions;
++    initialValues: EmployeeFormData;
++    employeeId?: number;
++};
++
++type FieldProps = {
++    htmlFor: string;
++    label: string;
++    required?: boolean;
++    error?: string;
++    children: ReactNode;
++};
++
++type SelectFieldProps = {
++    id: keyof EmployeeFormData;
++    label: string;
++    value: string;
++    options: ReferenceOption[];
++    onChange: (value: string) => void;
++    error?: string;
++    required?: boolean;
++    disabled?: boolean;
++};
++
++const emptyOption = '__none__';
++
++function Field({
++    htmlFor,
++    label,
++    required = false,
++    error,
++    children,
++}: FieldProps) {
++    return (
++        <div className="grid gap-2">
++            <Label htmlFor={htmlFor}>
++                {label}
++                {required && <span className="ml-1 text-destructive">*</span>}
++            </Label>
++            {children}
++            <InputError message={error} />
++        </div>
++    );
++}
++
++function SelectField({
++    id,
++    label,
++    value,
++    options,
++    onChange,
++    error,
++    required = false,
++    disabled = false,
++}: SelectFieldProps) {
++    return (
++        <Field htmlFor={id} label={label} required={required} error={error}>
++            <Select
++                value={value || emptyOption}
++                onValueChange={(selected) =>
++                    onChange(selected === emptyOption ? '' : selected)
++                }
++                disabled={disabled}
++                required={required}
++            >
++                <SelectTrigger
++                    id={id}
++                    className="w-full"
++                    aria-invalid={Boolean(error)}
++                >
++                    <SelectValue placeholder={`Pilih ${label.toLowerCase()}`} />
++                </SelectTrigger>
++                <SelectContent align="start">
++                    {!required && (
++                        <SelectItem value={emptyOption}>
++                            Tidak dinyatakan
++                        </SelectItem>
++                    )}
++                    {options.map((option) => (
++                        <SelectItem key={option.value} value={option.value}>
++                            {option.label}
++                        </SelectItem>
++                    ))}
++                </SelectContent>
++            </Select>
++        </Field>
++    );
++}
++
++export default function PekerjaForm({
++    mode,
++    options,
++    initialValues,
++    employeeId,
++}: EmployeeFormProps) {
++    const [confirmationOpen, setConfirmationOpen] = useState(false);
++    const { data, setData, post, put, processing, errors, isDirty } =
++        useForm<EmployeeFormData>(initialValues);
++
++    const isEditing = mode === 'edit';
++    const title = isEditing ? 'Edit Maklumat Pekerja' : 'Tambah Pekerja';
++    const description = isEditing
++        ? 'Kemas kini maklumat pekerja yang dipilih.'
++        : 'Daftarkan pekerja baharu ke dalam database HR.';
++
++    const requestConfirmation = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        setConfirmationOpen(true);
++    };
++
++    const submit = () => {
++        const requestOptions = {
++            preserveScroll: true,
++            onError: () => setConfirmationOpen(false),
++        };
++
++        if (isEditing && employeeId !== undefined) {
++            put(`/pekerja/${employeeId}`, requestOptions);
++
++            return;
++        }
++
++        post('/pekerja', requestOptions);
++    };
++
++    return (
++        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                <div className="space-y-2">
++                    <div>
++                        <h1 className="text-2xl font-semibold tracking-tight">
++                            {title}
++                        </h1>
++                        <p className="mt-1 text-sm text-muted-foreground">
++                            {description}
++                        </p>
++                    </div>
++                    <Badge variant="secondary" className="gap-1.5 font-normal">
++                        <Database className="size-3.5" />
++                        Simpanan data: db_spp
++                    </Badge>
++                </div>
++
++                <Button asChild variant="outline">
++                    <Link
++                        href={
++                            isEditing && employeeId !== undefined
++                                ? `/pekerja/${employeeId}`
++                                : '/pekerja'
++                        }
++                    >
++                        Batal
++                    </Link>
++                </Button>
++            </div>
++
++            {Object.keys(errors).length > 0 && (
++                <Alert variant="destructive">
++                    <AlertCircle />
++                    <AlertTitle>Maklumat belum dapat disimpan</AlertTitle>
++                    <AlertDescription>
++                        Sila semak semula medan yang ditandakan di bawah.
++                    </AlertDescription>
++                </Alert>
++            )}
++
++            <form onSubmit={requestConfirmation} className="space-y-6">
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <UserRound className="size-5 text-muted-foreground" />
++                            Maklumat Utama
++                        </CardTitle>
++                        <CardDescription>
++                            Medan bertanda * wajib dilengkapkan. ID pekerja dan
++                            NRIC mestilah unik.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="grid gap-5 md:grid-cols-2">
++                        <Field
++                            htmlFor="employeeID"
++                            label="ID Pekerja"
++                            required
++                            error={errors.employeeID}
++                        >
++                            <Input
++                                id="employeeID"
++                                value={data.employeeID}
++                                onChange={(event) =>
++                                    setData('employeeID', event.target.value)
++                                }
++                                maxLength={15}
++                                required
++                                disabled={processing}
++                                autoComplete="off"
++                                aria-invalid={Boolean(errors.employeeID)}
++                                placeholder="Contoh: EMP001"
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="nric"
++                            label="No. Kad Pengenalan"
++                            required
++                            error={errors.nric}
++                        >
++                            <Input
++                                id="nric"
++                                value={data.nric}
++                                onChange={(event) =>
++                                    setData('nric', event.target.value)
++                                }
++                                inputMode="numeric"
++                                maxLength={14}
++                                required
++                                disabled={processing}
++                                autoComplete="off"
++                                aria-invalid={Boolean(errors.nric)}
++                                placeholder="Contoh: 900101011234"
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="nama"
++                            label="Nama Penuh"
++                            required
++                            error={errors.nama}
++                        >
++                            <Input
++                                id="nama"
++                                value={data.nama}
++                                onChange={(event) =>
++                                    setData('nama', event.target.value)
++                                }
++                                maxLength={255}
++                                required
++                                disabled={processing}
++                                autoComplete="name"
++                                aria-invalid={Boolean(errors.nama)}
++                                placeholder="Nama penuh pekerja"
++                            />
++                        </Field>
++
++                        <SelectField
++                            id="status"
++                            label="Status Pekerja"
++                            value={data.status}
++                            options={options.status}
++                            onChange={(value) => setData('status', value)}
++                            error={errors.status}
++                            required
++                            disabled={processing}
++                        />
++
++                        <Field
++                            htmlFor="tarikhlahir"
++                            label="Tarikh Lahir"
++                            error={errors.tarikhlahir}
++                        >
++                            <Input
++                                id="tarikhlahir"
++                                type="date"
++                                value={data.tarikhlahir}
++                                onChange={(event) =>
++                                    setData('tarikhlahir', event.target.value)
++                                }
++                                max={new Date().toISOString().slice(0, 10)}
++                                disabled={processing}
++                                aria-invalid={Boolean(errors.tarikhlahir)}
++                            />
++                        </Field>
++
++                        <SelectField
++                            id="jantina"
++                            label="Jantina"
++                            value={data.jantina}
++                            options={options.jantina}
++                            onChange={(value) => setData('jantina', value)}
++                            error={errors.jantina}
++                            disabled={processing}
++                        />
++
++                        <SelectField
++                            id="agama"
++                            label="Agama"
++                            value={data.agama}
++                            options={options.agama}
++                            onChange={(value) => setData('agama', value)}
++                            error={errors.agama}
++                            disabled={processing}
++                        />
++
++                        <SelectField
++                            id="bangsa"
++                            label="Bangsa"
++                            value={data.bangsa}
++                            options={options.bangsa}
++                            onChange={(value) => setData('bangsa', value)}
++                            error={errors.bangsa}
++                            disabled={processing}
++                        />
++
++                        <SelectField
++                            id="statusperkahwinan"
++                            label="Status Perkahwinan"
++                            value={data.statusperkahwinan}
++                            options={options.statusPerkahwinan}
++                            onChange={(value) =>
++                                setData('statusperkahwinan', value)
++                            }
++                            error={errors.statusperkahwinan}
++                            disabled={processing}
++                        />
++
++                        <Field
++                            htmlFor="kewarganegaraan"
++                            label="Kewarganegaraan"
++                            error={errors.kewarganegaraan}
++                        >
++                            <Input
++                                id="kewarganegaraan"
++                                value={data.kewarganegaraan}
++                                onChange={(event) =>
++                                    setData(
++                                        'kewarganegaraan',
++                                        event.target.value,
++                                    )
++                                }
++                                maxLength={255}
++                                disabled={processing}
++                                aria-invalid={Boolean(errors.kewarganegaraan)}
++                                placeholder="Contoh: Malaysia"
++                            />
++                        </Field>
++                    </CardContent>
++                </Card>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle>Maklumat Hubungan</CardTitle>
++                        <CardDescription>
++                            Maklumat ini boleh dikemas kini apabila terdapat
++                            perubahan.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="grid gap-5 md:grid-cols-2">
++                        <Field
++                            htmlFor="notel"
++                            label="No. Telefon"
++                            error={errors.notel}
++                        >
++                            <Input
++                                id="notel"
++                                type="tel"
++                                value={data.notel}
++                                onChange={(event) =>
++                                    setData('notel', event.target.value)
++                                }
++                                maxLength={20}
++                                disabled={processing}
++                                autoComplete="tel"
++                                aria-invalid={Boolean(errors.notel)}
++                                placeholder="Contoh: 0123456789"
++                            />
++                        </Field>
++
++                        <Field
++                            htmlFor="email"
++                            label="E-mel"
++                            error={errors.email}
++                        >
++                            <Input
++                                id="email"
++                                type="email"
++                                value={data.email}
++                                onChange={(event) =>
++                                    setData('email', event.target.value)
++                                }
++                                maxLength={255}
++                                disabled={processing}
++                                autoComplete="email"
++                                aria-invalid={Boolean(errors.email)}
++                                placeholder="nama@contoh.com"
++                            />
++                        </Field>
++
++                        <div className="md:col-span-2">
++                            <Field
++                                htmlFor="alamat"
++                                label="Alamat"
++                                error={errors.alamat}
++                            >
++                                <textarea
++                                    id="alamat"
++                                    value={data.alamat}
++                                    onChange={(event) =>
++                                        setData('alamat', event.target.value)
++                                    }
++                                    maxLength={255}
++                                    rows={4}
++                                    disabled={processing}
++                                    autoComplete="street-address"
++                                    aria-invalid={Boolean(errors.alamat)}
++                                    placeholder="Alamat surat-menyurat pekerja"
++                                    className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:bg-input/30 dark:aria-invalid:ring-destructive/40"
++                                />
++                            </Field>
++                        </div>
++                    </CardContent>
++                </Card>
++
++                <div className="flex flex-col-reverse gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center sm:justify-end">
++                    <Button asChild variant="outline">
++                        <Link
++                            href={
++                                isEditing && employeeId !== undefined
++                                    ? `/pekerja/${employeeId}`
++                                    : '/pekerja'
++                            }
++                        >
++                            Batal
++                        </Link>
++                    </Button>
++                    <Button
++                        type="submit"
++                        disabled={processing || (isEditing && !isDirty)}
++                    >
++                        <Save />
++                        {isEditing ? 'Simpan Perubahan' : 'Tambah Pekerja'}
++                    </Button>
++                </div>
++            </form>
++
++            <Dialog open={confirmationOpen} onOpenChange={setConfirmationOpen}>
++                <DialogContent>
++                    <DialogHeader>
++                        <DialogTitle>
++                            {isEditing
++                                ? 'Sahkan perubahan pekerja'
++                                : 'Sahkan pendaftaran pekerja'}
++                        </DialogTitle>
++                        <DialogDescription>
++                            {isEditing
++                                ? `Maklumat ${data.nama || 'pekerja ini'} akan dikemas kini dalam db_spp dan direkodkan dalam audit log.`
++                                : `${data.nama || 'Pekerja baharu'} akan ditambah ke dalam db_spp dan tindakan ini direkodkan dalam audit log.`}
++                        </DialogDescription>
++                    </DialogHeader>
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button variant="outline" disabled={processing}>
++                                Semak Semula
++                            </Button>
++                        </DialogClose>
++                        <Button
++                            type="button"
++                            onClick={submit}
++                            disabled={processing}
++                        >
++                            <Save />
++                            {processing ? 'Sedang menyimpan...' : 'Ya, Simpan'}
++                        </Button>
++                    </DialogFooter>
++                </DialogContent>
++            </Dialog>
++        </div>
++    );
++}
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index 9ecf93e..2fca232 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -82,6 +82,7 @@ type UserManagementProps = {
+ const permissionLabels: Record<Permission, string> = {
+     'dashboard.view': 'Dashboard',
+     'employees.view': 'Pekerja',
++    'employees.manage': 'Urus Pekerja',
+     'positions.view': 'Jawatan',
+     'attendance.view': 'Kehadiran',
+     'leave.view': 'Cuti',
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index 3a4afef..de503e3 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -3,6 +3,7 @@ export type UserRole = 'super_admin' | 'hr_admin' | 'viewer';
+ export type Permission =
+     | 'dashboard.view'
+     | 'employees.view'
++    | 'employees.manage'
+     | 'positions.view'
+     | 'attendance.view'
+     | 'leave.view'
+diff --git a/routes/web.php b/routes/web.php
+index 16f689f..7506a2e 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -20,9 +20,24 @@
+ 
+     Route::middleware('permission:employees.view')->group(function () {
+         Route::get('pekerja', [MaklumatPekerjaController::class, 'index'])->name('pekerja.index');
++        Route::get('pekerja/create', [MaklumatPekerjaController::class, 'create'])
++            ->middleware('permission:employees.manage')
++            ->name('pekerja.create');
+         Route::get('pekerja/{id}', [MaklumatPekerjaController::class, 'show'])
+             ->whereNumber('id')
+             ->name('pekerja.show');
++        Route::middleware('permission:employees.manage')->group(function () {
++            Route::post('pekerja', [MaklumatPekerjaController::class, 'store'])->name('pekerja.store');
++            Route::get('pekerja/{id}/edit', [MaklumatPekerjaController::class, 'edit'])
++                ->whereNumber('id')
++                ->name('pekerja.edit');
++            Route::put('pekerja/{id}', [MaklumatPekerjaController::class, 'update'])
++                ->whereNumber('id')
++                ->name('pekerja.update');
++            Route::delete('pekerja/{id}', [MaklumatPekerjaController::class, 'destroy'])
++                ->whereNumber('id')
++                ->name('pekerja.destroy');
++        });
+     });
+ 
+     Route::get('jawatan', [MaklumatJawatanController::class, 'index'])
+diff --git a/tests/Feature/PekerjaCrudTest.php b/tests/Feature/PekerjaCrudTest.php
+new file mode 100644
+index 0000000..929d57a
+--- /dev/null
++++ b/tests/Feature/PekerjaCrudTest.php
+@@ -0,0 +1,216 @@
++<?php
++
++use App\Models\User;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('nric')->nullable();
++        $table->string('employeeID', 15)->nullable();
++        $table->string('nama')->nullable();
++        $table->string('alamat')->nullable();
++        $table->string('jantina', 1)->nullable();
++        $table->date('tarikhlahir')->nullable();
++        $table->string('agama', 1)->nullable();
++        $table->string('bangsa', 1)->nullable();
++        $table->string('kewarganegaraan')->nullable();
++        $table->string('statusperkahwinan', 2)->nullable();
++        $table->string('notel', 20)->nullable();
++        $table->string('email')->nullable();
++        $table->string('status', 1)->nullable();
++        $table->boolean('rcd_enable')->default(true);
++        $table->string('crt_by', 12)->nullable();
++        $table->date('crt_dt')->nullable();
++        $table->string('mdf_by', 12)->nullable();
++        $table->date('mdf_dt')->nullable();
++    });
++
++    foreach (['xjantina', 'xagama', 'xbangsa', 'xstatus'] as $tableName) {
++        Schema::connection('ibco')->create($tableName, function (Blueprint $table) {
++            $table->increments('id');
++            $table->string('description');
++            $table->boolean('rcd_enable')->default(true);
++        });
++    }
++
++    Schema::connection('ibco')->create('xstatusperkahwinan', function (Blueprint $table) {
++        $table->string('id', 1)->primary();
++        $table->string('description');
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    DB::connection('ibco')->table('xjantina')->insert([
++        'id' => 1,
++        'description' => 'Lelaki',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xagama')->insert([
++        'id' => 1,
++        'description' => 'Islam',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xbangsa')->insert([
++        'id' => 1,
++        'description' => 'Melayu',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xstatus')->insert([
++        'id' => 1,
++        'description' => 'Aktif',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xstatusperkahwinan')->insert([
++        'id' => 'B',
++        'description' => 'Bujang',
++        'rcd_enable' => 1,
++    ]);
++});
++
++afterEach(function () {
++    DB::disconnect('ibco');
++});
++
++function validEmployeePayload(array $overrides = []): array
++{
++    return [
++        'employeeID' => 'EMP001',
++        'nric' => '900101011234',
++        'nama' => 'Pekerja Contoh',
++        'alamat' => 'Kuala Lumpur',
++        'jantina' => '1',
++        'tarikhlahir' => '1990-01-01',
++        'agama' => '1',
++        'bangsa' => '1',
++        'kewarganegaraan' => 'Malaysia',
++        'statusperkahwinan' => 'B',
++        'notel' => '0123456789',
++        'email' => 'pekerja@example.com',
++        'status' => '1',
++        ...$overrides,
++    ];
++}
++
++test('hr admin can create an employee and an audit log is recorded', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create([
++        'name' => 'Pentadbir HR Panjang',
++    ]);
++
++    $response = $this->actingAs($hrAdmin)
++        ->post(route('pekerja.store'), validEmployeePayload());
++
++    $employee = DB::connection('ibco')->table('maklumatpekerja')->first();
++
++    $response->assertRedirect(route('pekerja.show', $employee->id));
++
++    $this->assertDatabaseHas('maklumatpekerja', [
++        'employeeID' => 'EMP001',
++        'nric' => '900101011234',
++        'nama' => 'Pekerja Contoh',
++        'rcd_enable' => 1,
++        'crt_by' => 'Pentadbir HR',
++    ], 'ibco');
++
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $hrAdmin->id,
++        'action' => 'employee.created',
++        'auditable_type' => 'maklumatpekerja',
++        'auditable_id' => (string) $employee->id,
++    ]);
++});
++
++test('viewer cannot open or submit employee management pages', function () {
++    $viewer = User::factory()->create();
++
++    $this->actingAs($viewer)
++        ->get(route('pekerja.create'))
++        ->assertForbidden();
++
++    $this->actingAs($viewer)
++        ->post(route('pekerja.store'), validEmployeePayload())
++        ->assertForbidden();
++
++    $this->assertDatabaseCount('maklumatpekerja', 0, 'ibco');
++});
++
++test('employee id and nric duplicates are rejected', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    DB::connection('ibco')->table('maklumatpekerja')->insert([
++        ...validEmployeePayload(),
++        'rcd_enable' => 1,
++    ]);
++
++    $this->actingAs($hrAdmin)
++        ->from(route('pekerja.create'))
++        ->post(route('pekerja.store'), validEmployeePayload([
++            'nama' => 'Rekod Pendua',
++        ]))
++        ->assertRedirect(route('pekerja.create'))
++        ->assertSessionHasErrors(['employeeID', 'nric']);
++
++    $this->assertDatabaseCount('maklumatpekerja', 1, 'ibco');
++});
++
++test('hr admin can update an active employee and changes are audited', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        ...validEmployeePayload(),
++        'rcd_enable' => 1,
++    ]);
++
++    $this->actingAs($hrAdmin)
++        ->put(route('pekerja.update', $employeeId), validEmployeePayload([
++            'nama' => 'Nama Dikemas Kini',
++            'notel' => '0198765432',
++        ]))
++        ->assertRedirect(route('pekerja.show', $employeeId));
++
++    $this->assertDatabaseHas('maklumatpekerja', [
++        'id' => $employeeId,
++        'nama' => 'Nama Dikemas Kini',
++        'notel' => '0198765432',
++    ], 'ibco');
++
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $hrAdmin->id,
++        'action' => 'employee.updated',
++        'auditable_id' => (string) $employeeId,
++    ]);
++});
++
++test('destroy only deactivates an employee and records an audit log', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        ...validEmployeePayload(),
++        'rcd_enable' => 1,
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->delete(route('pekerja.destroy', $employeeId))
++        ->assertRedirect(route('pekerja.index'));
++
++    $this->assertDatabaseHas('maklumatpekerja', [
++        'id' => $employeeId,
++        'rcd_enable' => 0,
++    ], 'ibco');
++
++    $this->assertDatabaseHas('audit_logs', [
++        'user_id' => $superAdmin->id,
++        'action' => 'employee.deactivated',
++        'auditable_id' => (string) $employeeId,
++    ]);
++});

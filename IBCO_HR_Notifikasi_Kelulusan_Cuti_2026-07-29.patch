@@ -1,0 +1,565 @@
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index a0d5a8e..395fe57 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Middleware;
+ 
++use App\Support\LeaveApprovalAlerts;
+ use Illuminate\Http\Request;
+ use Inertia\Middleware;
+ 
+@@ -50,6 +51,8 @@ class HandleInertiaRequests extends Middleware
+                     : null,
+                 'permissions' => $user?->permissions() ?? [],
+             ],
++            'leaveApprovalAlerts' => fn () => app(LeaveApprovalAlerts::class)
++                ->summarizeFor($user),
+             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
+         ];
+     }
+diff --git a/app/Support/LeaveApprovalAlerts.php b/app/Support/LeaveApprovalAlerts.php
+new file mode 100644
+index 0000000..cb5bc81
+--- /dev/null
++++ b/app/Support/LeaveApprovalAlerts.php
+@@ -0,0 +1,86 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\EmployeeLeaveRequest;
++use App\Models\LeaveApprovalAssignment;
++use App\Models\User;
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Support\Facades\Schema;
++
++class LeaveApprovalAlerts
++{
++    /**
++     * @return array{
++     *     enabled: bool,
++     *     total: int,
++     *     supervisor: int,
++     *     hr: int,
++     *     polling_seconds: int
++     * }
++     */
++    public function summarizeFor(?User $user): array
++    {
++        $summary = [
++            'enabled' => false,
++            'total' => 0,
++            'supervisor' => 0,
++            'hr' => 0,
++            'polling_seconds' => 60,
++        ];
++
++        if (
++            ! $user
++            || ! Schema::hasTable('employee_leave_requests')
++            || ! Schema::hasTable('leave_approval_assignments')
++        ) {
++            return $summary;
++        }
++
++        $canManage = $user->hasPermission('leave.manage');
++        $canSupervise = $user->hasPermission('leave.supervise');
++
++        if (! $canManage && ! $canSupervise) {
++            return $summary;
++        }
++
++        $supervisorCount = $canSupervise
++            ? $this->supervisorQuery($user, $canManage)->count()
++            : 0;
++        $hrCount = $canManage
++            ? EmployeeLeaveRequest::query()
++                ->where('status', 'pending')
++                ->where(function (Builder $query) {
++                    $query->where('approval_stage', 'hr')
++                        ->orWhereNull('approval_stage');
++                })
++                ->count()
++            : 0;
++
++        return [
++            ...$summary,
++            'enabled' => true,
++            'total' => $supervisorCount + $hrCount,
++            'supervisor' => $supervisorCount,
++            'hr' => $hrCount,
++        ];
++    }
++
++    private function supervisorQuery(User $user, bool $canManage): Builder
++    {
++        $query = EmployeeLeaveRequest::query()
++            ->where('status', 'pending')
++            ->where('approval_stage', 'supervisor');
++
++        if ($canManage) {
++            return $query;
++        }
++
++        $departmentIds = LeaveApprovalAssignment::query()
++            ->where('approver_user_id', $user->getAuthIdentifier())
++            ->where('is_active', true)
++            ->pluck('department_id');
++
++        return $query->whereIn('department_id', $departmentIds);
++    }
++}
+diff --git a/resources/js/components/app-sidebar-header.tsx b/resources/js/components/app-sidebar-header.tsx
+index 9d53d6c..d0a19de 100644
+--- a/resources/js/components/app-sidebar-header.tsx
++++ b/resources/js/components/app-sidebar-header.tsx
+@@ -1,4 +1,5 @@
+ import { Breadcrumbs } from '@/components/breadcrumbs';
++import { LeaveApprovalNotifications } from '@/components/leave-approval-notifications';
+ import { SidebarTrigger } from '@/components/ui/sidebar';
+ import type { BreadcrumbItem as BreadcrumbItemType } from '@/types';
+ 
+@@ -13,6 +14,9 @@ export function AppSidebarHeader({
+                 <SidebarTrigger className="-ml-1" />
+                 <Breadcrumbs breadcrumbs={breadcrumbs} />
+             </div>
++            <div className="ml-auto flex items-center">
++                <LeaveApprovalNotifications />
++            </div>
+         </header>
+     );
+ }
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index a38ebf5..3b3435a 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -32,7 +32,7 @@ import {
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+ import { hasPermission } from '@/lib/permissions';
+-import type { Auth, NavItem, Permission } from '@/types';
++import type { Auth, LeaveApprovalAlerts, NavItem, Permission } from '@/types';
+ import { dashboard } from '@/routes';
+ 
+ type AuthorizedNavItem = NavItem & {
+@@ -168,7 +168,10 @@ const footerNavItems: NavItem[] = [
+ ];
+ 
+ export function AppSidebar() {
+-    const { auth } = usePage<{ auth: Auth }>().props;
++    const { auth, leaveApprovalAlerts } = usePage<{
++        auth: Auth;
++        leaveApprovalAlerts?: LeaveApprovalAlerts;
++    }>().props;
+     const visibleItems = (items: AuthorizedNavItem[]) =>
+         items.filter((item) =>
+             Array.isArray(item.permission)
+@@ -181,7 +184,15 @@ export function AppSidebar() {
+     const visibleMainItems = visibleItems(mainNavItems);
+     const visibleEmployeeItems = visibleItems(employeeNavItems);
+     const visibleSelfServiceItems = visibleItems(selfServiceNavItems);
+-    const visibleAttendanceItems = visibleItems(attendanceNavItems);
++    const visibleAttendanceItems = visibleItems(attendanceNavItems).map(
++        (item) =>
++            item.title === 'Permohonan Cuti'
++                ? {
++                      ...item,
++                      badge: leaveApprovalAlerts?.total ?? 0,
++                  }
++                : item,
++    );
+     const visiblePayrollItems = visibleItems(payrollNavItems);
+     const visibleAdministrationItems = visibleItems(administrationNavItems);
+ 
+diff --git a/resources/js/components/leave-approval-notifications.tsx b/resources/js/components/leave-approval-notifications.tsx
+new file mode 100644
+index 0000000..10d1d27
+--- /dev/null
++++ b/resources/js/components/leave-approval-notifications.tsx
+@@ -0,0 +1,191 @@
++import { Link, router, usePage } from '@inertiajs/react';
++import {
++    BellRing,
++    CheckCircle2,
++    ChevronRight,
++    ShieldCheck,
++    UserRoundCheck,
++} from 'lucide-react';
++import { useEffect } from 'react';
++import { Button } from '@/components/ui/button';
++import {
++    DropdownMenu,
++    DropdownMenuContent,
++    DropdownMenuItem,
++    DropdownMenuLabel,
++    DropdownMenuSeparator,
++    DropdownMenuTrigger,
++} from '@/components/ui/dropdown-menu';
++import type { LeaveApprovalAlerts } from '@/types';
++
++function countLabel(count: number): string {
++    return count > 99 ? '99+' : String(count);
++}
++
++export function LeaveApprovalNotifications() {
++    const { leaveApprovalAlerts } = usePage<{
++        leaveApprovalAlerts?: LeaveApprovalAlerts;
++    }>().props;
++    const alerts = leaveApprovalAlerts ?? {
++        enabled: false,
++        total: 0,
++        supervisor: 0,
++        hr: 0,
++        polling_seconds: 60,
++    };
++
++    useEffect(() => {
++        if (!alerts.enabled) {
++            return;
++        }
++
++        const interval = window.setInterval(
++            () =>
++                router.reload({
++                    only: ['leaveApprovalAlerts'],
++                }),
++            Math.max(alerts.polling_seconds, 30) * 1000,
++        );
++
++        return () => window.clearInterval(interval);
++    }, [alerts.enabled, alerts.polling_seconds]);
++
++    if (!alerts.enabled) {
++        return null;
++    }
++
++    const triggerLabel =
++        alerts.total > 0
++            ? `${alerts.total} permohonan cuti menunggu tindakan`
++            : 'Tiada permohonan cuti menunggu tindakan';
++
++    return (
++        <DropdownMenu>
++            <DropdownMenuTrigger asChild>
++                <Button
++                    variant="ghost"
++                    size="icon"
++                    className="relative rounded-full"
++                    aria-label={triggerLabel}
++                    title={triggerLabel}
++                >
++                    <BellRing
++                        className={
++                            alerts.total > 0
++                                ? 'text-amber-600 dark:text-amber-400'
++                                : 'text-muted-foreground'
++                        }
++                    />
++                    {alerts.total > 0 && (
++                        <>
++                            <span className="absolute top-1.5 right-1.5 size-2 rounded-full bg-red-600 ring-2 ring-background" />
++                            <span className="absolute -top-1 -right-1 flex min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] leading-5 font-bold text-white shadow-sm">
++                                {countLabel(alerts.total)}
++                            </span>
++                        </>
++                    )}
++                </Button>
++            </DropdownMenuTrigger>
++            <DropdownMenuContent
++                align="end"
++                className="w-[min(22rem,calc(100vw-2rem))] p-2"
++            >
++                <DropdownMenuLabel className="flex items-start justify-between gap-4 px-2 py-2">
++                    <span>
++                        <span className="block font-semibold">
++                            Kelulusan Cuti
++                        </span>
++                        <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
++                            Dikemas kini secara automatik setiap minit
++                        </span>
++                    </span>
++                    {alerts.total > 0 && (
++                        <span className="rounded-full bg-red-600 px-2 py-0.5 text-xs font-bold text-white">
++                            {countLabel(alerts.total)}
++                        </span>
++                    )}
++                </DropdownMenuLabel>
++                <DropdownMenuSeparator />
++
++                {alerts.total === 0 ? (
++                    <div className="flex items-center gap-3 px-2 py-4">
++                        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/10">
++                            <CheckCircle2 className="size-5 text-emerald-600" />
++                        </span>
++                        <div>
++                            <p className="text-sm font-medium">
++                                Semua permohonan telah disemak
++                            </p>
++                            <p className="text-xs text-muted-foreground">
++                                Tiada tindakan kelulusan diperlukan.
++                            </p>
++                        </div>
++                    </div>
++                ) : (
++                    <div className="space-y-1">
++                        {alerts.supervisor > 0 && (
++                            <DropdownMenuItem asChild className="p-0">
++                                <Link
++                                    href="/permohonan-cuti?status=pending&stage=supervisor"
++                                    className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-3"
++                                >
++                                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-amber-500/10">
++                                        <UserRoundCheck className="size-5 text-amber-600" />
++                                    </span>
++                                    <span className="min-w-0 flex-1">
++                                        <span className="block text-sm font-medium">
++                                            Menunggu Penyelia
++                                        </span>
++                                        <span className="block text-xs text-muted-foreground">
++                                            Sokong atau tolak permohonan
++                                        </span>
++                                    </span>
++                                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-bold text-amber-700 dark:text-amber-300">
++                                        {countLabel(alerts.supervisor)}
++                                    </span>
++                                    <ChevronRight className="size-4 text-muted-foreground" />
++                                </Link>
++                            </DropdownMenuItem>
++                        )}
++
++                        {alerts.hr > 0 && (
++                            <DropdownMenuItem asChild className="p-0">
++                                <Link
++                                    href="/permohonan-cuti?status=pending&stage=hr"
++                                    className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-3"
++                                >
++                                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sky-500/10">
++                                        <ShieldCheck className="size-5 text-sky-600" />
++                                    </span>
++                                    <span className="min-w-0 flex-1">
++                                        <span className="block text-sm font-medium">
++                                            Menunggu HR
++                                        </span>
++                                        <span className="block text-xs text-muted-foreground">
++                                            Kelulusan akhir diperlukan
++                                        </span>
++                                    </span>
++                                    <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-bold text-sky-700 dark:text-sky-300">
++                                        {countLabel(alerts.hr)}
++                                    </span>
++                                    <ChevronRight className="size-4 text-muted-foreground" />
++                                </Link>
++                            </DropdownMenuItem>
++                        )}
++                    </div>
++                )}
++
++                <DropdownMenuSeparator />
++                <DropdownMenuItem asChild>
++                    <Link
++                        href="/permohonan-cuti"
++                        className="flex cursor-pointer items-center justify-between font-medium"
++                    >
++                        Buka Permohonan Cuti
++                        <ChevronRight />
++                    </Link>
++                </DropdownMenuItem>
++            </DropdownMenuContent>
++        </DropdownMenu>
++    );
++}
+diff --git a/resources/js/components/nav-main.tsx b/resources/js/components/nav-main.tsx
+index 777591d..84a06c1 100644
+--- a/resources/js/components/nav-main.tsx
++++ b/resources/js/components/nav-main.tsx
+@@ -3,6 +3,7 @@ import {
+     SidebarGroup,
+     SidebarGroupLabel,
+     SidebarMenu,
++    SidebarMenuBadge,
+     SidebarMenuButton,
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+@@ -22,20 +23,39 @@ export function NavMain({
+         <SidebarGroup className="px-2 py-0">
+             <SidebarGroupLabel>{label}</SidebarGroupLabel>
+             <SidebarMenu>
+-                {items.map((item) => (
+-                    <SidebarMenuItem key={item.title}>
+-                        <SidebarMenuButton
+-                            asChild
+-                            isActive={isCurrentUrl(item.href)}
+-                            tooltip={{ children: item.title }}
+-                        >
+-                            <Link href={item.href} prefetch>
+-                                {item.icon && <item.icon />}
+-                                <span>{item.title}</span>
+-                            </Link>
+-                        </SidebarMenuButton>
+-                    </SidebarMenuItem>
+-                ))}
++                {items.map((item) => {
++                    const badge =
++                        typeof item.badge === 'number' && item.badge > 0
++                            ? item.badge
++                            : 0;
++                    const tooltip = badge
++                        ? `${item.title} · ${badge} menunggu tindakan`
++                        : item.title;
++
++                    return (
++                        <SidebarMenuItem key={item.title}>
++                            <SidebarMenuButton
++                                asChild
++                                isActive={isCurrentUrl(item.href)}
++                                tooltip={{ children: tooltip }}
++                            >
++                                <Link
++                                    href={item.href}
++                                    prefetch
++                                    aria-label={tooltip}
++                                >
++                                    {item.icon && <item.icon />}
++                                    <span>{item.title}</span>
++                                </Link>
++                            </SidebarMenuButton>
++                            {badge > 0 && (
++                                <SidebarMenuBadge className="bg-red-600 font-semibold text-white shadow-sm shadow-red-600/30">
++                                    {badge > 99 ? '99+' : badge}
++                                </SidebarMenuBadge>
++                            )}
++                        </SidebarMenuItem>
++                    );
++                })}
+             </SidebarMenu>
+         </SidebarGroup>
+     );
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index a5e302c..ecac6b4 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -44,6 +44,14 @@ export type Auth = {
+     permissions: Permission[];
+ };
+ 
++export type LeaveApprovalAlerts = {
++    enabled: boolean;
++    total: number;
++    supervisor: number;
++    hr: number;
++    polling_seconds: number;
++};
++
+ /* @chisel-passkeys */
+ export type Passkey = {
+     id: number;
+diff --git a/resources/js/types/navigation.ts b/resources/js/types/navigation.ts
+index dbf6f83..cd4fb1f 100644
+--- a/resources/js/types/navigation.ts
++++ b/resources/js/types/navigation.ts
+@@ -11,4 +11,5 @@ export type NavItem = {
+     href: NonNullable<InertiaLinkProps['href']>;
+     icon?: LucideIcon | null;
+     isActive?: boolean;
++    badge?: number;
+ };
+diff --git a/tests/Feature/LeaveApprovalAlertsTest.php b/tests/Feature/LeaveApprovalAlertsTest.php
+new file mode 100644
+index 0000000..4dd4c61
+--- /dev/null
++++ b/tests/Feature/LeaveApprovalAlertsTest.php
+@@ -0,0 +1,92 @@
++<?php
++
++use App\Models\EmployeeLeaveRequest;
++use App\Models\LeaveApprovalAssignment;
++use App\Models\LeaveType;
++use App\Models\User;
++use App\Support\LeaveApprovalAlerts;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++
++uses(RefreshDatabase::class);
++
++function createPendingLeaveAlert(
++    User $employee,
++    LeaveType $leaveType,
++    int $departmentId,
++    string $stage,
++): EmployeeLeaveRequest {
++    return EmployeeLeaveRequest::query()->create([
++        'user_id' => $employee->getKey(),
++        'employee_id' => 1000 + $departmentId,
++        'department_id' => $departmentId,
++        'leave_type_id' => $leaveType->getKey(),
++        'system_leave_type_id' => $leaveType->getKey(),
++        'leave_type_label' => $leaveType->name,
++        'start_date' => '2026-08-03',
++        'end_date' => '2026-08-03',
++        'duration_type' => 'full_day',
++        'requested_days' => 1,
++        'reason' => 'Permohonan untuk menguji badge notifikasi.',
++        'status' => 'pending',
++        'approval_stage' => $stage,
++        'submitted_at' => now(),
++    ]);
++}
++
++test('leave approval badges only count requests actionable by each role', function () {
++    $employee = User::factory()->employee()->create();
++    $assignedSupervisor = User::factory()->supervisor()->create();
++    $otherSupervisor = User::factory()->supervisor()->create();
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $superAdmin = User::factory()->superAdmin()->create();
++    $leaveType = LeaveType::query()->where('code', 'ANNUAL')->firstOrFail();
++
++    LeaveApprovalAssignment::query()->create([
++        'department_id' => 10,
++        'approver_user_id' => $assignedSupervisor->getKey(),
++        'is_active' => true,
++    ]);
++    LeaveApprovalAssignment::query()->create([
++        'department_id' => 20,
++        'approver_user_id' => $otherSupervisor->getKey(),
++        'is_active' => true,
++    ]);
++
++    createPendingLeaveAlert($employee, $leaveType, 10, 'supervisor');
++    createPendingLeaveAlert($employee, $leaveType, 20, 'supervisor');
++    createPendingLeaveAlert($employee, $leaveType, 10, 'hr');
++    $completed = createPendingLeaveAlert(
++        $employee,
++        $leaveType,
++        10,
++        'completed',
++    );
++    $completed->update(['status' => 'approved']);
++
++    $alerts = app(LeaveApprovalAlerts::class);
++
++    expect($alerts->summarizeFor($assignedSupervisor))->toMatchArray([
++        'enabled' => true,
++        'total' => 1,
++        'supervisor' => 1,
++        'hr' => 0,
++    ]);
++    expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
++        'enabled' => true,
++        'total' => 1,
++        'supervisor' => 0,
++        'hr' => 1,
++    ]);
++    expect($alerts->summarizeFor($superAdmin))->toMatchArray([
++        'enabled' => true,
++        'total' => 3,
++        'supervisor' => 2,
++        'hr' => 1,
++    ]);
++    expect($alerts->summarizeFor($employee))->toMatchArray([
++        'enabled' => false,
++        'total' => 0,
++        'supervisor' => 0,
++        'hr' => 0,
++    ]);
++});

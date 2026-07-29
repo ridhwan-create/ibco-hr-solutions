@@ -1,0 +1,3186 @@
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index e311d81..1317fe7 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -25,6 +25,7 @@ enum UserRole: string
+                 'attendance.manage',
+                 'attendance.settings',
+                 'leave.view',
++                'leave.manage',
+                 'overtime.view',
+                 'payroll.view',
+                 'reports.view',
+@@ -40,6 +41,7 @@ enum UserRole: string
+                 'attendance.view',
+                 'attendance.manage',
+                 'leave.view',
++                'leave.manage',
+                 'overtime.view',
+                 'payroll.view',
+                 'reports.view',
+@@ -55,6 +57,10 @@ enum UserRole: string
+             ],
+             self::Employee => [
+                 'dashboard.view',
++                'employee.profile.view',
++                'employee.profile.update',
++                'leave.self',
++                'leave.apply',
+                 'attendance.clock',
+             ],
+         };
+@@ -81,7 +87,7 @@ enum UserRole: string
+             self::SuperAdmin => 'Akses penuh termasuk pengurusan pengguna dan role.',
+             self::HrAdmin => 'Akses semua modul HR termasuk payroll dan laporan.',
+             self::Viewer => 'Akses paparan operasi tanpa payroll, laporan dan pengurusan pengguna.',
+-            self::Employee => 'Rakam masuk/keluar dan lihat sejarah kehadiran sendiri.',
++            self::Employee => 'Akses profil sendiri, permohonan cuti dan rakaman kehadiran.',
+         };
+     }
+ 
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 344614b..04bab71 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -41,6 +41,11 @@ class AuditTrailController extends Controller
+         'user.created' => 'Pengguna Sistem Ditambah',
+         'user.updated' => 'Pengguna Sistem Dikemas Kini',
+         'user.password.bulk_reset' => 'Kata Laluan Direset Secara Pukal',
++        'employee.profile_updated' => 'Profil Sendiri Dikemas Kini',
++        'leave.submitted' => 'Permohonan Cuti Dihantar',
++        'leave.approved' => 'Permohonan Cuti Diluluskan',
++        'leave.rejected' => 'Permohonan Cuti Ditolak',
++        'leave.cancelled' => 'Permohonan Cuti Dibatalkan',
+     ];
+ 
+     private const AUDITABLE_TYPES = [
+@@ -50,6 +55,8 @@ class AuditTrailController extends Controller
+         'office_locations',
+         'employee_user_links',
+         'users',
++        'employee_personal_profiles',
++        'employee_leave_requests',
+     ];
+ 
+     public function index(Request $request): Response
+@@ -237,6 +244,7 @@ class AuditTrailController extends Controller
+                     + ($actionCounts['office.created'] ?? 0)
+                     + ($actionCounts['employee_link.created'] ?? 0)
+                     + ($actionCounts['user.created'] ?? 0)
++                    + ($actionCounts['leave.submitted'] ?? 0)
+                 ),
+                 'updated' => (int) (
+                     ($actionCounts['employee.updated'] ?? 0)
+@@ -248,6 +256,9 @@ class AuditTrailController extends Controller
+                     + ($actionCounts['employee_link.updated'] ?? 0)
+                     + ($actionCounts['user.updated'] ?? 0)
+                     + ($actionCounts['user.password.bulk_reset'] ?? 0)
++                    + ($actionCounts['employee.profile_updated'] ?? 0)
++                    + ($actionCounts['leave.approved'] ?? 0)
++                    + ($actionCounts['leave.rejected'] ?? 0)
+                 ),
+                 'deactivated' => (int) (
+                     ($actionCounts['employee.deactivated'] ?? 0)
+@@ -255,6 +266,7 @@ class AuditTrailController extends Controller
+                     + ($actionCounts['attendance.cancelled'] ?? 0)
+                     + ($actionCounts['office.deactivated'] ?? 0)
+                     + ($actionCounts['employee_link.deactivated'] ?? 0)
++                    + ($actionCounts['leave.cancelled'] ?? 0)
+                 ),
+                 'reactivated' => (int) (
+                     ($actionCounts['employee.reactivated'] ?? 0)
+@@ -364,6 +376,8 @@ class AuditTrailController extends Controller
+             ->whereIn('auditable_type', [
+                 'geo_attendance_records',
+                 'employee_user_links',
++                'employee_personal_profiles',
++                'employee_leave_requests',
+             ])
+             ->map(fn (AuditLog $audit) => (
+                 data_get($audit->new_values, 'employee_id')
+@@ -405,7 +419,10 @@ class AuditTrailController extends Controller
+                 $employeeId = match ($audit->auditable_type) {
+                     'maklumatjawatan' => $positionEmployeeIds[(string) $audit->auditable_id] ?? null,
+                     'maklumatpekerja' => (string) $audit->auditable_id,
+-                    'geo_attendance_records', 'employee_user_links' => (
++                    'geo_attendance_records',
++                    'employee_user_links',
++                    'employee_personal_profiles',
++                    'employee_leave_requests' => (
+                         data_get($audit->new_values, 'employee_id')
+                         ?? data_get($audit->old_values, 'employee_id')
+                         ?? null
+diff --git a/app/Http/Controllers/EmployeeLeaveController.php b/app/Http/Controllers/EmployeeLeaveController.php
+new file mode 100644
+index 0000000..95df527
+--- /dev/null
++++ b/app/Http/Controllers/EmployeeLeaveController.php
+@@ -0,0 +1,297 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Http\Requests\StoreEmployeeLeaveRequest;
++use App\Models\EmployeeLeaveRequest;
++use App\Models\EmployeeUserLink;
++use App\Support\AuditLogger;
++use Carbon\Carbon;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class EmployeeLeaveController extends Controller
++{
++    public function index(Request $request): Response
++    {
++        $link = $this->activeLink($request);
++
++        if (! $link) {
++            return Inertia::render('EmployeeSelfService/Leave', [
++                'employee' => null,
++                'leaveTypes' => [],
++                'summary' => $this->emptySummary(),
++                'requests' => [],
++                'legacyLeave' => [],
++            ]);
++        }
++
++        $employee = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $link->employee_id)
++            ->where('rcd_enable', 1)
++            ->first(['id', 'employeeID as employee_id', 'nama as name']);
++
++        $leaveTypes = DB::connection('ibco')
++            ->table('xsenaraicuti')
++            ->where('rcd_enable', 1)
++            ->orderBy('description')
++            ->get(['id', 'description as label']);
++
++        $leaveEntitlement = DB::connection('ibco')
++            ->table('maklumatjawatan')
++            ->where('id_pekerja', $link->employee_id)
++            ->where('rcd_enable', 1)
++            ->orderByDesc('id')
++            ->value('jumlahcuti');
++
++        $legacyBalance = DB::connection('ibco')
++            ->table('maklumatcuti')
++            ->where('id_pekerja', $link->employee_id)
++            ->where('rcd_enable', 1)
++            ->where('tahun', (string) now()->year)
++            ->orderByDesc('id')
++            ->value('bakicuti');
++
++        $requests = EmployeeLeaveRequest::query()
++            ->where('employee_id', $link->employee_id)
++            ->latest('submitted_at')
++            ->limit(30)
++            ->get()
++            ->map(fn (EmployeeLeaveRequest $leave) => $this->requestPayload($leave));
++
++        $legacyLeave = DB::connection('ibco')
++            ->table('maklumatcuti as leave')
++            ->leftJoin('xsenaraicuti as type', 'leave.jenis_cuti', '=', 'type.id')
++            ->leftJoin('xstatuscuti as status', 'leave.status_permohonan', '=', 'status.id')
++            ->where('leave.id_pekerja', $link->employee_id)
++            ->where('leave.rcd_enable', 1)
++            ->select([
++                'leave.id',
++                'type.description as leave_type',
++                'leave.date_mulacuti as start_date',
++                'leave.date_tamatcuti as end_date',
++                'leave.bil_cutidipohon as requested_days',
++                'leave.bakicuti as balance',
++                'status.description as status',
++            ])
++            ->orderByDesc('leave.date_mulacuti')
++            ->orderByDesc('leave.id')
++            ->limit(10)
++            ->get();
++
++        return Inertia::render('EmployeeSelfService/Leave', [
++            'employee' => $employee,
++            'leaveTypes' => $leaveTypes,
++            'summary' => [
++                'entitlement' => $leaveEntitlement,
++                'legacy_balance' => $legacyBalance,
++                'pending' => $requests->where('status', 'pending')->count(),
++                'approved' => $requests->where('status', 'approved')->count(),
++            ],
++            'requests' => $requests,
++            'legacyLeave' => $legacyLeave,
++        ]);
++    }
++
++    public function store(
++        StoreEmployeeLeaveRequest $request,
++    ): RedirectResponse {
++        $link = $this->activeLink($request);
++
++        if (! $link) {
++            throw ValidationException::withMessages([
++                'leave' => 'Akaun anda belum dipautkan kepada rekod pekerja aktif.',
++            ]);
++        }
++
++        $employeeExists = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $link->employee_id)
++            ->where('rcd_enable', 1)
++            ->exists();
++
++        if (! $employeeExists) {
++            throw ValidationException::withMessages([
++                'leave' => 'Rekod pekerja asal tidak aktif atau tidak dijumpai.',
++            ]);
++        }
++
++        $leaveType = DB::connection('ibco')
++            ->table('xsenaraicuti')
++            ->where('id', $request->integer('leave_type_id'))
++            ->where('rcd_enable', 1)
++            ->first(['id', 'description']);
++
++        if (! $leaveType) {
++            throw ValidationException::withMessages([
++                'leave_type_id' => 'Jenis cuti yang dipilih tidak sah.',
++            ]);
++        }
++
++        $start = Carbon::parse($request->validated('start_date'))->startOfDay();
++        $end = Carbon::parse($request->validated('end_date'))->startOfDay();
++
++        if ($start->diffInDays($end) > 90) {
++            throw ValidationException::withMessages([
++                'end_date' => 'Tempoh permohonan tidak boleh melebihi 90 hari.',
++            ]);
++        }
++
++        $requestedDays = $this->workingDays($start, $end);
++
++        if ($requestedDays === 0) {
++            throw ValidationException::withMessages([
++                'end_date' => 'Tempoh yang dipilih tidak mempunyai hari bekerja.',
++            ]);
++        }
++
++        $hasOverlap = EmployeeLeaveRequest::query()
++            ->where('employee_id', $link->employee_id)
++            ->whereIn('status', ['pending', 'approved'])
++            ->whereDate('start_date', '<=', $end->toDateString())
++            ->whereDate('end_date', '>=', $start->toDateString())
++            ->exists();
++
++        if ($hasOverlap) {
++            throw ValidationException::withMessages([
++                'start_date' => 'Terdapat permohonan cuti aktif yang bertindih dengan tarikh ini.',
++            ]);
++        }
++
++        $leave = EmployeeLeaveRequest::query()->create([
++            'user_id' => $request->user()->getAuthIdentifier(),
++            'employee_id' => $link->employee_id,
++            'leave_type_id' => (int) $leaveType->id,
++            'leave_type_label' => $leaveType->description,
++            'start_date' => $start,
++            'end_date' => $end,
++            'requested_days' => $requestedDays,
++            'reason' => $request->validated('reason'),
++            'status' => 'pending',
++            'submitted_at' => now(),
++        ]);
++
++        AuditLogger::record(
++            $request,
++            'leave.submitted',
++            'employee_leave_requests',
++            $leave->getKey(),
++            newValues: [
++                'employee_id' => $leave->employee_id,
++                'leave_type' => $leave->leave_type_label,
++                'start_date' => $leave->start_date?->toDateString(),
++                'end_date' => $leave->end_date?->toDateString(),
++                'requested_days' => $leave->requested_days,
++                'status' => $leave->status,
++            ],
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Permohonan cuti berjaya dihantar untuk semakan.',
++        ]);
++    }
++
++    public function cancel(
++        Request $request,
++        EmployeeLeaveRequest $leaveRequest,
++    ): RedirectResponse {
++        $leaveRequest = DB::transaction(function () use ($request, $leaveRequest) {
++            $locked = EmployeeLeaveRequest::query()
++                ->lockForUpdate()
++                ->findOrFail($leaveRequest->getKey());
++
++            abort_unless(
++                (int) $locked->user_id === (int) $request->user()->getAuthIdentifier(),
++                403,
++            );
++
++            if ($locked->status !== 'pending') {
++                throw ValidationException::withMessages([
++                    'leave' => 'Hanya permohonan yang masih menunggu boleh dibatalkan.',
++                ]);
++            }
++
++            $locked->update(['status' => 'cancelled']);
++
++            return $locked;
++        });
++
++        AuditLogger::record(
++            $request,
++            'leave.cancelled',
++            'employee_leave_requests',
++            $leaveRequest->getKey(),
++            oldValues: ['status' => 'pending'],
++            newValues: [
++                'employee_id' => $leaveRequest->employee_id,
++                'status' => 'cancelled',
++            ],
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Permohonan cuti telah dibatalkan.',
++        ]);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function requestPayload(EmployeeLeaveRequest $leave): array
++    {
++        return [
++            'id' => $leave->getKey(),
++            'leave_type' => $leave->leave_type_label,
++            'start_date' => $leave->start_date?->toDateString(),
++            'end_date' => $leave->end_date?->toDateString(),
++            'requested_days' => $leave->requested_days,
++            'reason' => $leave->reason,
++            'status' => $leave->status,
++            'submitted_at' => $leave->submitted_at?->toIso8601String(),
++            'review_notes' => $leave->review_notes,
++        ];
++    }
++
++    /**
++     * @return array<string, int|string|null>
++     */
++    private function emptySummary(): array
++    {
++        return [
++            'entitlement' => null,
++            'legacy_balance' => null,
++            'pending' => 0,
++            'approved' => 0,
++        ];
++    }
++
++    private function activeLink(Request $request): ?EmployeeUserLink
++    {
++        return EmployeeUserLink::query()
++            ->where('user_id', $request->user()->getAuthIdentifier())
++            ->where('is_active', true)
++            ->first();
++    }
++
++    private function workingDays(Carbon $start, Carbon $end): int
++    {
++        $days = 0;
++        $cursor = $start->copy();
++
++        while ($cursor->lte($end)) {
++            if ($cursor->isWeekday()) {
++                $days++;
++            }
++
++            $cursor->addDay();
++        }
++
++        return $days;
++    }
++}
+diff --git a/app/Http/Controllers/EmployeeProfileController.php b/app/Http/Controllers/EmployeeProfileController.php
+new file mode 100644
+index 0000000..9ace096
+--- /dev/null
++++ b/app/Http/Controllers/EmployeeProfileController.php
+@@ -0,0 +1,165 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Http\Requests\UpdateEmployeePersonalProfileRequest;
++use App\Models\EmployeePersonalProfile;
++use App\Models\EmployeeUserLink;
++use App\Support\AuditLogger;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class EmployeeProfileController extends Controller
++{
++    public function show(Request $request): Response
++    {
++        $link = $this->activeLink($request);
++
++        if (! $link) {
++            return Inertia::render('EmployeeSelfService/Profile', [
++                'employee' => null,
++                'position' => null,
++                'contact' => null,
++            ]);
++        }
++
++        $employee = DB::connection('ibco')
++            ->table('maklumatpekerja as p')
++            ->leftJoin('xjantina as gender', 'p.jantina', '=', 'gender.id')
++            ->leftJoin('xagama as religion', 'p.agama', '=', 'religion.id')
++            ->leftJoin('xbangsa as race', 'p.bangsa', '=', 'race.id')
++            ->leftJoin('xstatusperkahwinan as marital', 'p.statusperkahwinan', '=', 'marital.id')
++            ->leftJoin('xstatus as employment_status', 'p.status', '=', 'employment_status.id')
++            ->where('p.id', $link->employee_id)
++            ->where('p.rcd_enable', 1)
++            ->select([
++                'p.id',
++                'p.employeeID as employee_id',
++                'p.nama as name',
++                'p.nric',
++                'p.alamat as address',
++                'p.notel as phone',
++                'p.email',
++                'p.tarikhlahir as birth_date',
++                'p.kewarganegaraan as nationality',
++                'gender.description as gender',
++                'religion.description as religion',
++                'race.description as race',
++                'marital.description as marital_status',
++                'employment_status.description as employment_status',
++            ])
++            ->first();
++
++        $position = DB::connection('ibco')
++            ->table('maklumatjawatan as position')
++            ->leftJoin('xdepartment as department', 'position.id_department', '=', 'department.id')
++            ->where('position.id_pekerja', $link->employee_id)
++            ->where('position.rcd_enable', 1)
++            ->select([
++                'position.jawatan as title',
++                'department.description as department',
++                'position.date_lapordiri as joined_at',
++                'position.jumlahcuti as leave_entitlement',
++            ])
++            ->orderByDesc('position.id')
++            ->first();
++
++        $profile = EmployeePersonalProfile::query()
++            ->where('employee_id', $link->employee_id)
++            ->first();
++
++        return Inertia::render('EmployeeSelfService/Profile', [
++            'employee' => $employee,
++            'position' => $position,
++            'contact' => $employee
++                ? [
++                    'address' => $profile?->address ?? $employee->address,
++                    'phone' => $profile?->phone ?? $employee->phone,
++                    'email' => $profile?->email ?? $employee->email,
++                    'is_updated_locally' => $profile !== null,
++                    'updated_at' => $profile?->updated_at?->toIso8601String(),
++                ]
++                : null,
++        ]);
++    }
++
++    public function update(
++        UpdateEmployeePersonalProfileRequest $request,
++    ): RedirectResponse {
++        $link = $this->activeLink($request);
++
++        if (! $link) {
++            throw ValidationException::withMessages([
++                'profile' => 'Akaun anda belum dipautkan kepada rekod pekerja aktif.',
++            ]);
++        }
++
++        $employee = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $link->employee_id)
++            ->where('rcd_enable', 1)
++            ->first(['alamat', 'notel', 'email']);
++
++        if (! $employee) {
++            throw ValidationException::withMessages([
++                'profile' => 'Rekod pekerja asal tidak aktif atau tidak dijumpai.',
++            ]);
++        }
++
++        $values = [
++            'address' => $request->validated('address'),
++            'phone' => $request->validated('phone'),
++            'email' => $request->validated('email'),
++        ];
++
++        $profile = EmployeePersonalProfile::query()
++            ->where('employee_id', $link->employee_id)
++            ->first();
++        $oldValues = $profile?->only(['address', 'phone', 'email']) ?? [
++            'address' => $employee->alamat,
++            'phone' => $employee->notel,
++            'email' => $employee->email,
++        ];
++
++        $profile ??= new EmployeePersonalProfile([
++            'user_id' => $request->user()->getAuthIdentifier(),
++            'employee_id' => $link->employee_id,
++        ]);
++
++        $profile->fill([
++            ...$values,
++            'user_id' => $request->user()->getAuthIdentifier(),
++            'employee_id' => $link->employee_id,
++            'updated_by' => $request->user()->getAuthIdentifier(),
++        ])->save();
++
++        AuditLogger::record(
++            $request,
++            'employee.profile_updated',
++            'employee_personal_profiles',
++            $profile->getKey(),
++            oldValues: $oldValues,
++            newValues: [
++                'employee_id' => $link->employee_id,
++                ...$values,
++            ],
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Maklumat hubungan anda berjaya dikemas kini.',
++        ]);
++    }
++
++    private function activeLink(Request $request): ?EmployeeUserLink
++    {
++        return EmployeeUserLink::query()
++            ->where('user_id', $request->user()->getAuthIdentifier())
++            ->where('is_active', true)
++            ->first();
++    }
++}
+diff --git a/app/Http/Controllers/LeaveRequestController.php b/app/Http/Controllers/LeaveRequestController.php
+new file mode 100644
+index 0000000..a42ac50
+--- /dev/null
++++ b/app/Http/Controllers/LeaveRequestController.php
+@@ -0,0 +1,183 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Http\Requests\ReviewEmployeeLeaveRequest;
++use App\Models\EmployeeLeaveRequest;
++use App\Support\AuditLogger;
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\Rule;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class LeaveRequestController extends Controller
++{
++    public function index(Request $request): Response
++    {
++        $validated = $request->validate([
++            'search' => ['nullable', 'string', 'max:100'],
++            'status' => ['nullable', Rule::in(EmployeeLeaveRequest::STATUSES)],
++        ]);
++
++        $search = trim($validated['search'] ?? '');
++        $status = $validated['status'] ?? '';
++        $matchingEmployeeIds = $this->matchingEmployeeIds($search);
++
++        $requests = EmployeeLeaveRequest::query()
++            ->with('reviewer:id,name')
++            ->when($search !== '', function (Builder $query) use ($matchingEmployeeIds) {
++                $matchingEmployeeIds === []
++                    ? $query->whereRaw('1 = 0')
++                    : $query->whereIn('employee_id', $matchingEmployeeIds);
++            })
++            ->when($status !== '', fn (Builder $query) => $query->where('status', $status))
++            ->latest('submitted_at')
++            ->paginate(20)
++            ->withQueryString();
++
++        $employeeMap = $this->employeeMap(
++            collect($requests->items())->pluck('employee_id')->all(),
++        );
++
++        $requests->through(function (EmployeeLeaveRequest $leave) use ($employeeMap) {
++            return [
++                'id' => $leave->getKey(),
++                'employee' => $employeeMap[(string) $leave->employee_id] ?? null,
++                'leave_type' => $leave->leave_type_label,
++                'start_date' => $leave->start_date?->toDateString(),
++                'end_date' => $leave->end_date?->toDateString(),
++                'requested_days' => $leave->requested_days,
++                'reason' => $leave->reason,
++                'status' => $leave->status,
++                'submitted_at' => $leave->submitted_at?->toIso8601String(),
++                'reviewed_at' => $leave->reviewed_at?->toIso8601String(),
++                'review_notes' => $leave->review_notes,
++                'reviewer' => $leave->reviewer?->name,
++            ];
++        });
++
++        $counts = EmployeeLeaveRequest::query()
++            ->selectRaw('status, COUNT(*) as aggregate')
++            ->groupBy('status')
++            ->pluck('aggregate', 'status');
++
++        return Inertia::render('LeaveRequests/Index', [
++            'requests' => $requests,
++            'filters' => [
++                'search' => $search,
++                'status' => $status,
++            ],
++            'statistics' => [
++                'total' => (int) $counts->sum(),
++                'pending' => (int) ($counts['pending'] ?? 0),
++                'approved' => (int) ($counts['approved'] ?? 0),
++                'rejected' => (int) ($counts['rejected'] ?? 0),
++            ],
++        ]);
++    }
++
++    public function review(
++        ReviewEmployeeLeaveRequest $request,
++        EmployeeLeaveRequest $leaveRequest,
++    ): RedirectResponse {
++        $leaveRequest = DB::transaction(function () use ($request, $leaveRequest) {
++            $locked = EmployeeLeaveRequest::query()
++                ->lockForUpdate()
++                ->findOrFail($leaveRequest->getKey());
++
++            if ($locked->status !== 'pending') {
++                throw ValidationException::withMessages([
++                    'status' => 'Permohonan ini telah disemak atau dibatalkan.',
++                ]);
++            }
++
++            $locked->update([
++                'status' => $request->validated('status'),
++                'review_notes' => $request->validated('review_notes'),
++                'reviewed_at' => now(),
++                'reviewed_by' => $request->user()->getAuthIdentifier(),
++            ]);
++
++            return $locked;
++        });
++
++        AuditLogger::record(
++            $request,
++            $leaveRequest->status === 'approved'
++                ? 'leave.approved'
++                : 'leave.rejected',
++            'employee_leave_requests',
++            $leaveRequest->getKey(),
++            oldValues: ['status' => 'pending'],
++            newValues: [
++                'employee_id' => $leaveRequest->employee_id,
++                'status' => $leaveRequest->status,
++                'review_notes' => $leaveRequest->review_notes,
++                'reviewed_by' => $leaveRequest->reviewed_by,
++            ],
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => $leaveRequest->status === 'approved'
++                ? 'Permohonan cuti telah diluluskan.'
++                : 'Permohonan cuti telah ditolak.',
++        ]);
++    }
++
++    /**
++     * @return array<int, int>
++     */
++    private function matchingEmployeeIds(string $search): array
++    {
++        if ($search === '') {
++            return [];
++        }
++
++        return DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('rcd_enable', 1)
++            ->where(function ($query) use ($search) {
++                $query->where('nama', 'like', "%{$search}%")
++                    ->orWhere('employeeID', 'like', "%{$search}%");
++            })
++            ->limit(250)
++            ->pluck('id')
++            ->map(fn ($id) => (int) $id)
++            ->all();
++    }
++
++    /**
++     * @param  array<int, int|string>  $employeeIds
++     * @return array<string, array<string, mixed>>
++     */
++    private function employeeMap(array $employeeIds): array
++    {
++        $ids = collect($employeeIds)
++            ->map(fn ($id) => (int) $id)
++            ->filter()
++            ->unique()
++            ->values();
++
++        if ($ids->isEmpty()) {
++            return [];
++        }
++
++        return DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->whereIn('id', $ids)
++            ->get(['id', 'employeeID as employee_id', 'nama as name'])
++            ->mapWithKeys(fn ($employee) => [
++                (string) $employee->id => [
++                    'id' => (int) $employee->id,
++                    'employee_id' => $employee->employee_id,
++                    'name' => $employee->name,
++                ],
++            ])
++            ->all();
++    }
++}
+diff --git a/app/Http/Requests/ReviewEmployeeLeaveRequest.php b/app/Http/Requests/ReviewEmployeeLeaveRequest.php
+new file mode 100644
+index 0000000..c9a09fa
+--- /dev/null
++++ b/app/Http/Requests/ReviewEmployeeLeaveRequest.php
+@@ -0,0 +1,30 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class ReviewEmployeeLeaveRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('leave.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, mixed>>
++     */
++    public function rules(): array
++    {
++        return [
++            'status' => ['required', Rule::in(['approved', 'rejected'])],
++            'review_notes' => [
++                'nullable',
++                'string',
++                'max:1000',
++                'required_if:status,rejected',
++            ],
++        ];
++    }
++}
+diff --git a/app/Http/Requests/StoreEmployeeLeaveRequest.php b/app/Http/Requests/StoreEmployeeLeaveRequest.php
+new file mode 100644
+index 0000000..4b28956
+--- /dev/null
++++ b/app/Http/Requests/StoreEmployeeLeaveRequest.php
+@@ -0,0 +1,26 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++
++class StoreEmployeeLeaveRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('leave.apply') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, string>>
++     */
++    public function rules(): array
++    {
++        return [
++            'leave_type_id' => ['required', 'integer', 'min:1'],
++            'start_date' => ['required', 'date', 'after_or_equal:today'],
++            'end_date' => ['required', 'date', 'after_or_equal:start_date'],
++            'reason' => ['required', 'string', 'min:5', 'max:1000'],
++        ];
++    }
++}
+diff --git a/app/Http/Requests/UpdateEmployeePersonalProfileRequest.php b/app/Http/Requests/UpdateEmployeePersonalProfileRequest.php
+new file mode 100644
+index 0000000..5728792
+--- /dev/null
++++ b/app/Http/Requests/UpdateEmployeePersonalProfileRequest.php
+@@ -0,0 +1,25 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++
++class UpdateEmployeePersonalProfileRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('employee.profile.update') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, string>>
++     */
++    public function rules(): array
++    {
++        return [
++            'address' => ['nullable', 'string', 'max:500'],
++            'phone' => ['nullable', 'string', 'max:30'],
++            'email' => ['nullable', 'email:rfc', 'max:255'],
++        ];
++    }
++}
+diff --git a/app/Models/EmployeeLeaveRequest.php b/app/Models/EmployeeLeaveRequest.php
+new file mode 100644
+index 0000000..9b2aee3
+--- /dev/null
++++ b/app/Models/EmployeeLeaveRequest.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class EmployeeLeaveRequest extends Model
++{
++    public const STATUSES = [
++        'pending',
++        'approved',
++        'rejected',
++        'cancelled',
++    ];
++
++    protected $fillable = [
++        'user_id',
++        'employee_id',
++        'leave_type_id',
++        'leave_type_label',
++        'start_date',
++        'end_date',
++        'requested_days',
++        'reason',
++        'status',
++        'submitted_at',
++        'reviewed_at',
++        'reviewed_by',
++        'review_notes',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'employee_id' => 'integer',
++            'leave_type_id' => 'integer',
++            'start_date' => 'date',
++            'end_date' => 'date',
++            'requested_days' => 'integer',
++            'submitted_at' => 'datetime',
++            'reviewed_at' => 'datetime',
++        ];
++    }
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function reviewer(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'reviewed_by');
++    }
++}
+diff --git a/app/Models/EmployeePersonalProfile.php b/app/Models/EmployeePersonalProfile.php
+new file mode 100644
+index 0000000..5ebd8b6
+--- /dev/null
++++ b/app/Models/EmployeePersonalProfile.php
+@@ -0,0 +1,35 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class EmployeePersonalProfile extends Model
++{
++    protected $fillable = [
++        'user_id',
++        'employee_id',
++        'address',
++        'phone',
++        'email',
++        'updated_by',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'employee_id' => 'integer',
++        ];
++    }
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function updatedBy(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'updated_by');
++    }
++}
+diff --git a/database/migrations/2026_07_29_020000_create_employee_self_service_tables.php b/database/migrations/2026_07_29_020000_create_employee_self_service_tables.php
+new file mode 100644
+index 0000000..9dc422c
+--- /dev/null
++++ b/database/migrations/2026_07_29_020000_create_employee_self_service_tables.php
+@@ -0,0 +1,49 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('employee_personal_profiles', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
++            $table->unsignedBigInteger('employee_id')->unique();
++            $table->string('address', 500)->nullable();
++            $table->string('phone', 30)->nullable();
++            $table->string('email')->nullable();
++            $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->timestamps();
++        });
++
++        Schema::create('employee_leave_requests', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
++            $table->unsignedBigInteger('employee_id')->index();
++            $table->unsignedBigInteger('leave_type_id')->index();
++            $table->string('leave_type_label', 150);
++            $table->date('start_date')->index();
++            $table->date('end_date')->index();
++            $table->unsignedSmallInteger('requested_days');
++            $table->text('reason');
++            $table->string('status', 24)->default('pending')->index();
++            $table->timestamp('submitted_at');
++            $table->timestamp('reviewed_at')->nullable();
++            $table->foreignId('reviewed_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->text('review_notes')->nullable();
++            $table->timestamps();
++
++            $table->index(['employee_id', 'status']);
++            $table->index(['status', 'submitted_at']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('employee_leave_requests');
++        Schema::dropIfExists('employee_personal_profiles');
++    }
++};
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index 0bad9c7..d640996 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -9,10 +9,12 @@ import {
+     FileText,
+     FolderGit2,
+     History,
++    IdCard,
+     LayoutGrid,
+     MapPinned,
+     Navigation,
+     ShieldCheck,
++    UserRoundCheck,
+     UsersRound,
+ } from 'lucide-react';
+ import AppLogo from '@/components/app-logo';
+@@ -60,13 +62,28 @@ const employeeNavItems: AuthorizedNavItem[] = [
+     },
+ ];
+ 
+-const attendanceNavItems: AuthorizedNavItem[] = [
++const selfServiceNavItems: AuthorizedNavItem[] = [
++    {
++        title: 'Profil Saya',
++        href: '/profil-saya',
++        icon: IdCard,
++        permission: 'employee.profile.view',
++    },
++    {
++        title: 'Cuti Saya',
++        href: '/cuti-saya',
++        icon: CalendarDays,
++        permission: 'leave.self',
++    },
+     {
+         title: 'Rakam Kehadiran',
+         href: '/kehadiran/rakam',
+         icon: Navigation,
+         permission: 'attendance.clock',
+     },
++];
++
++const attendanceNavItems: AuthorizedNavItem[] = [
+     {
+         title: 'Kehadiran',
+         href: '/kehadiran',
+@@ -80,7 +97,13 @@ const attendanceNavItems: AuthorizedNavItem[] = [
+         permission: 'attendance.view',
+     },
+     {
+-        title: 'Cuti',
++        title: 'Permohonan Cuti',
++        href: '/permohonan-cuti',
++        icon: UserRoundCheck,
++        permission: 'leave.manage',
++    },
++    {
++        title: 'Cuti Asal',
+         href: '/cuti',
+         icon: CalendarDays,
+         permission: 'leave.view',
+@@ -144,6 +167,7 @@ export function AppSidebar() {
+ 
+     const visibleMainItems = visibleItems(mainNavItems);
+     const visibleEmployeeItems = visibleItems(employeeNavItems);
++    const visibleSelfServiceItems = visibleItems(selfServiceNavItems);
+     const visibleAttendanceItems = visibleItems(attendanceNavItems);
+     const visiblePayrollItems = visibleItems(payrollNavItems);
+     const visibleAdministrationItems = visibleItems(administrationNavItems);
+@@ -169,6 +193,12 @@ export function AppSidebar() {
+                 {visibleEmployeeItems.length > 0 && (
+                     <NavMain items={visibleEmployeeItems} label="Pekerja" />
+                 )}
++                {visibleSelfServiceItems.length > 0 && (
++                    <NavMain
++                        items={visibleSelfServiceItems}
++                        label="Layan Diri Pekerja"
++                    />
++                )}
+                 {visibleAttendanceItems.length > 0 && (
+                     <NavMain
+                         items={visibleAttendanceItems}
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index 02006c2..e2323f1 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -74,7 +74,9 @@ type AuditRecord = {
+         | 'geo_attendance_records'
+         | 'office_locations'
+         | 'employee_user_links'
+-        | 'users';
++        | 'users'
++        | 'employee_personal_profiles'
++        | 'employee_leave_requests';
+     auditable_id: string;
+     employee: AuditEmployee | null;
+     user: AuditActor | null;
+@@ -180,6 +182,14 @@ const fieldLabels: Record<string, string> = {
+     reason: 'Alasan',
+     method: 'Kaedah',
+     source: 'Sumber',
++    address: 'Alamat',
++    phone: 'No. Telefon',
++    leave_type: 'Jenis Cuti',
++    start_date: 'Tarikh Mula',
++    end_date: 'Tarikh Tamat',
++    requested_days: 'Bil. Hari Dipohon',
++    review_notes: 'Catatan HR',
++    reviewed_by: 'Disemak Oleh',
+ };
+ 
+ const actionStyles: Record<string, string> = {
+@@ -209,6 +219,16 @@ const actionStyles: Record<string, string> = {
+         'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+     'user.password.bulk_reset':
+         'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    'employee.profile_updated':
++        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
++    'leave.submitted':
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    'leave.approved':
++        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++    'leave.rejected':
++        'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
++    'leave.cancelled':
++        'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
+ };
+ 
+ function formatDate(value: string | null): string {
+diff --git a/resources/js/pages/EmployeeSelfService/Leave.tsx b/resources/js/pages/EmployeeSelfService/Leave.tsx
+new file mode 100644
+index 0000000..0d540af
+--- /dev/null
++++ b/resources/js/pages/EmployeeSelfService/Leave.tsx
+@@ -0,0 +1,563 @@
++import { Head, router, useForm } from '@inertiajs/react';
++import {
++    AlertCircle,
++    CalendarCheck2,
++    CalendarClock,
++    CalendarDays,
++    Database,
++    FileClock,
++    Send,
++    XCircle,
++} from 'lucide-react';
++import type { FormEvent } from 'react';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type LeaveStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
++
++type Employee = {
++    id: number;
++    employee_id: string | null;
++    name: string | null;
++};
++
++type LeaveType = {
++    id: number;
++    label: string;
++};
++
++type LeaveRequest = {
++    id: number;
++    leave_type: string;
++    start_date: string;
++    end_date: string;
++    requested_days: number;
++    reason: string;
++    status: LeaveStatus;
++    submitted_at: string;
++    review_notes: string | null;
++};
++
++type LegacyLeave = {
++    id: number;
++    leave_type: string | null;
++    start_date: string | null;
++    end_date: string | null;
++    requested_days: string | null;
++    balance: string | null;
++    status: string | null;
++};
++
++type LeaveProps = {
++    employee: Employee | null;
++    leaveTypes: LeaveType[];
++    summary: {
++        entitlement: string | null;
++        legacy_balance: string | null;
++        pending: number;
++        approved: number;
++    };
++    requests: LeaveRequest[];
++    legacyLeave: LegacyLeave[];
++};
++
++type LeaveForm = {
++    leave_type_id: string;
++    start_date: string;
++    end_date: string;
++    reason: string;
++};
++
++const statusLabels: Record<LeaveStatus, string> = {
++    pending: 'Menunggu',
++    approved: 'Diluluskan',
++    rejected: 'Ditolak',
++    cancelled: 'Dibatalkan',
++};
++
++const statusStyles: Record<LeaveStatus, string> = {
++    pending:
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    approved:
++        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++    rejected: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
++    cancelled:
++        'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
++};
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const date = new Date(`${value.slice(0, 10)}T00:00:00`);
++
++    return Number.isNaN(date.getTime())
++        ? value
++        : new Intl.DateTimeFormat('ms-MY', {
++              day: '2-digit',
++              month: 'short',
++              year: 'numeric',
++          }).format(date);
++}
++
++function formatDateTime(value: string): string {
++    const date = new Date(value);
++
++    return Number.isNaN(date.getTime())
++        ? value
++        : new Intl.DateTimeFormat('ms-MY', {
++              day: '2-digit',
++              month: 'short',
++              year: 'numeric',
++              hour: '2-digit',
++              minute: '2-digit',
++          }).format(date);
++}
++
++function StatusBadge({ status }: { status: LeaveStatus }) {
++    return (
++        <Badge variant="outline" className={statusStyles[status]}>
++            {statusLabels[status]}
++        </Badge>
++    );
++}
++
++export default function EmployeeLeave({
++    employee,
++    leaveTypes,
++    summary,
++    requests,
++    legacyLeave,
++}: LeaveProps) {
++    const { data, setData, post, processing, errors, reset } =
++        useForm<LeaveForm>({
++            leave_type_id: '',
++            start_date: '',
++            end_date: '',
++            reason: '',
++        });
++    const formErrors = errors as Record<string, string>;
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        post('/cuti-saya', {
++            preserveScroll: true,
++            onSuccess: () => reset(),
++        });
++    };
++
++    const cancelRequest = (request: LeaveRequest) => {
++        if (
++            window.confirm(
++                `Batalkan permohonan ${request.leave_type} pada ${formatDate(request.start_date)}?`,
++            )
++        ) {
++            router.patch(
++                `/cuti-saya/${request.id}/batal`,
++                {},
++                { preserveScroll: true },
++            );
++        }
++    };
++
++    if (!employee) {
++        return (
++            <>
++                <Head title="Cuti Saya" />
++                <div className="mx-auto flex w-full max-w-4xl flex-1 p-4 md:p-6">
++                    <Alert variant="destructive">
++                        <AlertCircle />
++                        <AlertTitle>Modul cuti belum tersedia</AlertTitle>
++                        <AlertDescription>
++                            Akaun anda belum dipautkan kepada rekod pekerja
++                            aktif. Hubungi Super Admin untuk melengkapkan pautan
++                            akaun.
++                        </AlertDescription>
++                    </Alert>
++                </div>
++            </>
++        );
++    }
++
++    return (
++        <>
++            <Head title="Cuti Saya" />
++
++            <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="space-y-1">
++                    <h1 className="text-2xl font-semibold tracking-tight">
++                        Cuti Saya
++                    </h1>
++                    <p className="text-sm text-muted-foreground">
++                        Mohon cuti, semak keputusan dan rujuk sejarah cuti asal
++                        anda.
++                    </p>
++                </div>
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>
++                                Kelayakan Cuti Asal
++                            </CardDescription>
++                            <CardTitle className="text-2xl">
++                                {summary.entitlement ?? '-'}
++                                {summary.entitlement ? ' hari' : ''}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Baki Rekod Asal</CardDescription>
++                            <CardTitle className="text-2xl">
++                                {summary.legacy_balance ?? '-'}
++                                {summary.legacy_balance ? ' hari' : ''}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Menunggu Semakan</CardDescription>
++                            <CardTitle className="text-2xl text-amber-600">
++                                {summary.pending}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Diluluskan</CardDescription>
++                            <CardTitle className="text-2xl text-emerald-600">
++                                {summary.approved}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
++                    <Card className="h-fit">
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <CalendarDays className="size-5 text-primary" />
++                                Permohonan Cuti Baharu
++                            </CardTitle>
++                            <CardDescription>
++                                Bilangan hari dikira berdasarkan hari bekerja
++                                Isnin hingga Jumaat.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent>
++                            <form onSubmit={submit} className="space-y-5">
++                                {formErrors.leave && (
++                                    <Alert variant="destructive">
++                                        <AlertCircle />
++                                        <AlertTitle>
++                                            Permohonan tidak dapat dihantar
++                                        </AlertTitle>
++                                        <AlertDescription>
++                                            {formErrors.leave}
++                                        </AlertDescription>
++                                    </Alert>
++                                )}
++
++                                <div className="space-y-2">
++                                    <Label htmlFor="leave-type">
++                                        Jenis Cuti
++                                    </Label>
++                                    <Select
++                                        value={data.leave_type_id}
++                                        onValueChange={(value) =>
++                                            setData('leave_type_id', value)
++                                        }
++                                    >
++                                        <SelectTrigger id="leave-type">
++                                            <SelectValue placeholder="Pilih jenis cuti" />
++                                        </SelectTrigger>
++                                        <SelectContent>
++                                            {leaveTypes.map((type) => (
++                                                <SelectItem
++                                                    key={type.id}
++                                                    value={String(type.id)}
++                                                >
++                                                    {type.label}
++                                                </SelectItem>
++                                            ))}
++                                        </SelectContent>
++                                    </Select>
++                                    <InputError
++                                        message={errors.leave_type_id}
++                                    />
++                                </div>
++
++                                <div className="grid gap-4 sm:grid-cols-2">
++                                    <div className="space-y-2">
++                                        <Label htmlFor="leave-start">
++                                            Tarikh Mula
++                                        </Label>
++                                        <Input
++                                            id="leave-start"
++                                            type="date"
++                                            value={data.start_date}
++                                            min={new Date()
++                                                .toISOString()
++                                                .slice(0, 10)}
++                                            onChange={(event) =>
++                                                setData(
++                                                    'start_date',
++                                                    event.target.value,
++                                                )
++                                            }
++                                        />
++                                        <InputError
++                                            message={errors.start_date}
++                                        />
++                                    </div>
++                                    <div className="space-y-2">
++                                        <Label htmlFor="leave-end">
++                                            Tarikh Tamat
++                                        </Label>
++                                        <Input
++                                            id="leave-end"
++                                            type="date"
++                                            value={data.end_date}
++                                            min={
++                                                data.start_date ||
++                                                new Date()
++                                                    .toISOString()
++                                                    .slice(0, 10)
++                                            }
++                                            onChange={(event) =>
++                                                setData(
++                                                    'end_date',
++                                                    event.target.value,
++                                                )
++                                            }
++                                        />
++                                        <InputError message={errors.end_date} />
++                                    </div>
++                                </div>
++
++                                <div className="space-y-2">
++                                    <Label htmlFor="leave-reason">
++                                        Tujuan / Catatan
++                                    </Label>
++                                    <textarea
++                                        id="leave-reason"
++                                        value={data.reason}
++                                        onChange={(event) =>
++                                            setData(
++                                                'reason',
++                                                event.target.value,
++                                            )
++                                        }
++                                        rows={4}
++                                        maxLength={1000}
++                                        className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
++                                        placeholder="Nyatakan tujuan permohonan cuti"
++                                    />
++                                    <InputError message={errors.reason} />
++                                </div>
++
++                                <Button
++                                    type="submit"
++                                    className="w-full"
++                                    disabled={processing}
++                                >
++                                    <Send />
++                                    {processing
++                                        ? 'Menghantar...'
++                                        : 'Hantar Permohonan'}
++                                </Button>
++                            </form>
++                        </CardContent>
++                    </Card>
++
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <FileClock className="size-5 text-primary" />
++                                Permohonan Terkini
++                            </CardTitle>
++                            <CardDescription>
++                                Sehingga 30 permohonan terkini dalam sistem
++                                baharu.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent>
++                            {requests.length > 0 ? (
++                                <div className="divide-y rounded-xl border">
++                                    {requests.map((request) => (
++                                        <div
++                                            key={request.id}
++                                            className="space-y-3 p-4"
++                                        >
++                                            <div className="flex flex-wrap items-start justify-between gap-3">
++                                                <div>
++                                                    <p className="font-medium">
++                                                        {request.leave_type}
++                                                    </p>
++                                                    <p className="text-sm text-muted-foreground">
++                                                        {formatDate(
++                                                            request.start_date,
++                                                        )}{' '}
++                                                        –{' '}
++                                                        {formatDate(
++                                                            request.end_date,
++                                                        )}{' '}
++                                                        ·{' '}
++                                                        {request.requested_days}{' '}
++                                                        hari bekerja
++                                                    </p>
++                                                </div>
++                                                <StatusBadge
++                                                    status={request.status}
++                                                />
++                                            </div>
++
++                                            <p className="text-sm">
++                                                {request.reason}
++                                            </p>
++
++                                            {request.review_notes && (
++                                                <div className="rounded-lg bg-muted px-3 py-2 text-sm">
++                                                    <span className="font-medium">
++                                                        Catatan HR:{' '}
++                                                    </span>
++                                                    {request.review_notes}
++                                                </div>
++                                            )}
++
++                                            <div className="flex flex-wrap items-center justify-between gap-3">
++                                                <p className="text-xs text-muted-foreground">
++                                                    Dihantar{' '}
++                                                    {formatDateTime(
++                                                        request.submitted_at,
++                                                    )}
++                                                </p>
++                                                {request.status ===
++                                                    'pending' && (
++                                                    <Button
++                                                        type="button"
++                                                        size="sm"
++                                                        variant="outline"
++                                                        onClick={() =>
++                                                            cancelRequest(
++                                                                request,
++                                                            )
++                                                        }
++                                                    >
++                                                        <XCircle />
++                                                        Batalkan
++                                                    </Button>
++                                                )}
++                                            </div>
++                                        </div>
++                                    ))}
++                                </div>
++                            ) : (
++                                <div className="py-12 text-center">
++                                    <CalendarClock className="mx-auto size-9 text-muted-foreground" />
++                                    <p className="mt-3 text-sm text-muted-foreground">
++                                        Belum ada permohonan cuti dalam sistem
++                                        baharu.
++                                    </p>
++                                </div>
++                            )}
++                        </CardContent>
++                    </Card>
++                </div>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <Database className="size-5 text-muted-foreground" />
++                            Sejarah Cuti Asal
++                        </CardTitle>
++                        <CardDescription>
++                            Sepuluh rekod terkini daripada sistem lama untuk
++                            rujukan. Rekod ini tidak diubah oleh permohonan
++                            baharu.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="overflow-x-auto">
++                        {legacyLeave.length > 0 ? (
++                            <Table>
++                                <TableHeader>
++                                    <TableRow>
++                                        <TableHead>Jenis Cuti</TableHead>
++                                        <TableHead>Tempoh</TableHead>
++                                        <TableHead>Bil. Hari</TableHead>
++                                        <TableHead>Baki</TableHead>
++                                        <TableHead>Status</TableHead>
++                                    </TableRow>
++                                </TableHeader>
++                                <TableBody>
++                                    {legacyLeave.map((leave) => (
++                                        <TableRow key={leave.id}>
++                                            <TableCell className="font-medium">
++                                                {leave.leave_type || '-'}
++                                            </TableCell>
++                                            <TableCell>
++                                                {formatDate(leave.start_date)} –{' '}
++                                                {formatDate(leave.end_date)}
++                                            </TableCell>
++                                            <TableCell>
++                                                {leave.requested_days || '-'}
++                                            </TableCell>
++                                            <TableCell>
++                                                {leave.balance || '-'}
++                                            </TableCell>
++                                            <TableCell>
++                                                <Badge variant="secondary">
++                                                    {leave.status || '-'}
++                                                </Badge>
++                                            </TableCell>
++                                        </TableRow>
++                                    ))}
++                                </TableBody>
++                            </Table>
++                        ) : (
++                            <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
++                                <CalendarCheck2 className="size-5" />
++                                Tiada rekod cuti asal ditemui.
++                            </div>
++                        )}
++                    </CardContent>
++                </Card>
++            </div>
++        </>
++    );
++}
++
++EmployeeLeave.layout = {
++    breadcrumbs: [
++        { title: 'Layan Diri Pekerja', href: '/cuti-saya' },
++        { title: 'Cuti Saya', href: '/cuti-saya' },
++    ],
++};
+diff --git a/resources/js/pages/EmployeeSelfService/Profile.tsx b/resources/js/pages/EmployeeSelfService/Profile.tsx
+new file mode 100644
+index 0000000..5f72909
+--- /dev/null
++++ b/resources/js/pages/EmployeeSelfService/Profile.tsx
+@@ -0,0 +1,366 @@
++import { Head, useForm } from '@inertiajs/react';
++import {
++    BadgeCheck,
++    BriefcaseBusiness,
++    Database,
++    IdCard,
++    Mail,
++    MapPin,
++    Phone,
++    Save,
++    UserRound,
++} from 'lucide-react';
++import type { FormEvent } from 'react';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++
++type Employee = {
++    id: number;
++    employee_id: string | null;
++    name: string | null;
++    nric: string | null;
++    address: string | null;
++    phone: string | null;
++    email: string | null;
++    birth_date: string | null;
++    nationality: string | null;
++    gender: string | null;
++    religion: string | null;
++    race: string | null;
++    marital_status: string | null;
++    employment_status: string | null;
++};
++
++type Position = {
++    title: string | null;
++    department: string | null;
++    joined_at: string | null;
++    leave_entitlement: string | null;
++};
++
++type Contact = {
++    address: string | null;
++    phone: string | null;
++    email: string | null;
++    is_updated_locally: boolean;
++    updated_at: string | null;
++};
++
++type ProfileProps = {
++    employee: Employee | null;
++    position: Position | null;
++    contact: Contact | null;
++};
++
++type ProfileForm = {
++    address: string;
++    phone: string;
++    email: string;
++};
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const date = new Date(`${value.slice(0, 10)}T00:00:00`);
++
++    return Number.isNaN(date.getTime())
++        ? value
++        : new Intl.DateTimeFormat('ms-MY', {
++              day: '2-digit',
++              month: 'long',
++              year: 'numeric',
++          }).format(date);
++}
++
++function Detail({
++    label,
++    value,
++}: {
++    label: string;
++    value: string | null | undefined;
++}) {
++    return (
++        <div className="rounded-lg border bg-muted/20 p-3">
++            <p className="text-xs text-muted-foreground">{label}</p>
++            <p className="mt-1 text-sm font-medium">{value || '-'}</p>
++        </div>
++    );
++}
++
++export default function EmployeeProfile({
++    employee,
++    position,
++    contact,
++}: ProfileProps) {
++    const { data, setData, put, processing, errors, recentlySuccessful } =
++        useForm<ProfileForm>({
++            address: contact?.address ?? '',
++            phone: contact?.phone ?? '',
++            email: contact?.email ?? '',
++        });
++    const formErrors = errors as Record<string, string>;
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        put('/profil-saya', { preserveScroll: true });
++    };
++
++    if (!employee || !contact) {
++        return (
++            <>
++                <Head title="Profil Saya" />
++                <div className="mx-auto flex w-full max-w-4xl flex-1 p-4 md:p-6">
++                    <Alert variant="destructive">
++                        <IdCard />
++                        <AlertTitle>Profil pekerja belum tersedia</AlertTitle>
++                        <AlertDescription>
++                            Akaun anda belum dipautkan kepada rekod pekerja
++                            aktif. Hubungi Super Admin untuk melengkapkan pautan
++                            akaun.
++                        </AlertDescription>
++                    </Alert>
++                </div>
++            </>
++        );
++    }
++
++    return (
++        <>
++            <Head title="Profil Saya" />
++
++            <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
++                    <div className="space-y-1">
++                        <h1 className="text-2xl font-semibold tracking-tight">
++                            Profil Saya
++                        </h1>
++                        <p className="text-sm text-muted-foreground">
++                            Semak maklumat perkhidmatan dan kemas kini maklumat
++                            hubungan anda.
++                        </p>
++                    </div>
++                    <Badge variant="outline" className="w-fit gap-1.5">
++                        <BadgeCheck className="size-3.5 text-emerald-600" />
++                        {employee.employment_status || 'Pekerja Aktif'}
++                    </Badge>
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-[1fr_0.85fr]">
++                    <div className="space-y-6">
++                        <Card>
++                            <CardHeader>
++                                <CardTitle className="flex items-center gap-2">
++                                    <UserRound className="size-5 text-primary" />
++                                    Maklumat Peribadi
++                                </CardTitle>
++                                <CardDescription>
++                                    Maklumat identiti ini dibaca daripada rekod
++                                    induk organisasi.
++                                </CardDescription>
++                            </CardHeader>
++                            <CardContent className="grid gap-3 sm:grid-cols-2">
++                                <Detail
++                                    label="Nama Penuh"
++                                    value={employee.name}
++                                />
++                                <Detail
++                                    label="ID Pekerja"
++                                    value={employee.employee_id}
++                                />
++                                <Detail
++                                    label="No. Kad Pengenalan"
++                                    value={employee.nric}
++                                />
++                                <Detail
++                                    label="Tarikh Lahir"
++                                    value={formatDate(employee.birth_date)}
++                                />
++                                <Detail
++                                    label="Jantina"
++                                    value={employee.gender}
++                                />
++                                <Detail
++                                    label="Agama"
++                                    value={employee.religion}
++                                />
++                                <Detail label="Bangsa" value={employee.race} />
++                                <Detail
++                                    label="Kewarganegaraan"
++                                    value={employee.nationality}
++                                />
++                                <Detail
++                                    label="Status Perkahwinan"
++                                    value={employee.marital_status}
++                                />
++                            </CardContent>
++                        </Card>
++
++                        <Card>
++                            <CardHeader>
++                                <CardTitle className="flex items-center gap-2">
++                                    <BriefcaseBusiness className="size-5 text-primary" />
++                                    Maklumat Perkhidmatan
++                                </CardTitle>
++                            </CardHeader>
++                            <CardContent className="grid gap-3 sm:grid-cols-2">
++                                <Detail
++                                    label="Jawatan"
++                                    value={position?.title}
++                                />
++                                <Detail
++                                    label="Jabatan / Unit"
++                                    value={position?.department}
++                                />
++                                <Detail
++                                    label="Tarikh Lapor Diri"
++                                    value={formatDate(
++                                        position?.joined_at ?? null,
++                                    )}
++                                />
++                                <Detail
++                                    label="Kelayakan Cuti"
++                                    value={
++                                        position?.leave_entitlement
++                                            ? `${position.leave_entitlement} hari`
++                                            : null
++                                    }
++                                />
++                            </CardContent>
++                        </Card>
++                    </div>
++
++                    <Card className="h-fit">
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <IdCard className="size-5 text-primary" />
++                                Maklumat Hubungan
++                            </CardTitle>
++                            <CardDescription>
++                                Anda boleh mengemas kini alamat, telefon dan
++                                e-mel hubungan sendiri.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent>
++                            <form onSubmit={submit} className="space-y-5">
++                                {formErrors.profile && (
++                                    <Alert variant="destructive">
++                                        <IdCard />
++                                        <AlertTitle>
++                                            Profil tidak dapat dikemas kini
++                                        </AlertTitle>
++                                        <AlertDescription>
++                                            {formErrors.profile}
++                                        </AlertDescription>
++                                    </Alert>
++                                )}
++
++                                <div className="space-y-2">
++                                    <Label htmlFor="profile-address">
++                                        <MapPin className="size-4" />
++                                        Alamat
++                                    </Label>
++                                    <textarea
++                                        id="profile-address"
++                                        value={data.address}
++                                        onChange={(event) =>
++                                            setData(
++                                                'address',
++                                                event.target.value,
++                                            )
++                                        }
++                                        rows={4}
++                                        maxLength={500}
++                                        className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
++                                        placeholder="Alamat surat-menyurat semasa"
++                                    />
++                                    <InputError message={errors.address} />
++                                </div>
++
++                                <div className="space-y-2">
++                                    <Label htmlFor="profile-phone">
++                                        <Phone className="size-4" />
++                                        No. Telefon
++                                    </Label>
++                                    <Input
++                                        id="profile-phone"
++                                        value={data.phone}
++                                        onChange={(event) =>
++                                            setData('phone', event.target.value)
++                                        }
++                                        maxLength={30}
++                                        autoComplete="tel"
++                                        placeholder="Contoh: 0123456789"
++                                    />
++                                    <InputError message={errors.phone} />
++                                </div>
++
++                                <div className="space-y-2">
++                                    <Label htmlFor="profile-email">
++                                        <Mail className="size-4" />
++                                        E-mel Hubungan
++                                    </Label>
++                                    <Input
++                                        id="profile-email"
++                                        type="email"
++                                        value={data.email}
++                                        onChange={(event) =>
++                                            setData('email', event.target.value)
++                                        }
++                                        maxLength={255}
++                                        autoComplete="email"
++                                        placeholder="nama@contoh.com"
++                                    />
++                                    <InputError message={errors.email} />
++                                </div>
++
++                                <Button
++                                    type="submit"
++                                    className="w-full"
++                                    disabled={processing}
++                                >
++                                    <Save />
++                                    {processing
++                                        ? 'Menyimpan...'
++                                        : 'Simpan Maklumat'}
++                                </Button>
++
++                                {recentlySuccessful && (
++                                    <p className="text-center text-sm text-emerald-600">
++                                        Maklumat berjaya disimpan.
++                                    </p>
++                                )}
++
++                                <div className="flex items-start gap-2 rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
++                                    <Database className="mt-0.5 size-4 shrink-0" />
++                                    Rekod identiti dan perkhidmatan asal kekal
++                                    sebagai rujukan. Perubahan maklumat hubungan
++                                    direkodkan dalam sistem serta Audit Trail.
++                                </div>
++                            </form>
++                        </CardContent>
++                    </Card>
++                </div>
++            </div>
++        </>
++    );
++}
++
++EmployeeProfile.layout = {
++    breadcrumbs: [
++        { title: 'Layan Diri Pekerja', href: '/profil-saya' },
++        { title: 'Profil Saya', href: '/profil-saya' },
++    ],
++};
+diff --git a/resources/js/pages/LeaveRequests/Index.tsx b/resources/js/pages/LeaveRequests/Index.tsx
+new file mode 100644
+index 0000000..d25c56d
+--- /dev/null
++++ b/resources/js/pages/LeaveRequests/Index.tsx
+@@ -0,0 +1,573 @@
++import { Head, router, useForm } from '@inertiajs/react';
++import {
++    CalendarCheck2,
++    CalendarClock,
++    CalendarDays,
++    CheckCircle2,
++    ClipboardCheck,
++    Search,
++    XCircle,
++} from 'lucide-react';
++import { useEffect, useState } from 'react';
++import type { FormEvent } from 'react';
++import InputError from '@/components/input-error';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++    DialogTrigger,
++} from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type LeaveStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
++
++type Employee = {
++    id: number;
++    employee_id: string | null;
++    name: string | null;
++};
++
++type LeaveRequest = {
++    id: number;
++    employee: Employee | null;
++    leave_type: string;
++    start_date: string;
++    end_date: string;
++    requested_days: number;
++    reason: string;
++    status: LeaveStatus;
++    submitted_at: string;
++    reviewed_at: string | null;
++    review_notes: string | null;
++    reviewer: string | null;
++};
++
++type PaginationLink = {
++    url: string | null;
++    label: string;
++    active: boolean;
++};
++
++type LeaveRequestProps = {
++    requests: {
++        data: LeaveRequest[];
++        current_page: number;
++        last_page: number;
++        from: number | null;
++        to: number | null;
++        total: number;
++        links: PaginationLink[];
++    };
++    filters: {
++        search: string;
++        status: string;
++    };
++    statistics: {
++        total: number;
++        pending: number;
++        approved: number;
++        rejected: number;
++    };
++};
++
++type ReviewForm = {
++    status: 'approved' | 'rejected';
++    review_notes: string;
++};
++
++const statusLabels: Record<LeaveStatus, string> = {
++    pending: 'Menunggu',
++    approved: 'Diluluskan',
++    rejected: 'Ditolak',
++    cancelled: 'Dibatalkan',
++};
++
++const statusStyles: Record<LeaveStatus, string> = {
++    pending:
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    approved:
++        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++    rejected: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
++    cancelled:
++        'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
++};
++
++function formatDate(value: string): string {
++    const date = new Date(`${value.slice(0, 10)}T00:00:00`);
++
++    return Number.isNaN(date.getTime())
++        ? value
++        : new Intl.DateTimeFormat('ms-MY', {
++              day: '2-digit',
++              month: 'short',
++              year: 'numeric',
++          }).format(date);
++}
++
++function formatDateTime(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const date = new Date(value);
++
++    return Number.isNaN(date.getTime())
++        ? value
++        : new Intl.DateTimeFormat('ms-MY', {
++              day: '2-digit',
++              month: 'short',
++              year: 'numeric',
++              hour: '2-digit',
++              minute: '2-digit',
++          }).format(date);
++}
++
++function StatusBadge({ status }: { status: LeaveStatus }) {
++    return (
++        <Badge variant="outline" className={statusStyles[status]}>
++            {statusLabels[status]}
++        </Badge>
++    );
++}
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++function ReviewDialog({ request }: { request: LeaveRequest }) {
++    const [open, setOpen] = useState(false);
++    const { data, setData, patch, processing, errors, reset } =
++        useForm<ReviewForm>({
++            status: 'approved',
++            review_notes: '',
++        });
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        patch(`/permohonan-cuti/${request.id}/semakan`, {
++            preserveScroll: true,
++            onSuccess: () => {
++                setOpen(false);
++                reset();
++            },
++        });
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button type="button" size="sm">
++                    <ClipboardCheck />
++                    Semak
++                </Button>
++            </DialogTrigger>
++            <DialogContent className="sm:max-w-xl">
++                <form onSubmit={submit}>
++                    <DialogHeader>
++                        <DialogTitle>Semak Permohonan Cuti</DialogTitle>
++                        <DialogDescription>
++                            {request.employee?.name || 'Pekerja'} ·{' '}
++                            {request.leave_type} ·{' '}
++                            {formatDate(request.start_date)} hingga{' '}
++                            {formatDate(request.end_date)}
++                        </DialogDescription>
++                    </DialogHeader>
++
++                    <div className="space-y-5 py-5">
++                        <div className="rounded-lg border bg-muted/30 p-4 text-sm">
++                            <p className="font-medium">Tujuan permohonan</p>
++                            <p className="mt-1 text-muted-foreground">
++                                {request.reason}
++                            </p>
++                            <p className="mt-3 text-xs text-muted-foreground">
++                                {request.requested_days} hari bekerja · dihantar{' '}
++                                {formatDateTime(request.submitted_at)}
++                            </p>
++                        </div>
++
++                        <div className="space-y-2">
++                            <Label htmlFor={`review-status-${request.id}`}>
++                                Keputusan
++                            </Label>
++                            <Select
++                                value={data.status}
++                                onValueChange={(value) =>
++                                    setData(
++                                        'status',
++                                        value as ReviewForm['status'],
++                                    )
++                                }
++                            >
++                                <SelectTrigger
++                                    id={`review-status-${request.id}`}
++                                >
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    <SelectItem value="approved">
++                                        Luluskan
++                                    </SelectItem>
++                                    <SelectItem value="rejected">
++                                        Tolak
++                                    </SelectItem>
++                                </SelectContent>
++                            </Select>
++                            <InputError message={errors.status} />
++                        </div>
++
++                        <div className="space-y-2">
++                            <Label htmlFor={`review-notes-${request.id}`}>
++                                Catatan HR
++                                {data.status === 'rejected'
++                                    ? ' (wajib)'
++                                    : ' (pilihan)'}
++                            </Label>
++                            <textarea
++                                id={`review-notes-${request.id}`}
++                                value={data.review_notes}
++                                onChange={(event) =>
++                                    setData('review_notes', event.target.value)
++                                }
++                                rows={4}
++                                maxLength={1000}
++                                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
++                                placeholder="Masukkan catatan keputusan"
++                            />
++                            <InputError message={errors.review_notes} />
++                        </div>
++                    </div>
++
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button type="button" variant="outline">
++                                Tutup
++                            </Button>
++                        </DialogClose>
++                        <Button
++                            type="submit"
++                            variant={
++                                data.status === 'rejected'
++                                    ? 'destructive'
++                                    : 'default'
++                            }
++                            disabled={processing}
++                        >
++                            {data.status === 'approved' ? (
++                                <CheckCircle2 />
++                            ) : (
++                                <XCircle />
++                            )}
++                            {processing
++                                ? 'Menyimpan...'
++                                : data.status === 'approved'
++                                  ? 'Luluskan'
++                                  : 'Tolak Permohonan'}
++                        </Button>
++                    </DialogFooter>
++                </form>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
++export default function LeaveRequests({
++    requests,
++    filters,
++    statistics,
++}: LeaveRequestProps) {
++    const [search, setSearch] = useState(filters.search);
++    const [status, setStatus] = useState(filters.status || 'all');
++
++    useEffect(() => {
++        const nextStatus = status === 'all' ? '' : status;
++
++        if (search === filters.search && nextStatus === filters.status) {
++            return;
++        }
++
++        const timer = window.setTimeout(() => {
++            router.get(
++                '/permohonan-cuti',
++                { search, status: nextStatus },
++                {
++                    preserveState: true,
++                    preserveScroll: true,
++                    replace: true,
++                },
++            );
++        }, 400);
++
++        return () => window.clearTimeout(timer);
++    }, [filters.search, filters.status, search, status]);
++
++    return (
++        <>
++            <Head title="Permohonan Cuti" />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                    <div className="space-y-1">
++                        <h1 className="text-2xl font-semibold tracking-tight">
++                            Permohonan Cuti
++                        </h1>
++                        <p className="text-sm text-muted-foreground">
++                            Semak dan rekodkan keputusan permohonan cuti
++                            pekerja.
++                        </p>
++                    </div>
++
++                    <div className="grid gap-3 sm:grid-cols-[minmax(16rem,1fr)_12rem]">
++                        <div className="relative">
++                            <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                            <Input
++                                value={search}
++                                onChange={(event) =>
++                                    setSearch(event.target.value)
++                                }
++                                className="pl-9"
++                                placeholder="Cari nama atau ID pekerja..."
++                            />
++                        </div>
++                        <Select value={status} onValueChange={setStatus}>
++                            <SelectTrigger>
++                                <SelectValue />
++                            </SelectTrigger>
++                            <SelectContent>
++                                <SelectItem value="all">
++                                    Semua Status
++                                </SelectItem>
++                                <SelectItem value="pending">
++                                    Menunggu
++                                </SelectItem>
++                                <SelectItem value="approved">
++                                    Diluluskan
++                                </SelectItem>
++                                <SelectItem value="rejected">
++                                    Ditolak
++                                </SelectItem>
++                                <SelectItem value="cancelled">
++                                    Dibatalkan
++                                </SelectItem>
++                            </SelectContent>
++                        </Select>
++                    </div>
++                </div>
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Jumlah Permohonan</CardDescription>
++                            <CardTitle className="flex items-center gap-2 text-2xl">
++                                <CalendarDays className="size-5 text-muted-foreground" />
++                                {statistics.total}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Menunggu</CardDescription>
++                            <CardTitle className="flex items-center gap-2 text-2xl text-amber-600">
++                                <CalendarClock className="size-5" />
++                                {statistics.pending}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Diluluskan</CardDescription>
++                            <CardTitle className="flex items-center gap-2 text-2xl text-emerald-600">
++                                <CalendarCheck2 className="size-5" />
++                                {statistics.approved}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card className="gap-3">
++                        <CardHeader>
++                            <CardDescription>Ditolak</CardDescription>
++                            <CardTitle className="flex items-center gap-2 text-2xl text-red-600">
++                                <XCircle className="size-5" />
++                                {statistics.rejected}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                </div>
++
++                <Card className="gap-0 overflow-hidden">
++                    <CardHeader className="border-b">
++                        <CardTitle>Senarai Permohonan</CardTitle>
++                        <CardDescription>
++                            Permohonan daripada modul Cuti Saya.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent className="p-0">
++                        {requests.data.length > 0 ? (
++                            <div className="overflow-x-auto">
++                                <Table>
++                                    <TableHeader>
++                                        <TableRow>
++                                            <TableHead>Pekerja</TableHead>
++                                            <TableHead>Jenis Cuti</TableHead>
++                                            <TableHead>Tempoh</TableHead>
++                                            <TableHead>Tujuan</TableHead>
++                                            <TableHead>Status</TableHead>
++                                            <TableHead className="text-right">
++                                                Tindakan
++                                            </TableHead>
++                                        </TableRow>
++                                    </TableHeader>
++                                    <TableBody>
++                                        {requests.data.map((request) => (
++                                            <TableRow key={request.id}>
++                                                <TableCell>
++                                                    <p className="font-medium">
++                                                        {request.employee
++                                                            ?.name || '-'}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {request.employee
++                                                            ?.employee_id ||
++                                                            '-'}
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell>
++                                                    {request.leave_type}
++                                                </TableCell>
++                                                <TableCell className="whitespace-nowrap">
++                                                    <p>
++                                                        {formatDate(
++                                                            request.start_date,
++                                                        )}{' '}
++                                                        –{' '}
++                                                        {formatDate(
++                                                            request.end_date,
++                                                        )}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {request.requested_days}{' '}
++                                                        hari bekerja
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell className="max-w-xs">
++                                                    <p className="line-clamp-2 text-sm">
++                                                        {request.reason}
++                                                    </p>
++                                                    {request.review_notes && (
++                                                        <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
++                                                            HR:{' '}
++                                                            {
++                                                                request.review_notes
++                                                            }
++                                                        </p>
++                                                    )}
++                                                </TableCell>
++                                                <TableCell>
++                                                    <StatusBadge
++                                                        status={request.status}
++                                                    />
++                                                </TableCell>
++                                                <TableCell className="text-right">
++                                                    {request.status ===
++                                                    'pending' ? (
++                                                        <ReviewDialog
++                                                            request={request}
++                                                        />
++                                                    ) : (
++                                                        <p className="text-xs text-muted-foreground">
++                                                            {request.reviewer ||
++                                                                '-'}
++                                                            <br />
++                                                            {formatDateTime(
++                                                                request.reviewed_at,
++                                                            )}
++                                                        </p>
++                                                    )}
++                                                </TableCell>
++                                            </TableRow>
++                                        ))}
++                                    </TableBody>
++                                </Table>
++                            </div>
++                        ) : (
++                            <div className="py-16 text-center text-sm text-muted-foreground">
++                                Tiada permohonan cuti ditemui.
++                            </div>
++                        )}
++
++                        {requests.total > 0 && (
++                            <div className="flex flex-col gap-3 border-t px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
++                                <p className="text-sm text-muted-foreground">
++                                    Memaparkan {requests.from ?? 0} hingga{' '}
++                                    {requests.to ?? 0} daripada {requests.total}{' '}
++                                    rekod
++                                </p>
++                                <div className="flex flex-wrap gap-2">
++                                    {requests.links.map((link, index) => (
++                                        <Button
++                                            key={`${link.label}-${index}`}
++                                            type="button"
++                                            size="sm"
++                                            variant={
++                                                link.active
++                                                    ? 'default'
++                                                    : 'outline'
++                                            }
++                                            disabled={!link.url}
++                                            onClick={() => {
++                                                if (link.url) {
++                                                    router.visit(link.url, {
++                                                        preserveScroll: true,
++                                                        preserveState: true,
++                                                    });
++                                                }
++                                            }}
++                                        >
++                                            {paginationLabel(link.label)}
++                                        </Button>
++                                    ))}
++                                </div>
++                            </div>
++                        )}
++                    </CardContent>
++                </Card>
++            </div>
++        </>
++    );
++}
++
++LeaveRequests.layout = {
++    breadcrumbs: [
++        { title: 'Masa & Kehadiran', href: '/permohonan-cuti' },
++        { title: 'Permohonan Cuti', href: '/permohonan-cuti' },
++    ],
++};
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index dd3aa05..4a0ca47 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -88,7 +88,12 @@ const permissionLabels: Record<Permission, string> = {
+     'attendance.manage': 'Urus Kehadiran',
+     'attendance.clock': 'Rakam Kehadiran Sendiri',
+     'attendance.settings': 'Tetapan Geofence',
+-    'leave.view': 'Cuti',
++    'employee.profile.view': 'Profil Sendiri',
++    'employee.profile.update': 'Kemas Kini Profil Sendiri',
++    'leave.view': 'Cuti Asal',
++    'leave.manage': 'Urus Permohonan Cuti',
++    'leave.self': 'Cuti Sendiri',
++    'leave.apply': 'Mohon Cuti',
+     'overtime.view': 'Kerja Lebih Masa',
+     'payroll.view': 'Payroll',
+     'reports.view': 'Laporan Bulanan',
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index 8951c28..43c79db 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -10,7 +10,12 @@ export type Permission =
+     | 'attendance.manage'
+     | 'attendance.clock'
+     | 'attendance.settings'
++    | 'employee.profile.view'
++    | 'employee.profile.update'
+     | 'leave.view'
++    | 'leave.manage'
++    | 'leave.self'
++    | 'leave.apply'
+     | 'overtime.view'
+     | 'payroll.view'
+     | 'reports.view'
+diff --git a/routes/web.php b/routes/web.php
+index d2f8cdc..1598494 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -3,8 +3,11 @@
+ use App\Http\Controllers\AuditTrailController;
+ use App\Http\Controllers\AttendanceSettingsController;
+ use App\Http\Controllers\DashboardController;
++use App\Http\Controllers\EmployeeLeaveController;
++use App\Http\Controllers\EmployeeProfileController;
+ use App\Http\Controllers\EmployeeUserImportController;
+ use App\Http\Controllers\GeoAttendanceController;
++use App\Http\Controllers\LeaveRequestController;
+ use App\Http\Controllers\MaklumatCutiController;
+ use App\Http\Controllers\MaklumatJawatanController;
+ use App\Http\Controllers\MaklumatKehadiranController;
+@@ -89,9 +92,35 @@ Route::middleware(['auth', 'verified'])->group(function () {
+     Route::post('kehadiran/rakam-keluar', [GeoAttendanceController::class, 'clockOut'])
+         ->middleware(['permission:attendance.clock', 'throttle:10,1'])
+         ->name('kehadiran.clock-out');
++
++    Route::get('profil-saya', [EmployeeProfileController::class, 'show'])
++        ->middleware('permission:employee.profile.view')
++        ->name('employee-profile.show');
++    Route::put('profil-saya', [EmployeeProfileController::class, 'update'])
++        ->middleware('permission:employee.profile.update')
++        ->name('employee-profile.update');
++
++    Route::get('cuti-saya', [EmployeeLeaveController::class, 'index'])
++        ->middleware('permission:leave.self')
++        ->name('employee-leave.index');
++    Route::post('cuti-saya', [EmployeeLeaveController::class, 'store'])
++        ->middleware('permission:leave.apply')
++        ->name('employee-leave.store');
++    Route::patch('cuti-saya/{leaveRequest}/batal', [EmployeeLeaveController::class, 'cancel'])
++        ->middleware('permission:leave.apply')
++        ->whereNumber('leaveRequest')
++        ->name('employee-leave.cancel');
++
+     Route::get('cuti', [MaklumatCutiController::class, 'index'])
+         ->middleware('permission:leave.view')
+         ->name('cuti.index');
++    Route::get('permohonan-cuti', [LeaveRequestController::class, 'index'])
++        ->middleware('permission:leave.manage')
++        ->name('leave-requests.index');
++    Route::patch('permohonan-cuti/{leaveRequest}/semakan', [LeaveRequestController::class, 'review'])
++        ->middleware('permission:leave.manage')
++        ->whereNumber('leaveRequest')
++        ->name('leave-requests.review');
+     Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])
+         ->middleware('permission:overtime.view')
+         ->name('kerja-lebih-masa.index');
+diff --git a/tests/Feature/EmployeeSelfServiceTest.php b/tests/Feature/EmployeeSelfServiceTest.php
+new file mode 100644
+index 0000000..492c98e
+--- /dev/null
++++ b/tests/Feature/EmployeeSelfServiceTest.php
+@@ -0,0 +1,412 @@
++<?php
++
++use App\Enums\UserRole;
++use App\Models\EmployeeLeaveRequest;
++use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
++use App\Models\User;
++use Illuminate\Database\Events\QueryExecuted;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    Carbon::setTestNow('2026-07-29 10:00:00');
++
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('employeeID', 15)->nullable();
++        $table->string('nama')->nullable();
++        $table->string('nric')->nullable();
++        $table->string('alamat')->nullable();
++        $table->string('notel', 30)->nullable();
++        $table->string('email')->nullable();
++        $table->date('tarikhlahir')->nullable();
++        $table->string('kewarganegaraan')->nullable();
++        $table->integer('jantina')->nullable();
++        $table->integer('agama')->nullable();
++        $table->integer('bangsa')->nullable();
++        $table->string('statusperkahwinan')->nullable();
++        $table->integer('status')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    foreach ([
++        'xjantina',
++        'xagama',
++        'xbangsa',
++        'xstatusperkahwinan',
++        'xstatus',
++        'xdepartment',
++        'xsenaraicuti',
++        'xstatuscuti',
++    ] as $tableName) {
++        Schema::connection('ibco')->create($tableName, function (Blueprint $table) {
++            $table->increments('id');
++            $table->string('description')->nullable();
++            $table->boolean('rcd_enable')->default(true);
++        });
++    }
++
++    Schema::connection('ibco')->create('maklumatjawatan', function (Blueprint $table) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->integer('id_department')->nullable();
++        $table->string('jawatan')->nullable();
++        $table->date('date_lapordiri')->nullable();
++        $table->string('jumlahcuti')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    Schema::connection('ibco')->create('maklumatcuti', function (Blueprint $table) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->string('tahun', 4)->nullable();
++        $table->integer('jenis_cuti')->nullable();
++        $table->date('date_mulacuti')->nullable();
++        $table->date('date_tamatcuti')->nullable();
++        $table->string('bil_cutidipohon')->nullable();
++        $table->string('bakicuti')->nullable();
++        $table->integer('status_permohonan')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    DB::connection('ibco')->table('xjantina')->insert([
++        'id' => 1,
++        'description' => 'Perempuan',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xagama')->insert([
++        'id' => 1,
++        'description' => 'Islam',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xbangsa')->insert([
++        'id' => 1,
++        'description' => 'Melayu',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xstatusperkahwinan')->insert([
++        'id' => 1,
++        'description' => 'Berkahwin',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xstatus')->insert([
++        'id' => 1,
++        'description' => 'Aktif',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xdepartment')->insert([
++        'id' => 1,
++        'description' => 'Teknologi Maklumat',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xsenaraicuti')->insert([
++        'id' => 1,
++        'description' => 'Cuti Tahunan',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('xstatuscuti')->insert([
++        'id' => 1,
++        'description' => 'Diluluskan',
++        'rcd_enable' => 1,
++    ]);
++});
++
++afterEach(function () {
++    Carbon::setTestNow();
++    DB::disconnect('ibco');
++});
++
++function createSelfServiceEmployee(array $overrides = []): int
++{
++    $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => 'EMP-ESS-001',
++        'nama' => 'Pekerja ESS',
++        'nric' => '900101011234',
++        'alamat' => 'Alamat Asal',
++        'notel' => '0123456789',
++        'email' => 'asal@ibco.test',
++        'tarikhlahir' => '1990-01-01',
++        'kewarganegaraan' => 'Malaysia',
++        'jantina' => 1,
++        'agama' => 1,
++        'bangsa' => 1,
++        'statusperkahwinan' => 1,
++        'status' => 1,
++        'rcd_enable' => 1,
++        ...$overrides,
++    ]);
++
++    DB::connection('ibco')->table('maklumatjawatan')->insert([
++        'id_pekerja' => $employeeId,
++        'id_department' => 1,
++        'jawatan' => 'Pegawai Teknologi Maklumat',
++        'date_lapordiri' => '2020-01-01',
++        'jumlahcuti' => '20',
++        'rcd_enable' => 1,
++    ]);
++
++    DB::connection('ibco')->table('maklumatcuti')->insert([
++        'id_pekerja' => $employeeId,
++        'tahun' => '2026',
++        'jenis_cuti' => 1,
++        'date_mulacuti' => '2026-01-05',
++        'date_tamatcuti' => '2026-01-06',
++        'bil_cutidipohon' => '2',
++        'bakicuti' => '18',
++        'status_permohonan' => 1,
++        'rcd_enable' => 1,
++    ]);
++
++    return $employeeId;
++}
++
++function linkSelfServiceEmployee(User $user, int $employeeId): EmployeeUserLink
++{
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.1390000,
++        'longitude' => 101.6869000,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++
++    return EmployeeUserLink::query()->create([
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => true,
++    ]);
++}
++
++test('employee can view self service profile and leave data using select queries only on db_spp', function () {
++    $user = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($user, $employeeId);
++    $legacyQueries = [];
++
++    DB::listen(function (QueryExecuted $event) use (&$legacyQueries) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(trim($event->sql));
++        }
++    });
++
++    $this->actingAs($user)
++        ->get(route('employee-profile.show'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('EmployeeSelfService/Profile')
++            ->where('employee.id', $employeeId)
++            ->where('contact.phone', '0123456789')
++            ->where('position.leave_entitlement', '20'));
++
++    $this->actingAs($user)
++        ->get(route('employee-leave.index'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('EmployeeSelfService/Leave')
++            ->where('employee.id', $employeeId)
++            ->where('summary.legacy_balance', '18')
++            ->where('leaveTypes.0.label', 'Cuti Tahunan'));
++
++    expect($legacyQueries)->not->toBeEmpty();
++    expect($legacyQueries)->each->toStartWith('select');
++});
++
++test('employee updates contact information locally without changing db_spp', function () {
++    $user = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($user, $employeeId);
++    $legacyBefore = DB::connection('ibco')
++        ->table('maklumatpekerja')
++        ->where('id', $employeeId)
++        ->first();
++
++    $this->actingAs($user)
++        ->put(route('employee-profile.update'), [
++            'address' => 'Alamat Baharu',
++            'phone' => '0198765432',
++            'email' => 'baharu@ibco.test',
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++
++    $this->assertDatabaseHas('employee_personal_profiles', [
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'address' => 'Alamat Baharu',
++        'phone' => '0198765432',
++        'email' => 'baharu@ibco.test',
++    ]);
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'employee.profile_updated',
++        'auditable_type' => 'employee_personal_profiles',
++    ]);
++    expect(
++        DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $employeeId)
++            ->first(),
++    )->toEqual($legacyBefore);
++});
++
++test('employee can submit leave and working days are calculated on the server', function () {
++    $user = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($user, $employeeId);
++    $legacyBefore = DB::connection('ibco')->table('maklumatcuti')->get();
++
++    $this->actingAs($user)
++        ->post(route('employee-leave.store'), [
++            'leave_type_id' => 1,
++            'start_date' => '2026-08-03',
++            'end_date' => '2026-08-05',
++            'reason' => 'Urusan keluarga',
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++
++    $this->assertDatabaseHas('employee_leave_requests', [
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'leave_type_label' => 'Cuti Tahunan',
++        'requested_days' => 3,
++        'status' => 'pending',
++    ]);
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'leave.submitted',
++        'auditable_type' => 'employee_leave_requests',
++    ]);
++    expect(DB::connection('ibco')->table('maklumatcuti')->get())
++        ->toEqual($legacyBefore);
++});
++
++test('overlapping active leave application is rejected', function () {
++    $user = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($user, $employeeId);
++
++    EmployeeLeaveRequest::query()->create([
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'leave_type_id' => 1,
++        'leave_type_label' => 'Cuti Tahunan',
++        'start_date' => '2026-08-03',
++        'end_date' => '2026-08-05',
++        'requested_days' => 3,
++        'reason' => 'Permohonan pertama',
++        'status' => 'pending',
++        'submitted_at' => now(),
++    ]);
++
++    $this->actingAs($user)
++        ->post(route('employee-leave.store'), [
++            'leave_type_id' => 1,
++            'start_date' => '2026-08-05',
++            'end_date' => '2026-08-07',
++            'reason' => 'Permohonan bertindih',
++        ])
++        ->assertSessionHasErrors('start_date');
++
++    $this->assertDatabaseCount('employee_leave_requests', 1);
++});
++
++test('hr admin can approve leave while ordinary employee cannot access approval list', function () {
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($employeeUser, $employeeId);
++    $leave = EmployeeLeaveRequest::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'leave_type_id' => 1,
++        'leave_type_label' => 'Cuti Tahunan',
++        'start_date' => '2026-08-03',
++        'end_date' => '2026-08-05',
++        'requested_days' => 3,
++        'reason' => 'Urusan keluarga',
++        'status' => 'pending',
++        'submitted_at' => now(),
++    ]);
++    $hrAdmin = User::factory()->hrAdmin()->create();
++
++    $this->actingAs($employeeUser)
++        ->get(route('leave-requests.index'))
++        ->assertForbidden();
++
++    $this->actingAs($hrAdmin)
++        ->get(route('leave-requests.index'))
++        ->assertOk();
++
++    $this->actingAs($hrAdmin)
++        ->patch(route('leave-requests.review', $leave), [
++            'status' => 'approved',
++            'review_notes' => 'Permohonan lengkap.',
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++
++    expect($leave->fresh()->status)->toBe('approved');
++    expect($leave->fresh()->reviewed_by)->toBe($hrAdmin->getKey());
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'leave.approved',
++        'auditable_type' => 'employee_leave_requests',
++        'auditable_id' => (string) $leave->getKey(),
++    ]);
++});
++
++test('employee can cancel only their own pending leave request', function () {
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createSelfServiceEmployee();
++    linkSelfServiceEmployee($employeeUser, $employeeId);
++    $leave = EmployeeLeaveRequest::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'leave_type_id' => 1,
++        'leave_type_label' => 'Cuti Tahunan',
++        'start_date' => '2026-08-03',
++        'end_date' => '2026-08-05',
++        'requested_days' => 3,
++        'reason' => 'Urusan keluarga',
++        'status' => 'pending',
++        'submitted_at' => now(),
++    ]);
++    $otherEmployee = User::factory()->employee()->create();
++
++    $this->actingAs($otherEmployee)
++        ->patch(route('employee-leave.cancel', $leave))
++        ->assertForbidden();
++
++    $this->actingAs($employeeUser)
++        ->patch(route('employee-leave.cancel', $leave))
++        ->assertRedirect();
++
++    expect($leave->fresh()->status)->toBe('cancelled');
++});
++
++test('multiple role user receives employee self service permissions from employee role', function () {
++    $user = User::factory()->superAdmin()->create();
++    $user->syncRoles([UserRole::SuperAdmin, UserRole::Employee]);
++
++    expect($user->hasPermission('employee.profile.view'))->toBeTrue();
++    expect($user->hasPermission('employee.profile.update'))->toBeTrue();
++    expect($user->hasPermission('leave.self'))->toBeTrue();
++    expect($user->hasPermission('leave.apply'))->toBeTrue();
++    expect($user->hasPermission('leave.manage'))->toBeTrue();
++});

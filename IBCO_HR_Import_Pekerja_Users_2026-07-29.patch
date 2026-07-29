@@ -1,0 +1,1651 @@
+diff --git a/README.md b/README.md
+index 1855ae2e1e4e679761517160bba5e17622b253da..094eda1323f283060e7b808993a602dc0e6c5a02 100644
+--- a/README.md
++++ b/README.md
+@@ -115,6 +115,18 @@ ## Roles & Permissions
+   dan Kerja Lebih Masa sahaja.
+ - **Employee** — rakam masuk/keluar dan melihat sejarah kehadiran sendiri.
+ 
++Akaun boleh memegang lebih daripada satu role. Permission daripada semua role
++akan digabungkan, contohnya akaun `Super Admin + Employee` boleh mengurus sistem
++dan merakam kehadiran sendiri.
++
++Super Admin juga boleh menggunakan fungsi **Import Pekerja** untuk membaca
++pekerja aktif daripada `db_spp` dan mendaftarkan sehingga 200 akaun Employee
++pada satu masa. Pekerja yang telah dipautkan tidak akan diimport semula. Jika
++e-mel pekerja sepadan dengan akaun sistem sedia ada, role Employee dan pautan
++kehadiran akan ditambah tanpa mengubah role atau kata laluan lama. Akaun baharu
++menerima kata laluan rawak yang hanya dipaparkan sekali selepas import dan
++boleh dimuat turun sebagai CSV.
++
+ Akaun sedia ada paling awal akan menjadi Super Admin apabila migration role
+ dijalankan. Pengguna baharu menerima Employee secara lalai, kecuali
+ pengguna pertama bagi pemasangan kosong yang akan menjadi Super Admin.
+diff --git a/app/Http/Controllers/EmployeeUserImportController.php b/app/Http/Controllers/EmployeeUserImportController.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..77534fda284a50ac12ba989b388e3f1e00d1b4b4
+--- /dev/null
++++ b/app/Http/Controllers/EmployeeUserImportController.php
+@@ -0,0 +1,369 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Enums\UserRole;
++use App\Http\Requests\ImportEmployeeUsersRequest;
++use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
++use App\Models\User;
++use App\Support\AuditLogger;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class EmployeeUserImportController extends Controller
++{
++    public function create(Request $request): Response
++    {
++        $candidates = $this->importCandidates();
++
++        return Inertia::render('users/import-employees', [
++            'employees' => $candidates,
++            'offices' => OfficeLocation::query()
++                ->where('is_active', true)
++                ->orderBy('name')
++                ->get(['id', 'name', 'radius_meters'])
++                ->map(fn (OfficeLocation $office) => [
++                    'id' => $office->getKey(),
++                    'name' => $office->name,
++                    'radius_meters' => $office->radius_meters,
++                ]),
++            'statistics' => [
++                'active_employees' => DB::connection('ibco')
++                    ->table('maklumatpekerja')
++                    ->where('rcd_enable', 1)
++                    ->count(),
++                'already_registered' => EmployeeUserLink::query()
++                    ->where('is_active', true)
++                    ->count(),
++                'ready_to_import' => $candidates
++                    ->where('can_import', true)
++                    ->count(),
++                'requires_attention' => $candidates
++                    ->where('can_import', false)
++                    ->count(),
++            ],
++            'importResult' => $request->session()->get('employee_user_import_result'),
++        ]);
++    }
++
++    public function store(
++        ImportEmployeeUsersRequest $request,
++    ): RedirectResponse {
++        $validated = $request->validated();
++        $selectedIds = collect($validated['employee_ids'])
++            ->map(fn ($id) => (int) $id)
++            ->unique()
++            ->values();
++        $candidateMap = $this->importCandidates($selectedIds)
++            ->keyBy('id');
++        $invalidSelections = $selectedIds
++            ->filter(function (int $employeeId) use ($candidateMap) {
++                $candidate = $candidateMap->get($employeeId);
++
++                return ! $candidate || ! $candidate['can_import'];
++            });
++
++        if ($invalidSelections->isNotEmpty()) {
++            throw ValidationException::withMessages([
++                'employee_ids' => 'Sebahagian pekerja tidak lagi layak diimport. Muat semula halaman dan semak status pekerja.',
++            ]);
++        }
++
++        $office = OfficeLocation::query()
++            ->whereKey($validated['office_location_id'])
++            ->where('is_active', true)
++            ->first();
++
++        if (! $office) {
++            throw ValidationException::withMessages([
++                'office_location_id' => 'Lokasi pejabat yang dipilih tidak lagi aktif.',
++            ]);
++        }
++
++        $result = DB::transaction(function () use (
++            $request,
++            $candidateMap,
++            $selectedIds,
++            $office,
++        ) {
++            $created = [];
++            $linked = [];
++
++            foreach ($selectedIds as $employeeId) {
++                $candidate = $candidateMap->get($employeeId);
++                $email = $candidate['email'];
++                $user = User::query()
++                    ->whereRaw('LOWER(email) = ?', [$email])
++                    ->lockForUpdate()
++                    ->first();
++                $temporaryPassword = null;
++                $wasCreated = false;
++
++                if (! $user) {
++                    $temporaryPassword = Str::password(16);
++                    $user = User::query()->create([
++                        'name' => $candidate['name'],
++                        'email' => $email,
++                        'password' => $temporaryPassword,
++                        'role' => UserRole::Employee,
++                    ]);
++                    $user->forceFill(['email_verified_at' => now()])->save();
++                    $user->syncRoles([UserRole::Employee]);
++                    $wasCreated = true;
++                } else {
++                    $activeLink = EmployeeUserLink::query()
++                        ->where('user_id', $user->getKey())
++                        ->where('is_active', true)
++                        ->lockForUpdate()
++                        ->first();
++
++                    if (
++                        $activeLink
++                        && $activeLink->employee_id !== $employeeId
++                    ) {
++                        throw ValidationException::withMessages([
++                            'employee_ids' => "Akaun {$email} baru sahaja dipautkan kepada pekerja lain.",
++                        ]);
++                    }
++
++                    $beforeRoles = $user->roleValues();
++                    $user->syncRoles([
++                        ...$user->resolvedRoles(),
++                        UserRole::Employee,
++                    ]);
++
++                    if ($beforeRoles !== $user->roleValues()) {
++                        AuditLogger::record(
++                            $request,
++                            'user.updated',
++                            'users',
++                            $user->getKey(),
++                            oldValues: ['roles' => $beforeRoles],
++                            newValues: ['roles' => $user->roleValues()],
++                        );
++                    }
++                }
++
++                $employeeAlreadyLinked = EmployeeUserLink::query()
++                    ->where('employee_id', $employeeId)
++                    ->where('is_active', true)
++                    ->where('user_id', '!=', $user->getKey())
++                    ->lockForUpdate()
++                    ->exists();
++
++                if ($employeeAlreadyLinked) {
++                    throw ValidationException::withMessages([
++                        'employee_ids' => "{$candidate['name']} baru sahaja didaftarkan oleh pengguna lain.",
++                    ]);
++                }
++
++                $link = EmployeeUserLink::query()->firstOrNew([
++                    'user_id' => $user->getKey(),
++                ]);
++                $beforeLink = $link->exists
++                    ? $this->linkAuditValues($link)
++                    : [];
++
++                $link->fill([
++                    'employee_id' => $employeeId,
++                    'office_location_id' => $office->getKey(),
++                    'is_active' => true,
++                    'updated_by' => $request->user()->getAuthIdentifier(),
++                ]);
++
++                if (! $link->exists) {
++                    $link->created_by = $request->user()->getAuthIdentifier();
++                }
++
++                $link->save();
++
++                if ($wasCreated) {
++                    AuditLogger::record(
++                        $request,
++                        'user.created',
++                        'users',
++                        $user->getKey(),
++                        newValues: [
++                            'name' => $user->name,
++                            'email' => $user->email,
++                            'roles' => $user->roleValues(),
++                            'source' => 'employee_import',
++                        ],
++                    );
++                }
++
++                AuditLogger::record(
++                    $request,
++                    $beforeLink === []
++                        ? 'employee_link.created'
++                        : 'employee_link.updated',
++                    'employee_user_links',
++                    $link->getKey(),
++                    oldValues: $beforeLink,
++                    newValues: $this->linkAuditValues($link),
++                );
++
++                if ($wasCreated) {
++                    $created[] = [
++                        'employee_id' => $candidate['employee_id'],
++                        'name' => $user->name,
++                        'email' => $user->email,
++                        'temporary_password' => $temporaryPassword,
++                    ];
++                } else {
++                    $linked[] = [
++                        'employee_id' => $candidate['employee_id'],
++                        'name' => $user->name,
++                        'email' => $user->email,
++                    ];
++                }
++            }
++
++            return [
++                'created_count' => count($created),
++                'linked_count' => count($linked),
++                'office_name' => $office->name,
++                'credentials' => $created,
++                'linked_accounts' => $linked,
++            ];
++        });
++
++        return redirect()
++            ->route('users.import.create')
++            ->with('employee_user_import_result', $result)
++            ->with('toast', [
++                'type' => 'success',
++                'message' => sprintf(
++                    '%d akaun baharu dicipta dan %d akaun sedia ada dipautkan.',
++                    $result['created_count'],
++                    $result['linked_count'],
++                ),
++            ]);
++    }
++
++    /**
++     * @param  Collection<int, int>|null  $onlyIds
++     * @return Collection<int, array<string, mixed>>
++     */
++    private function importCandidates(?Collection $onlyIds = null): Collection
++    {
++        $linkedEmployeeIds = EmployeeUserLink::query()
++            ->where('is_active', true)
++            ->pluck('employee_id');
++        $employees = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('rcd_enable', 1)
++            ->when(
++                $linkedEmployeeIds->isNotEmpty(),
++                fn ($query) => $query->whereNotIn(
++                    'id',
++                    $linkedEmployeeIds,
++                ),
++            )
++            ->orderBy('nama')
++            ->get(['id', 'employeeID', 'nama', 'email']);
++        $normalizedEmails = $employees
++            ->map(fn ($employee) => $this->normalizeEmail($employee->email))
++            ->filter();
++        $duplicateEmails = $normalizedEmails
++            ->countBy()
++            ->filter(fn (int $count) => $count > 1)
++            ->keys();
++        $existingUsers = User::query()
++            ->with([
++                'roleAssignments',
++                'employeeLink' => fn ($query) => $query
++                    ->where('is_active', true),
++            ])
++            ->whereIn(
++                DB::raw('LOWER(email)'),
++                $normalizedEmails->unique()->values(),
++            )
++            ->get()
++            ->keyBy(fn (User $user) => $this->normalizeEmail($user->email));
++
++        $candidates = $employees
++            ->map(function ($employee) use (
++                $duplicateEmails,
++                $existingUsers,
++            ) {
++                $email = $this->normalizeEmail($employee->email);
++                $emailValid = $email !== null
++                    && filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
++                $duplicateEmail = $email !== null
++                    && $duplicateEmails->contains($email);
++                $existingUser = $email
++                    ? $existingUsers->get($email)
++                    : null;
++                $accountConflict = $existingUser?->employeeLink !== null
++                    && $existingUser->employeeLink->employee_id
++                        !== (int) $employee->id;
++                $status = 'new_account';
++
++                if (! $emailValid) {
++                    $status = 'invalid_email';
++                } elseif ($duplicateEmail) {
++                    $status = 'duplicate_email';
++                } elseif ($accountConflict) {
++                    $status = 'account_linked_elsewhere';
++                } elseif ($existingUser) {
++                    $status = 'existing_account';
++                }
++
++                return [
++                    'id' => (int) $employee->id,
++                    'employee_id' => $employee->employeeID,
++                    'name' => trim((string) $employee->nama)
++                        ?: ($employee->employeeID ?: "Pekerja #{$employee->id}"),
++                    'email' => $email,
++                    'status' => $status,
++                    'can_import' => $emailValid
++                        && ! $duplicateEmail
++                        && ! $accountConflict,
++                    'existing_user' => $existingUser
++                        ? [
++                            'id' => $existingUser->getKey(),
++                            'name' => $existingUser->name,
++                            'roles' => $existingUser->roleValues(),
++                        ]
++                        : null,
++                ];
++            })
++            ->values();
++
++        if (! $onlyIds) {
++            return $candidates;
++        }
++
++        return $candidates
++            ->whereIn('id', $onlyIds)
++            ->values();
++    }
++
++    private function normalizeEmail(?string $email): ?string
++    {
++        $normalized = Str::lower(trim((string) $email));
++
++        return $normalized !== '' ? $normalized : null;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function linkAuditValues(EmployeeUserLink $link): array
++    {
++        return [
++            'user_id' => $link->user_id,
++            'employee_id' => $link->employee_id,
++            'office_location_id' => $link->office_location_id,
++            'is_active' => $link->is_active,
++        ];
++    }
++}
+diff --git a/app/Http/Requests/ImportEmployeeUsersRequest.php b/app/Http/Requests/ImportEmployeeUsersRequest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce307132a1fc40ac9cee9343e752a6615cb14b4d
+--- /dev/null
++++ b/app/Http/Requests/ImportEmployeeUsersRequest.php
+@@ -0,0 +1,53 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class ImportEmployeeUsersRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('users.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function rules(): array
++    {
++        return [
++            'employee_ids' => ['required', 'array', 'min:1', 'max:200'],
++            'employee_ids.*' => [
++                'required',
++                'integer',
++                'min:1',
++                'distinct',
++            ],
++            'office_location_id' => [
++                'required',
++                'integer',
++                Rule::exists('office_locations', 'id')
++                    ->where('is_active', true),
++            ],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'employee_ids.required' => 'Pilih sekurang-kurangnya seorang pekerja.',
++            'employee_ids.array' => 'Senarai pekerja yang dipilih tidak sah.',
++            'employee_ids.min' => 'Pilih sekurang-kurangnya seorang pekerja.',
++            'employee_ids.max' => 'Maksimum 200 pekerja boleh diimport pada satu masa.',
++            'employee_ids.*.integer' => 'Rekod pekerja yang dipilih tidak sah.',
++            'employee_ids.*.distinct' => 'Pekerja yang sama tidak boleh dipilih dua kali.',
++            'office_location_id.required' => 'Pilih lokasi pejabat untuk pekerja yang diimport.',
++            'office_location_id.exists' => 'Lokasi pejabat yang dipilih mesti aktif.',
++        ];
++    }
++}
+diff --git a/resources/js/pages/users/import-employees.tsx b/resources/js/pages/users/import-employees.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..673eab4fb25eaa20f769d1ecc25b91e8e1483425
+--- /dev/null
++++ b/resources/js/pages/users/import-employees.tsx
+@@ -0,0 +1,824 @@
++import { Head, Link, useForm } from '@inertiajs/react';
++import {
++    AlertTriangle,
++    ArrowLeft,
++    CheckCircle2,
++    ClipboardCopy,
++    DatabaseZap,
++    Download,
++    Search,
++    ShieldCheck,
++    UserPlus,
++} from 'lucide-react';
++import { useMemo, useState } from 'react';
++import type { FormEvent } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Checkbox } from '@/components/ui/checkbox';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++import type { UserRole } from '@/types';
++
++type ImportStatus =
++    | 'new_account'
++    | 'existing_account'
++    | 'invalid_email'
++    | 'duplicate_email'
++    | 'account_linked_elsewhere';
++
++type ImportEmployee = {
++    id: number;
++    employee_id: string | null;
++    name: string;
++    email: string | null;
++    status: ImportStatus;
++    can_import: boolean;
++    existing_user: {
++        id: number;
++        name: string;
++        roles: UserRole[];
++    } | null;
++};
++
++type OfficeOption = {
++    id: number;
++    name: string;
++    radius_meters: number;
++};
++
++type Credential = {
++    employee_id: string | null;
++    name: string;
++    email: string;
++    temporary_password: string;
++};
++
++type LinkedAccount = {
++    employee_id: string | null;
++    name: string;
++    email: string;
++};
++
++type ImportResult = {
++    created_count: number;
++    linked_count: number;
++    office_name: string;
++    credentials: Credential[];
++    linked_accounts: LinkedAccount[];
++};
++
++type ImportEmployeesProps = {
++    employees: ImportEmployee[];
++    offices: OfficeOption[];
++    statistics: {
++        active_employees: number;
++        already_registered: number;
++        ready_to_import: number;
++        requires_attention: number;
++    };
++    importResult: ImportResult | null;
++};
++
++type ImportForm = {
++    employee_ids: number[];
++    office_location_id: string;
++};
++
++const roleLabels: Record<UserRole, string> = {
++    super_admin: 'Super Admin',
++    hr_admin: 'HR Admin',
++    viewer: 'Viewer / Manager',
++    employee: 'Employee',
++};
++
++const statusDetails: Record<
++    ImportStatus,
++    { label: string; description: string; className: string }
++> = {
++    new_account: {
++        label: 'Akaun baharu',
++        description: 'Akaun Employee baharu akan dicipta.',
++        className:
++            'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++    },
++    existing_account: {
++        label: 'Akaun sedia ada',
++        description:
++            'Role Employee dan pautan pekerja akan ditambah. Role serta kata laluan sedia ada dikekalkan.',
++        className:
++            'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
++    },
++    invalid_email: {
++        label: 'E-mel tidak sah',
++        description:
++            'Lengkapkan alamat e-mel pekerja sebelum menjalankan import.',
++        className:
++            'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    },
++    duplicate_email: {
++        label: 'E-mel pendua',
++        description:
++            'Alamat e-mel ini digunakan oleh lebih daripada seorang pekerja aktif.',
++        className:
++            'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
++    },
++    account_linked_elsewhere: {
++        label: 'Konflik pautan',
++        description:
++            'Akaun dengan e-mel ini telah dipautkan kepada pekerja lain.',
++        className: 'border-destructive/30 bg-destructive/10 text-destructive',
++    },
++};
++
++function csvCell(value: string | null): string {
++    let safeValue = value ?? '';
++
++    if (/^[=+\-@]/.test(safeValue)) {
++        safeValue = `'${safeValue}`;
++    }
++
++    return `"${safeValue.replaceAll('"', '""')}"`;
++}
++
++function credentialText(credentials: Credential[]): string {
++    return credentials
++        .map(
++            (credential) =>
++                `${credential.name} | ${credential.email} | ${credential.temporary_password}`,
++        )
++        .join('\n');
++}
++
++export default function ImportEmployees({
++    employees,
++    offices,
++    statistics,
++    importResult,
++}: ImportEmployeesProps) {
++    const [search, setSearch] = useState('');
++    const [credentialsCopied, setCredentialsCopied] = useState(false);
++    const { data, setData, post, processing, errors } = useForm<ImportForm>({
++        employee_ids: [],
++        office_location_id: '',
++    });
++    const visibleEmployees = useMemo(() => {
++        const term = search.trim().toLocaleLowerCase('ms-MY');
++
++        if (!term) {
++            return employees;
++        }
++
++        return employees.filter((employee) =>
++            [
++                employee.name,
++                employee.employee_id ?? '',
++                employee.email ?? '',
++                statusDetails[employee.status].label,
++            ].some((value) => value.toLocaleLowerCase('ms-MY').includes(term)),
++        );
++    }, [employees, search]);
++    const visibleImportableIds = visibleEmployees
++        .filter((employee) => employee.can_import)
++        .map((employee) => employee.id);
++    const allVisibleSelected =
++        visibleImportableIds.length > 0 &&
++        visibleImportableIds.every((id) => data.employee_ids.includes(id));
++
++    const toggleEmployee = (employeeId: number, checked: boolean) => {
++        setData(
++            'employee_ids',
++            checked
++                ? [...new Set([...data.employee_ids, employeeId])]
++                : data.employee_ids.filter((id) => id !== employeeId),
++        );
++    };
++
++    const toggleVisible = (checked: boolean) => {
++        if (!checked) {
++            setData(
++                'employee_ids',
++                data.employee_ids.filter(
++                    (id) => !visibleImportableIds.includes(id),
++                ),
++            );
++
++            return;
++        }
++
++        setData('employee_ids', [
++            ...new Set([...data.employee_ids, ...visibleImportableIds]),
++        ]);
++    };
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++
++        if (
++            !window.confirm(
++                `Import ${data.employee_ids.length} pekerja sebagai pengguna sistem?`,
++            )
++        ) {
++            return;
++        }
++
++        post('/pengguna/import-pekerja', {
++            preserveScroll: true,
++        });
++    };
++
++    const copyCredentials = async () => {
++        if (!importResult?.credentials.length) {
++            return;
++        }
++
++        await navigator.clipboard.writeText(
++            credentialText(importResult.credentials),
++        );
++        setCredentialsCopied(true);
++        window.setTimeout(() => setCredentialsCopied(false), 2500);
++    };
++
++    const downloadCredentials = () => {
++        if (!importResult?.credentials.length) {
++            return;
++        }
++
++        const rows = [
++            ['ID Pekerja', 'Nama', 'E-mel', 'Kata Laluan Sementara'],
++            ...importResult.credentials.map((credential) => [
++                credential.employee_id ?? '',
++                credential.name,
++                credential.email,
++                credential.temporary_password,
++            ]),
++        ];
++        const csv = rows
++            .map((row) => row.map((value) => csvCell(value)).join(','))
++            .join('\r\n');
++        const blob = new Blob([`\uFEFF${csv}`], {
++            type: 'text/csv;charset=utf-8',
++        });
++        const url = URL.createObjectURL(blob);
++        const anchor = document.createElement('a');
++
++        anchor.href = url;
++        anchor.download = `akaun-pekerja-${new Date()
++            .toISOString()
++            .slice(0, 10)}.csv`;
++        document.body.appendChild(anchor);
++        anchor.click();
++        anchor.remove();
++        URL.revokeObjectURL(url);
++    };
++
++    return (
++        <>
++            <Head title="Import Pekerja" />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
++                    <div className="space-y-2">
++                        <HeadingSmall
++                            title="Import Pekerja sebagai Pengguna"
++                            description="Tarik pekerja aktif daripada db_spp dan daftarkan akaun Employee secara pukal."
++                        />
++                        <Badge
++                            variant="secondary"
++                            className="gap-1.5 font-normal"
++                        >
++                            <ShieldCheck className="size-3.5" />
++                            db_spp dibaca sahaja
++                        </Badge>
++                    </div>
++
++                    <Button asChild variant="outline">
++                        <Link href="/pengguna">
++                            <ArrowLeft />
++                            Kembali
++                        </Link>
++                    </Button>
++                </div>
++
++                {importResult && (
++                    <Card className="border-emerald-500/40">
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
++                                <CheckCircle2 className="size-5" />
++                                Import Selesai
++                            </CardTitle>
++                            <CardDescription>
++                                {importResult.created_count} akaun baharu
++                                dicipta dan {importResult.linked_count} akaun
++                                sedia ada dipautkan ke{' '}
++                                {importResult.office_name}.
++                            </CardDescription>
++                        </CardHeader>
++
++                        {importResult.credentials.length > 0 && (
++                            <CardContent className="space-y-4">
++                                <Alert>
++                                    <AlertTriangle className="size-4" />
++                                    <AlertTitle>
++                                        Simpan kata laluan sekarang
++                                    </AlertTitle>
++                                    <AlertDescription>
++                                        Kata laluan sementara ini hanya
++                                        dipaparkan pada keputusan import ini.
++                                        Jadual users hanya menyimpan kata laluan
++                                        yang telah di-hash.
++                                    </AlertDescription>
++                                </Alert>
++
++                                <div className="flex flex-wrap gap-2">
++                                    <Button
++                                        type="button"
++                                        variant="outline"
++                                        onClick={() => void copyCredentials()}
++                                    >
++                                        <ClipboardCopy />
++                                        {credentialsCopied
++                                            ? 'Sudah Disalin'
++                                            : 'Salin Akaun Baharu'}
++                                    </Button>
++                                    <Button
++                                        type="button"
++                                        variant="outline"
++                                        onClick={downloadCredentials}
++                                    >
++                                        <Download />
++                                        Muat Turun CSV
++                                    </Button>
++                                </div>
++
++                                <div className="overflow-x-auto rounded-lg border">
++                                    <Table>
++                                        <TableHeader className="bg-muted/60">
++                                            <TableRow>
++                                                <TableHead>Pekerja</TableHead>
++                                                <TableHead>E-mel</TableHead>
++                                                <TableHead>
++                                                    Kata Laluan Sementara
++                                                </TableHead>
++                                            </TableRow>
++                                        </TableHeader>
++                                        <TableBody>
++                                            {importResult.credentials.map(
++                                                (credential) => (
++                                                    <TableRow
++                                                        key={credential.email}
++                                                    >
++                                                        <TableCell>
++                                                            <p className="font-medium">
++                                                                {
++                                                                    credential.name
++                                                                }
++                                                            </p>
++                                                            <p className="text-xs text-muted-foreground">
++                                                                {credential.employee_id ||
++                                                                    'Tiada ID'}
++                                                            </p>
++                                                        </TableCell>
++                                                        <TableCell>
++                                                            {credential.email}
++                                                        </TableCell>
++                                                        <TableCell className="font-mono">
++                                                            {
++                                                                credential.temporary_password
++                                                            }
++                                                        </TableCell>
++                                                    </TableRow>
++                                                ),
++                                            )}
++                                        </TableBody>
++                                    </Table>
++                                </div>
++                            </CardContent>
++                        )}
++                    </Card>
++                )}
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                    <Card>
++                        <CardHeader className="gap-1">
++                            <CardDescription>Pekerja Aktif</CardDescription>
++                            <CardTitle className="text-3xl">
++                                {statistics.active_employees.toLocaleString(
++                                    'ms-MY',
++                                )}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card>
++                        <CardHeader className="gap-1">
++                            <CardDescription>Sudah Didaftarkan</CardDescription>
++                            <CardTitle className="text-3xl">
++                                {statistics.already_registered.toLocaleString(
++                                    'ms-MY',
++                                )}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card>
++                        <CardHeader className="gap-1">
++                            <CardDescription>Sedia Diimport</CardDescription>
++                            <CardTitle className="text-3xl text-emerald-600">
++                                {statistics.ready_to_import.toLocaleString(
++                                    'ms-MY',
++                                )}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                    <Card>
++                        <CardHeader className="gap-1">
++                            <CardDescription>Perlu Semakan</CardDescription>
++                            <CardTitle className="text-3xl text-amber-600">
++                                {statistics.requires_attention.toLocaleString(
++                                    'ms-MY',
++                                )}
++                            </CardTitle>
++                        </CardHeader>
++                    </Card>
++                </div>
++
++                <form onSubmit={submit} className="space-y-5">
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <DatabaseZap className="size-5 text-muted-foreground" />
++                                Tetapan Import
++                            </CardTitle>
++                            <CardDescription>
++                                Semua pekerja yang dipilih akan diberikan role
++                                Employee dan lokasi geofence yang sama.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-5 md:grid-cols-2">
++                            <div className="space-y-2">
++                                <Label>Lokasi Pejabat / Geofence</Label>
++                                <Select
++                                    value={data.office_location_id}
++                                    onValueChange={(value) =>
++                                        setData('office_location_id', value)
++                                    }
++                                    disabled={processing}
++                                >
++                                    <SelectTrigger>
++                                        <SelectValue placeholder="Pilih lokasi pejabat" />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        {offices.map((office) => (
++                                            <SelectItem
++                                                key={office.id}
++                                                value={String(office.id)}
++                                            >
++                                                {office.name} (
++                                                {office.radius_meters} m)
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                                <InputError
++                                    message={errors.office_location_id}
++                                />
++                                {offices.length === 0 && (
++                                    <p className="text-xs text-amber-700 dark:text-amber-300">
++                                        Tambah lokasi aktif dalam Tetapan
++                                        Kehadiran sebelum menjalankan import.
++                                    </p>
++                                )}
++                            </div>
++
++                            <div className="rounded-lg bg-muted p-4 text-sm">
++                                <p className="font-medium">
++                                    {data.employee_ids.length.toLocaleString(
++                                        'ms-MY',
++                                    )}{' '}
++                                    pekerja dipilih
++                                </p>
++                                <p className="mt-1 text-muted-foreground">
++                                    Akaun baharu menerima kata laluan rawak yang
++                                    dipaparkan sekali selepas import. Akaun
++                                    sedia ada mengekalkan semua role dan kata
++                                    laluannya.
++                                </p>
++                            </div>
++                        </CardContent>
++                    </Card>
++
++                    <Card className="gap-0 overflow-hidden">
++                        <CardHeader className="border-b">
++                            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                                <div>
++                                    <CardTitle>Senarai Pekerja</CardTitle>
++                                    <CardDescription className="mt-1">
++                                        Pekerja yang telah mempunyai pautan
++                                        aktif tidak dipaparkan.
++                                    </CardDescription>
++                                </div>
++                                <div className="flex w-full flex-col gap-2 lg:max-w-lg">
++                                    <div className="flex flex-wrap justify-end gap-2">
++                                        <Button
++                                            type="button"
++                                            size="sm"
++                                            variant="outline"
++                                            onClick={() => toggleVisible(true)}
++                                            disabled={
++                                                processing ||
++                                                visibleImportableIds.length ===
++                                                    0
++                                            }
++                                        >
++                                            Pilih Semua Yang Layak
++                                        </Button>
++                                        <Button
++                                            type="button"
++                                            size="sm"
++                                            variant="outline"
++                                            onClick={() =>
++                                                setData('employee_ids', [])
++                                            }
++                                            disabled={
++                                                processing ||
++                                                data.employee_ids.length === 0
++                                            }
++                                        >
++                                            Kosongkan Pilihan
++                                        </Button>
++                                    </div>
++                                    <div className="relative">
++                                        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                        <Input
++                                            value={search}
++                                            onChange={(event) =>
++                                                setSearch(event.target.value)
++                                            }
++                                            placeholder="Cari nama, ID atau e-mel..."
++                                            className="pl-9"
++                                        />
++                                    </div>
++                                </div>
++                            </div>
++                        </CardHeader>
++
++                        <div className="hidden overflow-x-auto md:block">
++                            <Table>
++                                <TableHeader className="bg-muted/60">
++                                    <TableRow>
++                                        <TableHead className="w-12">
++                                            <Checkbox
++                                                checked={allVisibleSelected}
++                                                onCheckedChange={(value) =>
++                                                    toggleVisible(
++                                                        value === true,
++                                                    )
++                                                }
++                                                disabled={
++                                                    processing ||
++                                                    visibleImportableIds.length ===
++                                                        0
++                                                }
++                                                aria-label="Pilih semua pekerja yang layak"
++                                            />
++                                        </TableHead>
++                                        <TableHead>Pekerja</TableHead>
++                                        <TableHead>E-mel Login</TableHead>
++                                        <TableHead>Status Import</TableHead>
++                                        <TableHead>Akaun Sedia Ada</TableHead>
++                                    </TableRow>
++                                </TableHeader>
++                                <TableBody>
++                                    {visibleEmployees.length > 0 ? (
++                                        visibleEmployees.map((employee) => {
++                                            const status =
++                                                statusDetails[employee.status];
++
++                                            return (
++                                                <TableRow key={employee.id}>
++                                                    <TableCell>
++                                                        <Checkbox
++                                                            checked={data.employee_ids.includes(
++                                                                employee.id,
++                                                            )}
++                                                            onCheckedChange={(
++                                                                value,
++                                                            ) =>
++                                                                toggleEmployee(
++                                                                    employee.id,
++                                                                    value ===
++                                                                        true,
++                                                                )
++                                                            }
++                                                            disabled={
++                                                                processing ||
++                                                                !employee.can_import
++                                                            }
++                                                            aria-label={`Pilih ${employee.name}`}
++                                                        />
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        <p className="font-medium">
++                                                            {employee.name}
++                                                        </p>
++                                                        <p className="text-xs text-muted-foreground">
++                                                            {employee.employee_id ||
++                                                                `#${employee.id}`}
++                                                        </p>
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        {employee.email || (
++                                                            <span className="text-muted-foreground">
++                                                                Tiada e-mel
++                                                            </span>
++                                                        )}
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        <Badge
++                                                            variant="outline"
++                                                            className={
++                                                                status.className
++                                                            }
++                                                        >
++                                                            {status.label}
++                                                        </Badge>
++                                                        <p className="mt-1 max-w-sm text-xs text-muted-foreground">
++                                                            {status.description}
++                                                        </p>
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        {employee.existing_user ? (
++                                                            <div>
++                                                                <p className="font-medium">
++                                                                    {
++                                                                        employee
++                                                                            .existing_user
++                                                                            .name
++                                                                    }
++                                                                </p>
++                                                                <div className="mt-1 flex flex-wrap gap-1">
++                                                                    {employee.existing_user.roles.map(
++                                                                        (
++                                                                            role,
++                                                                        ) => (
++                                                                            <Badge
++                                                                                key={
++                                                                                    role
++                                                                                }
++                                                                                variant="secondary"
++                                                                                className="font-normal"
++                                                                            >
++                                                                                {
++                                                                                    roleLabels[
++                                                                                        role
++                                                                                    ]
++                                                                                }
++                                                                            </Badge>
++                                                                        ),
++                                                                    )}
++                                                                </div>
++                                                            </div>
++                                                        ) : (
++                                                            <span className="text-sm text-muted-foreground">
++                                                                —
++                                                            </span>
++                                                        )}
++                                                    </TableCell>
++                                                </TableRow>
++                                            );
++                                        })
++                                    ) : (
++                                        <TableRow>
++                                            <TableCell
++                                                colSpan={5}
++                                                className="h-28 text-center text-muted-foreground"
++                                            >
++                                                Tiada pekerja ditemui.
++                                            </TableCell>
++                                        </TableRow>
++                                    )}
++                                </TableBody>
++                            </Table>
++                        </div>
++
++                        <CardContent className="space-y-3 py-4 md:hidden">
++                            {visibleEmployees.length > 0 ? (
++                                visibleEmployees.map((employee) => {
++                                    const status =
++                                        statusDetails[employee.status];
++
++                                    return (
++                                        <label
++                                            key={employee.id}
++                                            className={`flex items-start gap-3 rounded-lg border p-4 ${
++                                                employee.can_import
++                                                    ? 'cursor-pointer'
++                                                    : 'opacity-70'
++                                            }`}
++                                        >
++                                            <Checkbox
++                                                checked={data.employee_ids.includes(
++                                                    employee.id,
++                                                )}
++                                                onCheckedChange={(value) =>
++                                                    toggleEmployee(
++                                                        employee.id,
++                                                        value === true,
++                                                    )
++                                                }
++                                                disabled={
++                                                    processing ||
++                                                    !employee.can_import
++                                                }
++                                                aria-label={`Pilih ${employee.name}`}
++                                            />
++                                            <span className="min-w-0 space-y-2">
++                                                <span>
++                                                    <span className="block font-medium">
++                                                        {employee.name}
++                                                    </span>
++                                                    <span className="block text-xs text-muted-foreground">
++                                                        {employee.employee_id ||
++                                                            `#${employee.id}`}
++                                                        {employee.email
++                                                            ? ` · ${employee.email}`
++                                                            : ' · Tiada e-mel'}
++                                                    </span>
++                                                </span>
++                                                <Badge
++                                                    variant="outline"
++                                                    className={status.className}
++                                                >
++                                                    {status.label}
++                                                </Badge>
++                                                <span className="block text-xs text-muted-foreground">
++                                                    {status.description}
++                                                </span>
++                                            </span>
++                                        </label>
++                                    );
++                                })
++                            ) : (
++                                <p className="py-8 text-center text-sm text-muted-foreground">
++                                    Tiada pekerja ditemui.
++                                </p>
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <InputError message={errors.employee_ids} />
++
++                    <div className="flex flex-col-reverse gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between">
++                        <p className="text-sm text-muted-foreground">
++                            Maksimum 200 pekerja bagi setiap proses import.
++                        </p>
++                        <Button
++                            type="submit"
++                            disabled={
++                                processing ||
++                                data.employee_ids.length === 0 ||
++                                !data.office_location_id ||
++                                offices.length === 0
++                            }
++                        >
++                            <UserPlus />
++                            {processing
++                                ? 'Mengimport...'
++                                : `Import ${data.employee_ids.length} Pekerja`}
++                        </Button>
++                    </div>
++                </form>
++            </div>
++        </>
++    );
++}
++
++ImportEmployees.layout = {
++    breadcrumbs: [
++        { title: 'Roles & Permissions', href: '/pengguna' },
++        { title: 'Import Pekerja', href: '/pengguna/import-pekerja' },
++    ],
++};
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index 4bc76f83af0278eb1b643b237693cf373fbea6f0..cfc65ea4e5470afc8ce4ed90a8d6690985776f76 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -1,5 +1,6 @@
+ import { Head, Link, router } from '@inertiajs/react';
+ import {
++    DatabaseZap,
+     KeyRound,
+     Pencil,
+     Plus,
+@@ -211,7 +212,13 @@ export default function UserManagement({
+                     </div>
+ 
+                     <div className="flex w-full flex-col gap-3 lg:max-w-xl">
+-                        <div className="flex justify-end">
++                        <div className="flex flex-wrap justify-end gap-2">
++                            <Button asChild variant="outline">
++                                <Link href="/pengguna/import-pekerja">
++                                    <DatabaseZap />
++                                    Import Pekerja
++                                </Link>
++                            </Button>
+                             <Button asChild>
+                                 <Link href="/pengguna/create">
+                                     <Plus />
+diff --git a/routes/web.php b/routes/web.php
+index c0b54a25c973daf39262aceec4c9d9ecd125138b..f1e24dd133369d5b7767baa4a4e1ef4ed80fac5e 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -3,6 +3,7 @@
+ use App\Http\Controllers\AuditTrailController;
+ use App\Http\Controllers\AttendanceSettingsController;
+ use App\Http\Controllers\DashboardController;
++use App\Http\Controllers\EmployeeUserImportController;
+ use App\Http\Controllers\GeoAttendanceController;
+ use App\Http\Controllers\MaklumatCutiController;
+ use App\Http\Controllers\MaklumatJawatanController;
+@@ -111,6 +112,10 @@
+             ->name('users.create');
+         Route::post('pengguna', [UserManagementController::class, 'store'])
+             ->name('users.store');
++        Route::get('pengguna/import-pekerja', [EmployeeUserImportController::class, 'create'])
++            ->name('users.import.create');
++        Route::post('pengguna/import-pekerja', [EmployeeUserImportController::class, 'store'])
++            ->name('users.import.store');
+         Route::get('pengguna/{user}/edit', [UserManagementController::class, 'edit'])
+             ->whereNumber('user')
+             ->name('users.edit');
+diff --git a/tests/Feature/EmployeeUserImportTest.php b/tests/Feature/EmployeeUserImportTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa83d2f5dfd9873d4ebc043325ec3581d7a3d0db
+--- /dev/null
++++ b/tests/Feature/EmployeeUserImportTest.php
+@@ -0,0 +1,309 @@
++<?php
++
++use App\Enums\UserRole;
++use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
++use App\Models\User;
++use Illuminate\Database\Events\QueryExecuted;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Hash;
++use Illuminate\Support\Facades\Schema;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('employeeID', 15)->nullable();
++        $table->string('nama')->nullable();
++        $table->string('email')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++});
++
++afterEach(function () {
++    DB::disconnect('ibco');
++});
++
++function createImportEmployee(array $overrides = []): int
++{
++    static $sequence = 0;
++    $sequence++;
++
++    return DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => sprintf('EMP-IMPORT-%03d', $sequence),
++        'nama' => "Pekerja Import {$sequence}",
++        'email' => "import{$sequence}@ibco.test",
++        'rcd_enable' => 1,
++        ...$overrides,
++    ]);
++}
++
++function createImportOffice(): OfficeLocation
++{
++    return OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.1390000,
++        'longitude' => 101.6869000,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++}
++
++test('super admin can preview importable employees and data issues', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    createImportOffice();
++    createImportEmployee([
++        'nama' => 'Alpha Valid',
++        'email' => 'alpha@ibco.test',
++    ]);
++    createImportEmployee([
++        'nama' => 'Beta Tiada E-mel',
++        'email' => null,
++    ]);
++    createImportEmployee([
++        'nama' => 'Charlie Pendua',
++        'email' => 'duplicate@ibco.test',
++    ]);
++    createImportEmployee([
++        'nama' => 'Delta Pendua',
++        'email' => 'DUPLICATE@ibco.test',
++    ]);
++    $existingEmployeeId = createImportEmployee([
++        'nama' => 'Echo Akaun Sedia Ada',
++        'email' => 'existing@ibco.test',
++    ]);
++    User::factory()->hrAdmin()->create([
++        'email' => 'existing@ibco.test',
++    ]);
++    $linkedEmployeeId = createImportEmployee([
++        'nama' => 'Foxtrot Sudah Daftar',
++        'email' => 'linked@ibco.test',
++    ]);
++    $linkedUser = User::factory()->employee()->create([
++        'email' => 'linked@ibco.test',
++    ]);
++    EmployeeUserLink::query()->create([
++        'user_id' => $linkedUser->getKey(),
++        'employee_id' => $linkedEmployeeId,
++        'office_location_id' => OfficeLocation::query()->value('id'),
++        'is_active' => true,
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->get(route('users.import.create'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('users/import-employees')
++            ->has('employees', 5)
++            ->where('employees.0.status', 'new_account')
++            ->where('employees.0.can_import', true)
++            ->where('employees.1.status', 'invalid_email')
++            ->where('employees.1.can_import', false)
++            ->where('employees.2.status', 'duplicate_email')
++            ->where('employees.3.status', 'duplicate_email')
++            ->where('employees.4.id', $existingEmployeeId)
++            ->where('employees.4.status', 'existing_account')
++            ->where('employees.4.existing_user.roles.0', UserRole::HrAdmin->value)
++            ->where('statistics.active_employees', 6)
++            ->where('statistics.already_registered', 1)
++            ->where('statistics.ready_to_import', 2)
++            ->where('statistics.requires_attention', 3));
++});
++
++test('bulk import creates employee users and only reads db_spp', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $office = createImportOffice();
++    $firstEmployeeId = createImportEmployee([
++        'nama' => 'Import Pertama',
++        'email' => 'first.import@ibco.test',
++    ]);
++    $secondEmployeeId = createImportEmployee([
++        'nama' => 'Import Kedua',
++        'email' => 'second.import@ibco.test',
++    ]);
++    $legacyQueries = [];
++
++    DB::listen(function (QueryExecuted $event) use (&$legacyQueries) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(trim($event->sql));
++        }
++    });
++
++    $response = $this->actingAs($superAdmin)
++        ->post(route('users.import.store'), [
++            'employee_ids' => [$firstEmployeeId, $secondEmployeeId],
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionDoesntHaveErrors();
++    $result = session('employee_user_import_result');
++
++    expect($result['created_count'])->toBe(2);
++    expect($result['linked_count'])->toBe(0);
++    expect($result['credentials'])->toHaveCount(2);
++    expect($legacyQueries)->not->toBeEmpty();
++    expect($legacyQueries)->each->toStartWith('select');
++
++    foreach ($result['credentials'] as $credential) {
++        $user = User::query()
++            ->where('email', $credential['email'])
++            ->sole();
++
++        expect($user->hasOnlyRole(UserRole::Employee))->toBeTrue();
++        expect($user->email_verified_at)->not->toBeNull();
++        expect(Hash::check(
++            $credential['temporary_password'],
++            $user->password,
++        ))->toBeTrue();
++    }
++
++    $this->assertDatabaseHas('employee_user_links', [
++        'employee_id' => $firstEmployeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => 1,
++    ]);
++    $this->assertDatabaseHas('employee_user_links', [
++        'employee_id' => $secondEmployeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => 1,
++    ]);
++    $this->assertDatabaseCount('users', 3);
++    $this->assertDatabaseCount('employee_user_links', 2);
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'user.created',
++        'auditable_type' => 'users',
++    ]);
++});
++
++test('import adds employee role to an existing account without changing its password', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $existingUser = User::factory()->hrAdmin()->create([
++        'name' => 'Pentadbir Sedia Ada',
++        'email' => 'admin.employee@ibco.test',
++        'password' => 'ExistingPassword123!',
++    ]);
++    $passwordHash = $existingUser->password;
++    $office = createImportOffice();
++    $employeeId = createImportEmployee([
++        'nama' => 'Pentadbir Sedia Ada',
++        'email' => 'ADMIN.EMPLOYEE@ibco.test',
++    ]);
++
++    $response = $this->actingAs($superAdmin)
++        ->post(route('users.import.store'), [
++            'employee_ids' => [$employeeId],
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionDoesntHaveErrors();
++    $result = session('employee_user_import_result');
++
++    $existingUser->refresh();
++
++    expect($result['created_count'])->toBe(0);
++    expect($result['linked_count'])->toBe(1);
++    expect($result['credentials'])->toBe([]);
++    expect($existingUser->password)->toBe($passwordHash);
++    expect($existingUser->hasRole(UserRole::HrAdmin))->toBeTrue();
++    expect($existingUser->hasRole(UserRole::Employee))->toBeTrue();
++    $this->assertDatabaseHas('employee_user_links', [
++        'user_id' => $existingUser->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => 1,
++    ]);
++});
++
++test('invalid or duplicate employee email cannot be imported', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $office = createImportOffice();
++    $invalidEmployeeId = createImportEmployee([
++        'email' => 'bukan-email',
++    ]);
++    $duplicateEmployeeId = createImportEmployee([
++        'email' => 'duplicate.import@ibco.test',
++    ]);
++    createImportEmployee([
++        'email' => 'DUPLICATE.IMPORT@ibco.test',
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.import.create'))
++        ->post(route('users.import.store'), [
++            'employee_ids' => [$invalidEmployeeId],
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionHasErrors('employee_ids');
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.import.create'))
++        ->post(route('users.import.store'), [
++            'employee_ids' => [$duplicateEmployeeId],
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionHasErrors('employee_ids');
++
++    $this->assertDatabaseCount('users', 1);
++    $this->assertDatabaseCount('employee_user_links', 0);
++});
++
++test('reimporting a linked employee does not create a duplicate account', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $office = createImportOffice();
++    $employeeId = createImportEmployee();
++    $payload = [
++        'employee_ids' => [$employeeId],
++        'office_location_id' => $office->getKey(),
++    ];
++
++    $this->actingAs($superAdmin)
++        ->post(route('users.import.store'), $payload)
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionDoesntHaveErrors();
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.import.create'))
++        ->post(route('users.import.store'), $payload)
++        ->assertRedirect(route('users.import.create'))
++        ->assertSessionHasErrors('employee_ids');
++
++    $this->assertDatabaseCount('users', 2);
++    $this->assertDatabaseCount('employee_user_links', 1);
++});
++
++test('non super admin cannot preview or run employee import', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeId = createImportEmployee();
++    $office = createImportOffice();
++
++    $this->actingAs($hrAdmin)
++        ->get(route('users.import.create'))
++        ->assertForbidden();
++
++    $this->actingAs($hrAdmin)
++        ->post(route('users.import.store'), [
++            'employee_ids' => [$employeeId],
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertForbidden();
++
++    $this->assertDatabaseCount('users', 1);
++    $this->assertDatabaseCount('employee_user_links', 0);
++});

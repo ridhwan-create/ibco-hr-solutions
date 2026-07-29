@@ -1,0 +1,1430 @@
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index f0413d4..e311d81 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -84,4 +84,14 @@ public function description(): string
+             self::Employee => 'Rakam masuk/keluar dan lihat sejarah kehadiran sendiri.',
+         };
+     }
++
++    public function priority(): int
++    {
++        return match ($this) {
++            self::SuperAdmin => 400,
++            self::HrAdmin => 300,
++            self::Viewer => 200,
++            self::Employee => 100,
++        };
++    }
+ }
+diff --git a/app/Http/Controllers/AttendanceSettingsController.php b/app/Http/Controllers/AttendanceSettingsController.php
+index 88a1e04..40ae964 100644
+--- a/app/Http/Controllers/AttendanceSettingsController.php
++++ b/app/Http/Controllers/AttendanceSettingsController.php
+@@ -21,7 +21,11 @@ class AttendanceSettingsController extends Controller
+     public function index(): Response
+     {
+         $links = EmployeeUserLink::query()
+-            ->with(['user:id,name,email,role', 'officeLocation:id,name'])
++            ->with([
++                'user:id,name,email,role',
++                'user.roleAssignments',
++                'officeLocation:id,name',
++            ])
+             ->latest()
+             ->get();
+         $employeeIds = $links->pluck('employee_id')->unique()->values();
+@@ -64,6 +68,7 @@ public function index(): Response
+                             'name' => $link->user->name,
+                             'email' => $link->user->email,
+                             'role' => $link->user->resolvedRole()->value,
++                            'roles' => $link->user->roleValues(),
+                         ]
+                         : null,
+                     'employee' => $employee
+@@ -83,7 +88,13 @@ public function index(): Response
+                 ];
+             }),
+             'userOptions' => User::query()
+-                ->where('role', UserRole::Employee->value)
++                ->whereHas(
++                    'roleAssignments',
++                    fn ($query) => $query->where(
++                        'role',
++                        UserRole::Employee->value,
++                    ),
++                )
+                 ->orderBy('name')
+                 ->get(['id', 'name', 'email'])
+                 ->map(fn (User $user) => [
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 1136898..13ab8a8 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -12,7 +12,7 @@ class DashboardController extends Controller
+ {
+     public function index(Request $request)
+     {
+-        if ($request->user()->resolvedRole() === UserRole::Employee) {
++        if ($request->user()->hasOnlyRole(UserRole::Employee)) {
+             return redirect()->route('kehadiran.clock');
+         }
+ 
+diff --git a/app/Http/Controllers/Settings/ProfileController.php b/app/Http/Controllers/Settings/ProfileController.php
+index 6bdd4f8..9a24b94 100644
+--- a/app/Http/Controllers/Settings/ProfileController.php
++++ b/app/Http/Controllers/Settings/ProfileController.php
+@@ -7,6 +7,7 @@
+ use App\Http\Requests\Settings\ProfileDeleteRequest;
+ use App\Http\Requests\Settings\ProfileUpdateRequest;
+ use App\Models\User;
++use App\Models\UserRoleAssignment;
+ use Illuminate\Contracts\Auth\MustVerifyEmail;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+@@ -54,8 +55,10 @@ public function destroy(ProfileDeleteRequest $request): RedirectResponse
+         $user = $request->user();
+ 
+         if (
+-            $user->resolvedRole() === UserRole::SuperAdmin
+-            && User::query()->where('role', UserRole::SuperAdmin->value)->count() <= 1
++            $user->hasRole(UserRole::SuperAdmin)
++            && UserRoleAssignment::query()
++                ->where('role', UserRole::SuperAdmin->value)
++                ->count() <= 1
+         ) {
+             throw ValidationException::withMessages([
+                 'password' => 'Akaun ini ialah satu-satunya Super Admin dan tidak boleh dipadam.',
+diff --git a/app/Http/Controllers/UserManagementController.php b/app/Http/Controllers/UserManagementController.php
+index 64027b6..3a8b397 100644
+--- a/app/Http/Controllers/UserManagementController.php
++++ b/app/Http/Controllers/UserManagementController.php
+@@ -9,6 +9,7 @@
+ use App\Models\EmployeeUserLink;
+ use App\Models\OfficeLocation;
+ use App\Models\User;
++use App\Models\UserRoleAssignment;
+ use App\Support\AuditLogger;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+@@ -25,6 +26,7 @@ public function index(Request $request): Response
+ 
+         $users = User::query()
+             ->with([
++                'roleAssignments',
+                 'employeeLink' => fn ($query) => $query
+                     ->where('is_active', true)
+                     ->with('officeLocation:id,name'),
+@@ -62,7 +64,10 @@ public function index(Request $request): Response
+                 'name' => $user->name,
+                 'email' => $user->email,
+                 'role' => $user->resolvedRole()->value,
+-                'role_label' => $user->resolvedRole()->label(),
++                'roles' => $user->roleValues(),
++                'role_labels' => collect($user->resolvedRoles())
++                    ->map(fn (UserRole $role) => $role->label())
++                    ->all(),
+                 'email_verified_at' => $user->email_verified_at,
+                 'created_at' => $user->created_at,
+                 'is_current_user' => $user->is($request->user()),
+@@ -79,7 +84,9 @@ public function index(Request $request): Response
+ 
+         $roleCounts = collect(UserRole::cases())
+             ->mapWithKeys(fn (UserRole $role) => [
+-                $role->value => User::query()->where('role', $role->value)->count(),
++                $role->value => UserRoleAssignment::query()
++                    ->where('role', $role->value)
++                    ->count(),
+             ]);
+ 
+         return Inertia::render('users/index', [
+@@ -94,29 +101,27 @@ public function index(Request $request): Response
+ 
+     public function create(Request $request): Response
+     {
+-        $defaultRole = UserRole::tryFrom(
+-            $request->string('role')->toString(),
+-        ) ?? UserRole::Viewer;
+-
+         return Inertia::render('users/create', [
+             'options' => $this->formOptions(),
+-            'defaultRole' => $defaultRole->value,
++            'defaultRoles' => [],
+         ]);
+     }
+ 
+     public function store(StoreSystemUserRequest $request): RedirectResponse
+     {
+         $validated = $request->validated();
++        $roles = $this->rolesFromValidated($validated);
+         $this->validateEmployeeAssignment($validated);
+ 
+-        $user = DB::transaction(function () use ($request, $validated) {
++        $user = DB::transaction(function () use ($request, $validated, $roles) {
+             $user = User::query()->create([
+                 'name' => $validated['name'],
+                 'email' => $validated['email'],
+                 'password' => $validated['password'],
+-                'role' => $validated['role'],
++                'role' => $this->primaryRole($roles),
+             ]);
+             $user->forceFill(['email_verified_at' => now()])->save();
++            $user->syncRoles($roles);
+ 
+             $this->syncEmployeeLink($request, $user, $validated);
+ 
+@@ -152,6 +157,7 @@ public function edit(Request $request, User $user): Response
+                 'name' => $user->name,
+                 'email' => $user->email,
+                 'role' => $user->resolvedRole()->value,
++                'roles' => $user->roleValues(),
+                 'is_current_user' => $user->is($request->user()),
+                 'employee_id' => $link?->employee_id,
+                 'office_location_id' => $link?->office_location_id,
+@@ -165,17 +171,16 @@ public function update(
+         User $user,
+     ): RedirectResponse {
+         $validated = $request->validated();
+-        $role = UserRole::from($validated['role']);
++        $roles = $this->rolesFromValidated($validated);
+ 
+-        $this->guardRoleChange($request, $user, $role);
++        $this->guardRoleChange($request, $user, $roles);
+         $this->validateEmployeeAssignment($validated, $user);
+ 
+-        DB::transaction(function () use ($request, $user, $validated) {
++        DB::transaction(function () use ($request, $user, $validated, $roles) {
+             $before = $this->userAuditValues($user);
+             $attributes = [
+                 'name' => $validated['name'],
+                 'email' => $validated['email'],
+-                'role' => $validated['role'],
+             ];
+ 
+             if (! empty($validated['password'])) {
+@@ -189,6 +194,7 @@ public function update(
+             }
+ 
+             $user->save();
++            $user->syncRoles($roles);
+             $this->syncEmployeeLink($request, $user, $validated);
+ 
+             AuditLogger::record(
+@@ -211,28 +217,33 @@ public function update(
+ 
+     public function updateRole(UpdateUserRoleRequest $request, User $user): RedirectResponse
+     {
+-        $role = UserRole::from($request->validated('role'));
++        $validated = $request->validated();
++        $roles = $this->rolesFromValidated($validated);
+ 
+-        $this->guardRoleChange($request, $user, $role);
++        $this->guardRoleChange($request, $user, $roles);
+ 
+         if (
+-            $role === UserRole::Employee
++            in_array(UserRole::Employee, $roles, true)
+             && ! EmployeeUserLink::query()
+                 ->where('user_id', $user->getKey())
+                 ->where('is_active', true)
+                 ->exists()
+         ) {
+             throw ValidationException::withMessages([
+-                'role' => 'Gunakan butang Edit untuk memilih pekerja dan lokasi sebelum menetapkan role Employee.',
++                'roles' => 'Gunakan butang Edit untuk memilih pekerja dan lokasi sebelum menambah role Employee.',
+             ]);
+         }
+ 
+-        DB::transaction(function () use ($request, $user, $role) {
++        DB::transaction(function () use ($request, $user, $roles) {
+             $before = $this->userAuditValues($user);
+-            $user->update(['role' => $role]);
+-
+-            if ($role !== UserRole::Employee) {
+-                $this->syncEmployeeLink($request, $user, ['role' => $role->value]);
++            $user->syncRoles($roles);
++
++            if (! in_array(UserRole::Employee, $roles, true)) {
++                $this->syncEmployeeLink($request, $user, [
++                    'roles' => collect($roles)
++                        ->map(fn (UserRole $role) => $role->value)
++                        ->all(),
++                ]);
+             }
+ 
+             AuditLogger::record(
+@@ -247,7 +258,7 @@ public function updateRole(UpdateUserRoleRequest $request, User $user): Redirect
+ 
+         Inertia::flash('toast', [
+             'type' => 'success',
+-            'message' => "Role {$user->name} berjaya dikemas kini kepada {$role->label()}.",
++            'message' => "Role {$user->name} berjaya dikemas kini.",
+         ]);
+ 
+         return back();
+@@ -256,21 +267,29 @@ public function updateRole(UpdateUserRoleRequest $request, User $user): Redirect
+     private function guardRoleChange(
+         Request $request,
+         User $user,
+-        UserRole $role,
++        array $roles,
+     ): void {
+-        if ($user->is($request->user()) && $role !== $user->resolvedRole()) {
++        $keepsSuperAdmin = in_array(UserRole::SuperAdmin, $roles, true);
++
++        if (
++            $user->is($request->user())
++            && $user->hasRole(UserRole::SuperAdmin)
++            && ! $keepsSuperAdmin
++        ) {
+             throw ValidationException::withMessages([
+-                'role' => 'Role akaun anda sendiri tidak boleh diubah.',
++                'roles' => 'Role Super Admin tidak boleh dibuang daripada akaun anda sendiri.',
+             ]);
+         }
+ 
+         if (
+-            $user->resolvedRole() === UserRole::SuperAdmin
+-            && $role !== UserRole::SuperAdmin
+-            && User::query()->where('role', UserRole::SuperAdmin->value)->count() <= 1
++            $user->hasRole(UserRole::SuperAdmin)
++            && ! $keepsSuperAdmin
++            && UserRoleAssignment::query()
++                ->where('role', UserRole::SuperAdmin->value)
++                ->count() <= 1
+         ) {
+             throw ValidationException::withMessages([
+-                'role' => 'Sekurang-kurangnya satu akaun Super Admin mesti dikekalkan.',
++                'roles' => 'Sekurang-kurangnya satu akaun Super Admin mesti dikekalkan.',
+             ]);
+         }
+     }
+@@ -282,9 +301,11 @@ private function validateEmployeeAssignment(
+         array $validated,
+         ?User $user = null,
+     ): void {
+-        if (
+-            UserRole::from($validated['role']) !== UserRole::Employee
+-        ) {
++        if (! in_array(
++            UserRole::Employee,
++            $this->rolesFromValidated($validated),
++            true,
++        )) {
+             return;
+         }
+ 
+@@ -324,7 +345,11 @@ private function syncEmployeeLink(
+         User $user,
+         array $validated,
+     ): void {
+-        if (UserRole::from($validated['role']) !== UserRole::Employee) {
++        if (! in_array(
++            UserRole::Employee,
++            $this->rolesFromValidated($validated),
++            true,
++        )) {
+             $link = EmployeeUserLink::query()
+                 ->where('user_id', $user->getKey())
+                 ->where('is_active', true)
+@@ -452,11 +477,35 @@ private function userAuditValues(User $user): array
+         return [
+             'name' => $user->name,
+             'email' => $user->email,
+-            'role' => $user->resolvedRole()->value,
++            'primary_role' => $user->resolvedRole()->value,
++            'roles' => $user->roleValues(),
+             'email_verified_at' => $user->email_verified_at?->toIso8601String(),
+         ];
+     }
+ 
++    /**
++     * @param  array<string, mixed>  $validated
++     * @return array<int, UserRole>
++     */
++    private function rolesFromValidated(array $validated): array
++    {
++        return collect($validated['roles'] ?? [])
++            ->map(fn ($role) => UserRole::from((string) $role))
++            ->unique(fn (UserRole $role) => $role->value)
++            ->values()
++            ->all();
++    }
++
++    /**
++     * @param  array<int, UserRole>  $roles
++     */
++    private function primaryRole(array $roles): UserRole
++    {
++        return collect($roles)
++            ->sortByDesc(fn (UserRole $role) => $role->priority())
++            ->first() ?? UserRole::Viewer;
++    }
++
+     /**
+      * @return array<string, mixed>
+      */
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index 716daaf..a0d5a8e 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -35,12 +35,20 @@ public function version(Request $request): ?string
+      */
+     public function share(Request $request): array
+     {
++        $user = $request->user();
++
+         return [
+             ...parent::share($request),
+             'name' => config('app.name'),
+             'auth' => [
+-                'user' => $request->user(),
+-                'permissions' => $request->user()?->permissions() ?? [],
++                'user' => $user
++                    ? [
++                        ...$user->toArray(),
++                        'role' => $user->resolvedRole()->value,
++                        'roles' => $user->roleValues(),
++                    ]
++                    : null,
++                'permissions' => $user?->permissions() ?? [],
+             ],
+             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
+         ];
+diff --git a/app/Http/Requests/SaveEmployeeUserLinkRequest.php b/app/Http/Requests/SaveEmployeeUserLinkRequest.php
+index 5cea1ad..ac3b7ba 100644
+--- a/app/Http/Requests/SaveEmployeeUserLinkRequest.php
++++ b/app/Http/Requests/SaveEmployeeUserLinkRequest.php
+@@ -22,7 +22,8 @@ public function rules(): array
+             'user_id' => [
+                 'required',
+                 'integer',
+-                Rule::exists('users', 'id')->where('role', UserRole::Employee->value),
++                Rule::exists('user_roles', 'user_id')
++                    ->where('role', UserRole::Employee->value),
+             ],
+             'employee_id' => ['required', 'integer', 'min:1'],
+             'office_location_id' => [
+diff --git a/app/Http/Requests/StoreSystemUserRequest.php b/app/Http/Requests/StoreSystemUserRequest.php
+index d757203..827bf79 100644
+--- a/app/Http/Requests/StoreSystemUserRequest.php
++++ b/app/Http/Requests/StoreSystemUserRequest.php
+@@ -22,12 +22,16 @@ public function authorize(): bool
+      */
+     public function rules(): array
+     {
+-        $isEmployee = UserRole::tryFrom((string) $this->input('role'))
+-            === UserRole::Employee;
++        $isEmployee = in_array(
++            UserRole::Employee->value,
++            (array) $this->input('roles', []),
++            true,
++        );
+ 
+         return [
+             ...$this->profileRules(),
+-            'role' => ['required', Rule::enum(UserRole::class)],
++            'roles' => ['required', 'array', 'min:1'],
++            'roles.*' => ['required', 'distinct', Rule::enum(UserRole::class)],
+             'employee_id' => [
+                 Rule::requiredIf($isEmployee),
+                 'nullable',
+@@ -54,8 +58,11 @@ public function messages(): array
+             'email.required' => 'Alamat e-mel wajib diisi.',
+             'email.email' => 'Sila masukkan alamat e-mel yang sah.',
+             'email.unique' => 'Alamat e-mel ini sudah digunakan.',
+-            'role.required' => 'Sila pilih role pengguna.',
+-            'role.enum' => 'Role yang dipilih tidak sah.',
++            'roles.required' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.array' => 'Senarai role pengguna tidak sah.',
++            'roles.min' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.*.enum' => 'Role yang dipilih tidak sah.',
++            'roles.*.distinct' => 'Role yang sama tidak boleh dipilih dua kali.',
+             'employee_id.required' => 'Sila pilih pekerja untuk akaun Employee.',
+             'office_location_id.required' => 'Sila pilih lokasi pejabat untuk akaun Employee.',
+             'office_location_id.exists' => 'Lokasi pejabat yang dipilih mesti aktif.',
+diff --git a/app/Http/Requests/UpdateSystemUserRequest.php b/app/Http/Requests/UpdateSystemUserRequest.php
+index 5a248a5..901af98 100644
+--- a/app/Http/Requests/UpdateSystemUserRequest.php
++++ b/app/Http/Requests/UpdateSystemUserRequest.php
+@@ -22,8 +22,11 @@ public function rules(): array
+     {
+         /** @var User $managedUser */
+         $managedUser = $this->route('user');
+-        $isEmployee = UserRole::tryFrom((string) $this->input('role'))
+-            === UserRole::Employee;
++        $isEmployee = in_array(
++            UserRole::Employee->value,
++            (array) $this->input('roles', []),
++            true,
++        );
+ 
+         return [
+             'name' => ['required', 'string', 'max:255'],
+@@ -34,7 +37,8 @@ public function rules(): array
+                 'max:255',
+                 Rule::unique(User::class)->ignore($managedUser->getKey()),
+             ],
+-            'role' => ['required', Rule::enum(UserRole::class)],
++            'roles' => ['required', 'array', 'min:1'],
++            'roles.*' => ['required', 'distinct', Rule::enum(UserRole::class)],
+             'employee_id' => [
+                 Rule::requiredIf($isEmployee),
+                 'nullable',
+@@ -66,8 +70,11 @@ public function messages(): array
+             'email.required' => 'Alamat e-mel wajib diisi.',
+             'email.email' => 'Sila masukkan alamat e-mel yang sah.',
+             'email.unique' => 'Alamat e-mel ini sudah digunakan.',
+-            'role.required' => 'Sila pilih role pengguna.',
+-            'role.enum' => 'Role yang dipilih tidak sah.',
++            'roles.required' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.array' => 'Senarai role pengguna tidak sah.',
++            'roles.min' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.*.enum' => 'Role yang dipilih tidak sah.',
++            'roles.*.distinct' => 'Role yang sama tidak boleh dipilih dua kali.',
+             'employee_id.required' => 'Sila pilih pekerja untuk akaun Employee.',
+             'office_location_id.required' => 'Sila pilih lokasi pejabat untuk akaun Employee.',
+             'office_location_id.exists' => 'Lokasi pejabat yang dipilih mesti aktif.',
+diff --git a/app/Http/Requests/UpdateUserRoleRequest.php b/app/Http/Requests/UpdateUserRoleRequest.php
+index 601584f..782e126 100644
+--- a/app/Http/Requests/UpdateUserRoleRequest.php
++++ b/app/Http/Requests/UpdateUserRoleRequest.php
+@@ -19,7 +19,8 @@ public function authorize(): bool
+     public function rules(): array
+     {
+         return [
+-            'role' => ['required', Rule::enum(UserRole::class)],
++            'roles' => ['required', 'array', 'min:1'],
++            'roles.*' => ['required', 'distinct', Rule::enum(UserRole::class)],
+         ];
+     }
+ 
+@@ -29,8 +30,11 @@ public function rules(): array
+     public function messages(): array
+     {
+         return [
+-            'role.required' => 'Sila pilih role pengguna.',
+-            'role.enum' => 'Role yang dipilih tidak sah.',
++            'roles.required' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.array' => 'Senarai role pengguna tidak sah.',
++            'roles.min' => 'Sila pilih sekurang-kurangnya satu role pengguna.',
++            'roles.*.enum' => 'Role yang dipilih tidak sah.',
++            'roles.*.distinct' => 'Role yang sama tidak boleh dipilih dua kali.',
+         ];
+     }
+ }
+diff --git a/app/Models/User.php b/app/Models/User.php
+index bd86139..52e78a6 100644
+--- a/app/Models/User.php
++++ b/app/Models/User.php
+@@ -8,9 +8,11 @@
+ use Illuminate\Database\Eloquent\Attributes\Fillable;
+ use Illuminate\Database\Eloquent\Attributes\Hidden;
+ use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Relations\HasMany;
+ use Illuminate\Database\Eloquent\Relations\HasOne;
+ use Illuminate\Foundation\Auth\User as Authenticatable;
+ use Illuminate\Notifications\Notifiable;
++use Illuminate\Support\Facades\Schema;
+ use Laravel\Fortify\Contracts\PasskeyUser;
+ use Laravel\Fortify\PasskeyAuthenticatable;
+ use Laravel\Fortify\TwoFactorAuthenticatable;
+@@ -22,11 +24,119 @@ class User extends Authenticatable implements PasskeyUser
+     /** @use HasFactory<UserFactory> */
+     use HasFactory, Notifiable, PasskeyAuthenticatable, TwoFactorAuthenticatable;
+ 
++    protected static function booted(): void
++    {
++        static::created(function (User $user) {
++            if (! Schema::hasTable('user_roles')) {
++                return;
++            }
++
++            $user->roleAssignments()->firstOrCreate([
++                'role' => $user->legacyRole()->value,
++            ]);
++        });
++    }
++
++    /**
++     * @return array<int, UserRole>
++     */
++    public function resolvedRoles(): array
++    {
++        if (
++            $this->exists
++            && (
++                $this->relationLoaded('roleAssignments')
++                || Schema::hasTable('user_roles')
++            )
++        ) {
++            $this->loadMissing('roleAssignments');
++
++            $assignedRoles = $this->roleAssignments
++                ->map(fn (UserRoleAssignment $assignment) => $assignment->role)
++                ->filter(fn ($role) => $role instanceof UserRole)
++                ->unique(fn (UserRole $role) => $role->value)
++                ->sortByDesc(fn (UserRole $role) => $role->priority())
++                ->values()
++                ->all();
++
++            if ($assignedRoles !== []) {
++                return $assignedRoles;
++            }
++        }
++
++        return [$this->legacyRole()];
++    }
++
++    /**
++     * @return array<int, string>
++     */
++    public function roleValues(): array
++    {
++        return array_map(
++            fn (UserRole $role) => $role->value,
++            $this->resolvedRoles(),
++        );
++    }
++
+     public function resolvedRole(): UserRole
+     {
+-        return $this->role instanceof UserRole
+-            ? $this->role
+-            : UserRole::tryFrom((string) $this->role) ?? UserRole::Viewer;
++        return $this->resolvedRoles()[0];
++    }
++
++    public function hasRole(UserRole|string $role): bool
++    {
++        $role = $role instanceof UserRole ? $role : UserRole::tryFrom($role);
++
++        return $role !== null
++            && in_array($role, $this->resolvedRoles(), true);
++    }
++
++    public function hasOnlyRole(UserRole $role): bool
++    {
++        $roles = $this->resolvedRoles();
++
++        return count($roles) === 1 && $roles[0] === $role;
++    }
++
++    /**
++     * @param  array<int, UserRole|string>  $roles
++     */
++    public function syncRoles(array $roles): self
++    {
++        $resolvedRoles = collect($roles)
++            ->map(fn ($role) => $role instanceof UserRole
++                ? $role
++                : UserRole::tryFrom((string) $role))
++            ->filter()
++            ->unique(fn (UserRole $role) => $role->value)
++            ->sortByDesc(fn (UserRole $role) => $role->priority())
++            ->values();
++
++        if ($resolvedRoles->isEmpty()) {
++            $resolvedRoles = collect([UserRole::Viewer]);
++        }
++
++        $values = $resolvedRoles
++            ->map(fn (UserRole $role) => $role->value)
++            ->all();
++
++        $this->roleAssignments()
++            ->whereNotIn('role', $values)
++            ->delete();
++
++        foreach ($values as $value) {
++            $this->roleAssignments()->firstOrCreate(['role' => $value]);
++        }
++
++        $primaryRole = $resolvedRoles->first();
++
++        if ($this->legacyRole() !== $primaryRole) {
++            $this->forceFill(['role' => $primaryRole])->saveQuietly();
++        }
++
++        $this->unsetRelation('roleAssignments');
++
++        return $this;
+     }
+ 
+     /**
+@@ -34,12 +144,16 @@ public function resolvedRole(): UserRole
+      */
+     public function permissions(): array
+     {
+-        return $this->resolvedRole()->permissions();
++        return collect($this->resolvedRoles())
++            ->flatMap(fn (UserRole $role) => $role->permissions())
++            ->unique()
++            ->values()
++            ->all();
+     }
+ 
+     public function hasPermission(string $permission): bool
+     {
+-        return $this->resolvedRole()->hasPermission($permission);
++        return in_array($permission, $this->permissions(), true);
+     }
+ 
+     public function employeeLink(): HasOne
+@@ -47,6 +161,11 @@ public function employeeLink(): HasOne
+         return $this->hasOne(EmployeeUserLink::class);
+     }
+ 
++    public function roleAssignments(): HasMany
++    {
++        return $this->hasMany(UserRoleAssignment::class);
++    }
++
+     /**
+      * Get the attributes that should be cast.
+      *
+@@ -61,4 +180,11 @@ protected function casts(): array
+             'two_factor_confirmed_at' => 'datetime',
+         ];
+     }
++
++    private function legacyRole(): UserRole
++    {
++        return $this->role instanceof UserRole
++            ? $this->role
++            : UserRole::tryFrom((string) $this->role) ?? UserRole::Viewer;
++    }
+ }
+diff --git a/app/Models/UserRoleAssignment.php b/app/Models/UserRoleAssignment.php
+new file mode 100644
+index 0000000..1a99df3
+--- /dev/null
++++ b/app/Models/UserRoleAssignment.php
+@@ -0,0 +1,27 @@
++<?php
++
++namespace App\Models;
++
++use App\Enums\UserRole;
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class UserRoleAssignment extends Model
++{
++    protected $fillable = [
++        'user_id',
++        'role',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'role' => UserRole::class,
++        ];
++    }
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++}
+diff --git a/database/migrations/2026_07_29_010000_create_user_roles_table.php b/database/migrations/2026_07_29_010000_create_user_roles_table.php
+new file mode 100644
+index 0000000..264a9c2
+--- /dev/null
++++ b/database/migrations/2026_07_29_010000_create_user_roles_table.php
+@@ -0,0 +1,44 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('user_roles', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
++            $table->string('role', 32);
++            $table->timestamps();
++
++            $table->unique(['user_id', 'role']);
++            $table->index('role');
++        });
++
++        DB::table('users')
++            ->select(['id', 'role'])
++            ->orderBy('id')
++            ->chunkById(100, function ($users) {
++                $now = now();
++                $rows = $users->map(fn ($user) => [
++                    'user_id' => $user->id,
++                    'role' => $user->role ?: 'viewer',
++                    'created_at' => $now,
++                    'updated_at' => $now,
++                ])->all();
++
++                if ($rows !== []) {
++                    DB::table('user_roles')->insertOrIgnore($rows);
++                }
++            });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('user_roles');
++    }
++};
+diff --git a/resources/js/components/user-info.tsx b/resources/js/components/user-info.tsx
+index 8ac5e87..586612c 100644
+--- a/resources/js/components/user-info.tsx
++++ b/resources/js/components/user-info.tsx
+@@ -28,7 +28,9 @@ export function UserInfo({
+                             {user.email}
+                         </span>
+                         <span className="truncate text-xs text-muted-foreground">
+-                            {roleLabel(user.role)}
++                            {(user.roles ?? [user.role])
++                                .map(roleLabel)
++                                .join(' · ')}
+                         </span>
+                     </>
+                 )}
+diff --git a/resources/js/pages/users/create.tsx b/resources/js/pages/users/create.tsx
+index 98a1a79..b9196fc 100644
+--- a/resources/js/pages/users/create.tsx
++++ b/resources/js/pages/users/create.tsx
+@@ -8,14 +8,14 @@ import type {
+ 
+ type CreateUserProps = {
+     options: SystemUserFormOptions;
+-    defaultRole: UserRole;
++    defaultRoles: UserRole[];
+ };
+ 
+-export default function CreateUser({ options, defaultRole }: CreateUserProps) {
++export default function CreateUser({ options, defaultRoles }: CreateUserProps) {
+     const initialValues: SystemUserFormData = {
+         name: '',
+         email: '',
+-        role: defaultRole,
++        roles: defaultRoles,
+         employee_id: '',
+         office_location_id: '',
+         password: '',
+diff --git a/resources/js/pages/users/edit.tsx b/resources/js/pages/users/edit.tsx
+index c17e00f..2c0aa9c 100644
+--- a/resources/js/pages/users/edit.tsx
++++ b/resources/js/pages/users/edit.tsx
+@@ -10,7 +10,7 @@ type ManagedUser = {
+     id: number;
+     name: string;
+     email: string;
+-    role: UserRole;
++    roles: UserRole[];
+     is_current_user: boolean;
+     employee_id: number | null;
+     office_location_id: number | null;
+@@ -25,7 +25,7 @@ export default function EditUser({ managedUser, options }: EditUserProps) {
+     const initialValues: SystemUserFormData = {
+         name: managedUser.name,
+         email: managedUser.email,
+-        role: managedUser.role,
++        roles: managedUser.roles,
+         employee_id: managedUser.employee_id
+             ? String(managedUser.employee_id)
+             : '',
+@@ -44,7 +44,10 @@ export default function EditUser({ managedUser, options }: EditUserProps) {
+                 initialValues={initialValues}
+                 options={options}
+                 userId={managedUser.id}
+-                lockRole={managedUser.is_current_user}
++                protectSuperAdmin={
++                    managedUser.is_current_user &&
++                    managedUser.roles.includes('super_admin')
++                }
+             />
+         </>
+     );
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index 87195a9..4bc76f8 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -1,18 +1,14 @@
+-import { Head, Link, router, useForm } from '@inertiajs/react';
++import { Head, Link, router } from '@inertiajs/react';
+ import {
+-    CheckCircle2,
+     KeyRound,
+     Pencil,
+     Plus,
+-    Save,
+     Search,
+     ShieldCheck,
+     UserCog,
+-    UserPlus,
+     UsersRound,
+ } from 'lucide-react';
+ import { useEffect, useState } from 'react';
+-import type { FormEvent } from 'react';
+ import HeadingSmall from '@/components/heading-small';
+ import { Badge } from '@/components/ui/badge';
+ import { Button } from '@/components/ui/button';
+@@ -24,13 +20,6 @@ import {
+     CardTitle,
+ } from '@/components/ui/card';
+ import { Input } from '@/components/ui/input';
+-import {
+-    Select,
+-    SelectContent,
+-    SelectItem,
+-    SelectTrigger,
+-    SelectValue,
+-} from '@/components/ui/select';
+ import {
+     Table,
+     TableBody,
+@@ -45,8 +34,8 @@ type ManagedUser = {
+     id: number;
+     name: string;
+     email: string;
+-    role: UserRole;
+-    role_label: string;
++    roles: UserRole[];
++    role_labels: string[];
+     email_verified_at: string | null;
+     created_at: string;
+     is_current_user: boolean;
+@@ -132,84 +121,24 @@ function paginationLabel(label: string): string {
+         .replace('Next &raquo;', 'Seterusnya');
+ }
+ 
+-function RoleEditor({
+-    user,
+-    roleOptions,
+-}: {
+-    user: ManagedUser;
+-    roleOptions: RoleOption[];
+-}) {
+-    const availableRoles = roleOptions.filter(
+-        (role) => role.value !== 'employee' || user.role === 'employee',
+-    );
+-    const { data, setData, patch, processing, errors, recentlySuccessful } =
+-        useForm<{ role: UserRole }>({
+-            role: user.role,
+-        });
+-
+-    const submit = (event: FormEvent<HTMLFormElement>) => {
+-        event.preventDefault();
+-
+-        patch(`/pengguna/${user.id}/role`, {
+-            preserveScroll: true,
+-        });
+-    };
+-
+-    if (user.is_current_user) {
+-        return (
+-            <div className="space-y-1">
+-                <Badge variant="outline" className={roleStyles[user.role]}>
+-                    {user.role_label}
+-                </Badge>
+-                <p className="text-xs text-muted-foreground">Akaun anda</p>
+-            </div>
+-        );
+-    }
+-
++function RoleBadges({ user }: { user: ManagedUser }) {
+     return (
+-        <form onSubmit={submit} className="space-y-2">
+-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+-                <Select
+-                    value={data.role}
+-                    onValueChange={(value) =>
+-                        setData('role', value as UserRole)
+-                    }
+-                    disabled={processing}
+-                >
+-                    <SelectTrigger
+-                        className="w-full min-w-44 sm:w-48"
+-                        aria-label={`Role untuk ${user.name}`}
++        <div className="space-y-1.5">
++            <div className="flex flex-wrap gap-1.5">
++                {user.roles.map((role, index) => (
++                    <Badge
++                        key={role}
++                        variant="outline"
++                        className={roleStyles[role]}
+                     >
+-                        <SelectValue />
+-                    </SelectTrigger>
+-                    <SelectContent align="end">
+-                        {availableRoles.map((role) => (
+-                            <SelectItem key={role.value} value={role.value}>
+-                                {role.label}
+-                            </SelectItem>
+-                        ))}
+-                    </SelectContent>
+-                </Select>
+-                <Button
+-                    type="submit"
+-                    size="sm"
+-                    variant="outline"
+-                    disabled={processing || data.role === user.role}
+-                >
+-                    <Save />
+-                    Simpan
+-                </Button>
++                        {user.role_labels[index]}
++                    </Badge>
++                ))}
+             </div>
+-            {errors.role && (
+-                <p className="text-xs text-destructive">{errors.role}</p>
+-            )}
+-            {recentlySuccessful && (
+-                <p className="flex items-center gap-1 text-xs text-emerald-600">
+-                    <CheckCircle2 className="size-3.5" />
+-                    Berjaya dikemas kini
+-                </p>
++            {user.is_current_user && (
++                <p className="text-xs text-muted-foreground">Akaun anda</p>
+             )}
+-        </form>
++        </div>
+     );
+ }
+ 
+@@ -282,19 +211,13 @@ export default function UserManagement({
+                     </div>
+ 
+                     <div className="flex w-full flex-col gap-3 lg:max-w-xl">
+-                        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+-                            <Button asChild variant="outline">
++                        <div className="flex justify-end">
++                            <Button asChild>
+                                 <Link href="/pengguna/create">
+                                     <Plus />
+                                     Tambah Pengguna
+                                 </Link>
+                             </Button>
+-                            <Button asChild>
+-                                <Link href="/pengguna/create?role=employee">
+-                                    <UserPlus />
+-                                    Daftar Pekerja
+-                                </Link>
+-                            </Button>
+                         </div>
+                         <div className="relative w-full lg:ml-auto lg:max-w-sm">
+                             <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+@@ -375,8 +298,8 @@ export default function UserManagement({
+                                     <TableHead>Pekerja Dipautkan</TableHead>
+                                     <TableHead>Status E-mel</TableHead>
+                                     <TableHead>Tarikh Daftar</TableHead>
+-                                    <TableHead className="min-w-72">
+-                                        Role
++                                    <TableHead className="min-w-56">
++                                        Role Pengguna
+                                     </TableHead>
+                                     <TableHead className="text-right">
+                                         Tindakan
+@@ -436,10 +359,7 @@ export default function UserManagement({
+                                                 {formatDate(user.created_at)}
+                                             </TableCell>
+                                             <TableCell>
+-                                                <RoleEditor
+-                                                    user={user}
+-                                                    roleOptions={roleOptions}
+-                                                />
++                                                <RoleBadges user={user} />
+                                             </TableCell>
+                                             <TableCell className="text-right">
+                                                 <Button
+@@ -511,10 +431,7 @@ export default function UserManagement({
+                                             </p>
+                                         </div>
+                                     )}
+-                                    <RoleEditor
+-                                        user={user}
+-                                        roleOptions={roleOptions}
+-                                    />
++                                    <RoleBadges user={user} />
+                                     <Button
+                                         asChild
+                                         size="sm"
+diff --git a/resources/js/pages/users/partials/user-form.tsx b/resources/js/pages/users/partials/user-form.tsx
+index 5ce1685..b78ee11 100644
+--- a/resources/js/pages/users/partials/user-form.tsx
++++ b/resources/js/pages/users/partials/user-form.tsx
+@@ -19,6 +19,7 @@ import {
+     CardHeader,
+     CardTitle,
+ } from '@/components/ui/card';
++import { Checkbox } from '@/components/ui/checkbox';
+ import { Input } from '@/components/ui/input';
+ import { Label } from '@/components/ui/label';
+ import {
+@@ -33,7 +34,7 @@ import type { UserRole } from '@/types';
+ export type SystemUserFormData = {
+     name: string;
+     email: string;
+-    role: UserRole;
++    roles: UserRole[];
+     employee_id: string;
+     office_location_id: string;
+     password: string;
+@@ -70,7 +71,7 @@ type UserFormProps = {
+     initialValues: SystemUserFormData;
+     options: SystemUserFormOptions;
+     userId?: number;
+-    lockRole?: boolean;
++    protectSuperAdmin?: boolean;
+ };
+ 
+ export default function UserForm({
+@@ -78,12 +79,27 @@ export default function UserForm({
+     initialValues,
+     options,
+     userId,
+-    lockRole = false,
++    protectSuperAdmin = false,
+ }: UserFormProps) {
+     const { data, setData, post, put, processing, errors, transform } =
+         useForm<SystemUserFormData>(initialValues);
+-    const selectedRole = options.roles.find((role) => role.value === data.role);
+-    const isEmployee = data.role === 'employee';
++    const selectedRoles = options.roles.filter((role) =>
++        data.roles.includes(role.value),
++    );
++    const isEmployee = data.roles.includes('employee');
++
++    const toggleRole = (role: UserRole, checked: boolean) => {
++        if (protectSuperAdmin && role === 'super_admin' && !checked) {
++            return;
++        }
++
++        setData(
++            'roles',
++            checked
++                ? [...new Set([...data.roles, role])]
++                : data.roles.filter((value) => value !== role),
++        );
++    };
+ 
+     const selectEmployee = (value: string) => {
+         const employee = options.employees.find(
+@@ -162,33 +178,56 @@ export default function UserForm({
+                         </CardHeader>
+                         <CardContent className="grid gap-5 sm:grid-cols-2">
+                             <div className="space-y-2 sm:col-span-2">
+-                                <Label htmlFor="user-role">Role Pengguna</Label>
+-                                <Select
+-                                    value={data.role}
+-                                    onValueChange={(value) =>
+-                                        setData('role', value as UserRole)
+-                                    }
+-                                    disabled={lockRole || processing}
+-                                >
+-                                    <SelectTrigger id="user-role">
+-                                        <SelectValue placeholder="Pilih role" />
+-                                    </SelectTrigger>
+-                                    <SelectContent>
+-                                        {options.roles.map((role) => (
+-                                            <SelectItem
++                                <Label>Role Pengguna</Label>
++                                <div className="grid gap-3 sm:grid-cols-2">
++                                    {options.roles.map((role) => {
++                                        const checked = data.roles.includes(
++                                            role.value,
++                                        );
++                                        const locked =
++                                            protectSuperAdmin &&
++                                            role.value === 'super_admin';
++
++                                        return (
++                                            <label
+                                                 key={role.value}
+-                                                value={role.value}
++                                                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${
++                                                    checked
++                                                        ? 'border-primary bg-primary/5'
++                                                        : ''
++                                                }`}
+                                             >
+-                                                {role.label}
+-                                            </SelectItem>
+-                                        ))}
+-                                    </SelectContent>
+-                                </Select>
+-                                <InputError message={errors.role} />
+-                                {lockRole && (
++                                                <Checkbox
++                                                    checked={checked}
++                                                    onCheckedChange={(value) =>
++                                                        toggleRole(
++                                                            role.value,
++                                                            value === true,
++                                                        )
++                                                    }
++                                                    disabled={
++                                                        processing || locked
++                                                    }
++                                                    aria-label={role.label}
++                                                />
++                                                <span className="space-y-1">
++                                                    <span className="block text-sm font-medium">
++                                                        {role.label}
++                                                    </span>
++                                                    <span className="block text-xs text-muted-foreground">
++                                                        {role.description}
++                                                    </span>
++                                                </span>
++                                            </label>
++                                        );
++                                    })}
++                                </div>
++                                <InputError message={errors.roles} />
++                                {protectSuperAdmin && (
+                                     <p className="text-xs text-muted-foreground">
+-                                        Role akaun anda sendiri tidak boleh
+-                                        diubah di sini.
++                                        Role Super Admin akaun anda dikunci
++                                        untuk keselamatan. Role lain masih boleh
++                                        ditambah atau dibuang.
+                                     </p>
+                                 )}
+                             </div>
+@@ -272,22 +311,31 @@ export default function UserForm({
+                     <Card className="h-fit">
+                         <CardHeader>
+                             <CardTitle className="text-base">
+-                                Akses Role
++                                Akses Gabungan Role
+                             </CardTitle>
+                             <CardDescription>
+-                                {selectedRole?.description ||
+-                                    'Pilih role pengguna.'}
++                                Sistem menggabungkan permission daripada semua
++                                role yang dipilih.
+                             </CardDescription>
+                         </CardHeader>
+                         <CardContent className="space-y-3 text-sm">
+                             <div className="rounded-lg bg-muted p-3">
+-                                <p className="font-medium">
+-                                    {selectedRole?.label || 'Belum dipilih'}
+-                                </p>
+-                                <p className="mt-1 text-xs text-muted-foreground">
+-                                    Akses route dan menu akan dikawal secara
+-                                    automatik berdasarkan role ini.
+-                                </p>
++                                {selectedRoles.length > 0 ? (
++                                    <div className="flex flex-wrap gap-2">
++                                        {selectedRoles.map((role) => (
++                                            <Badge
++                                                key={role.value}
++                                                variant="outline"
++                                            >
++                                                {role.label}
++                                            </Badge>
++                                        ))}
++                                    </div>
++                                ) : (
++                                    <p className="text-sm text-destructive">
++                                        Pilih sekurang-kurangnya satu role.
++                                    </p>
++                                )}
+                             </div>
+                             {mode === 'edit' && (
+                                 <p className="text-xs text-muted-foreground">
+@@ -392,6 +440,7 @@ export default function UserForm({
+                         type="submit"
+                         disabled={
+                             processing ||
++                            data.roles.length === 0 ||
+                             (isEmployee &&
+                                 (!data.employee_id || !data.office_location_id))
+                         }
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index 4d7fffa..8951c28 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -22,6 +22,7 @@ export type User = {
+     name: string;
+     email: string;
+     role: UserRole;
++    roles: UserRole[];
+     avatar?: string;
+     email_verified_at: string | null;
+     two_factor_enabled?: boolean;
+diff --git a/tests/Feature/RolePermissionsTest.php b/tests/Feature/RolePermissionsTest.php
+index 7a693c8..ec22666 100644
+--- a/tests/Feature/RolePermissionsTest.php
++++ b/tests/Feature/RolePermissionsTest.php
+@@ -32,23 +32,23 @@
+ 
+     $this->actingAs($superAdmin)
+         ->patch(route('users.role.update', $user), [
+-            'role' => UserRole::HrAdmin->value,
++            'roles' => [UserRole::HrAdmin->value],
+         ])
+         ->assertRedirect();
+ 
+     expect($user->fresh()->resolvedRole())->toBe(UserRole::HrAdmin);
+ });
+ 
+-test('super admin cannot change their own role', function () {
++test('super admin cannot remove super admin role from their own account', function () {
+     $superAdmin = User::factory()->superAdmin()->create();
+ 
+     $this->actingAs($superAdmin)
+         ->from(route('users.index'))
+         ->patch(route('users.role.update', $superAdmin), [
+-            'role' => UserRole::Viewer->value,
++            'roles' => [UserRole::Viewer->value],
+         ])
+         ->assertRedirect(route('users.index'))
+-        ->assertSessionHasErrors('role');
++        ->assertSessionHasErrors('roles');
+ 
+     expect($superAdmin->fresh()->resolvedRole())->toBe(UserRole::SuperAdmin);
+ });
+@@ -67,9 +67,22 @@
+ 
+     $this->actingAs($hrAdmin)
+         ->patch(route('users.role.update', $user), [
+-            'role' => UserRole::SuperAdmin->value,
++            'roles' => [UserRole::SuperAdmin->value],
+         ])
+         ->assertForbidden();
+ 
+     expect($user->fresh()->resolvedRole())->toBe(UserRole::Viewer);
+ });
++
++test('permissions are combined when a user has multiple roles', function () {
++    $user = User::factory()->create();
++    $user->syncRoles([
++        UserRole::HrAdmin,
++        UserRole::Employee,
++    ]);
++
++    expect($user->hasRole(UserRole::HrAdmin))->toBeTrue();
++    expect($user->hasRole(UserRole::Employee))->toBeTrue();
++    expect($user->hasPermission('payroll.view'))->toBeTrue();
++    expect($user->hasPermission('attendance.clock'))->toBeTrue();
++});
+diff --git a/tests/Feature/UserManagementTest.php b/tests/Feature/UserManagementTest.php
+index d4d8515..fd92e8e 100644
+--- a/tests/Feature/UserManagementTest.php
++++ b/tests/Feature/UserManagementTest.php
+@@ -67,11 +67,11 @@ function createManagedOffice(): OfficeLocation
+     createManagedOffice();
+ 
+     $this->actingAs($superAdmin)
+-        ->get(route('users.create', ['role' => UserRole::Employee->value]))
++        ->get(route('users.create'))
+         ->assertOk()
+         ->assertInertia(fn (Assert $page) => $page
+             ->component('users/create')
+-            ->where('defaultRole', UserRole::Employee->value)
++            ->where('defaultRoles', [])
+             ->where('options.employees.0.id', $employeeId)
+             ->where('options.offices.0.radius_meters', 100));
+ });
+@@ -92,7 +92,7 @@ function createManagedOffice(): OfficeLocation
+         ->post(route('users.store'), [
+             'name' => 'Pekerja Sistem',
+             'email' => 'pengguna@ibco.test',
+-            'role' => UserRole::Employee->value,
++            'roles' => [UserRole::Employee->value],
+             'employee_id' => $employeeId,
+             'office_location_id' => $office->getKey(),
+             'password' => 'Password123!',
+@@ -122,6 +122,41 @@ function createManagedOffice(): OfficeLocation
+     ]);
+ });
+ 
++test('super admin can also hold employee role and record attendance', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeId = createManagedEmployee();
++    $office = createManagedOffice();
++
++    $this->actingAs($superAdmin)
++        ->put(route('users.update', $superAdmin), [
++            'name' => $superAdmin->name,
++            'email' => $superAdmin->email,
++            'roles' => [
++                UserRole::SuperAdmin->value,
++                UserRole::Employee->value,
++            ],
++            'employee_id' => $employeeId,
++            'office_location_id' => $office->getKey(),
++            'password' => '',
++            'password_confirmation' => '',
++        ])
++        ->assertRedirect(route('users.index'))
++        ->assertSessionDoesntHaveErrors();
++
++    $superAdmin->refresh();
++
++    expect($superAdmin->hasRole(UserRole::SuperAdmin))->toBeTrue();
++    expect($superAdmin->hasRole(UserRole::Employee))->toBeTrue();
++    expect($superAdmin->hasPermission('users.manage'))->toBeTrue();
++    expect($superAdmin->hasPermission('attendance.clock'))->toBeTrue();
++    $this->assertDatabaseHas('employee_user_links', [
++        'user_id' => $superAdmin->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => 1,
++    ]);
++});
++
+ test('the same employee cannot be linked to two active system accounts', function () {
+     $superAdmin = User::factory()->superAdmin()->create();
+     $existingUser = User::factory()->employee()->create();
+@@ -140,7 +175,7 @@ function createManagedOffice(): OfficeLocation
+         ->post(route('users.store'), [
+             'name' => 'Akaun Pendua',
+             'email' => 'pendua@ibco.test',
+-            'role' => UserRole::Employee->value,
++            'roles' => [UserRole::Employee->value],
+             'employee_id' => $employeeId,
+             'office_location_id' => $office->getKey(),
+             'password' => 'Password123!',
+@@ -165,7 +200,7 @@ function createManagedOffice(): OfficeLocation
+         ->put(route('users.update', $managedUser), [
+             'name' => 'Nama Baharu',
+             'email' => 'baharu@ibco.test',
+-            'role' => UserRole::HrAdmin->value,
++            'roles' => [UserRole::HrAdmin->value],
+             'password' => 'NewPassword123!',
+             'password_confirmation' => 'NewPassword123!',
+         ])
+@@ -201,7 +236,7 @@ function createManagedOffice(): OfficeLocation
+         ->put(route('users.update', $employeeUser), [
+             'name' => $employeeUser->name,
+             'email' => $employeeUser->email,
+-            'role' => UserRole::Viewer->value,
++            'roles' => [UserRole::Viewer->value],
+             'password' => '',
+             'password_confirmation' => '',
+         ])
+@@ -227,7 +262,7 @@ function createManagedOffice(): OfficeLocation
+         ->post(route('users.store'), [
+             'name' => 'Tidak Dibenarkan',
+             'email' => 'blocked@ibco.test',
+-            'role' => UserRole::Viewer->value,
++            'roles' => [UserRole::Viewer->value],
+             'password' => 'Password123!',
+             'password_confirmation' => 'Password123!',
+         ])
+@@ -237,7 +272,7 @@ function createManagedOffice(): OfficeLocation
+         ->put(route('users.update', $managedUser), [
+             'name' => 'Cubaan Edit',
+             'email' => $managedUser->email,
+-            'role' => UserRole::Viewer->value,
++            'roles' => [UserRole::Viewer->value],
+             'password' => '',
+             'password_confirmation' => '',
+         ])

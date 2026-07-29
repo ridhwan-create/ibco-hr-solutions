@@ -1,0 +1,1714 @@
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 8fff0f3077f2eee4f720f881add64afdef6ee394..701c4f527272540607f03fbbef420edf55cb220e 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -38,6 +38,8 @@ class AuditTrailController extends Controller
+         'employee_link.created' => 'Pautan Pekerja Ditambah',
+         'employee_link.updated' => 'Pautan Pekerja Dikemas Kini',
+         'employee_link.deactivated' => 'Pautan Pekerja Dinyahaktifkan',
++        'user.created' => 'Pengguna Sistem Ditambah',
++        'user.updated' => 'Pengguna Sistem Dikemas Kini',
+     ];
+ 
+     private const AUDITABLE_TYPES = [
+@@ -46,6 +48,7 @@ class AuditTrailController extends Controller
+         'geo_attendance_records',
+         'office_locations',
+         'employee_user_links',
++        'users',
+     ];
+ 
+     public function index(Request $request): Response
+@@ -232,6 +235,7 @@ public function index(Request $request): Response
+                     + ($actionCounts['attendance.manual_created'] ?? 0)
+                     + ($actionCounts['office.created'] ?? 0)
+                     + ($actionCounts['employee_link.created'] ?? 0)
++                    + ($actionCounts['user.created'] ?? 0)
+                 ),
+                 'updated' => (int) (
+                     ($actionCounts['employee.updated'] ?? 0)
+@@ -241,6 +245,7 @@ public function index(Request $request): Response
+                     + ($actionCounts['attendance.corrected'] ?? 0)
+                     + ($actionCounts['office.updated'] ?? 0)
+                     + ($actionCounts['employee_link.updated'] ?? 0)
++                    + ($actionCounts['user.updated'] ?? 0)
+                 ),
+                 'deactivated' => (int) (
+                     ($actionCounts['employee.deactivated'] ?? 0)
+diff --git a/app/Http/Controllers/UserManagementController.php b/app/Http/Controllers/UserManagementController.php
+index 9e8a753f38d8c75e07c7b96520e9d1bf3807ecce..64027b6e4765841f8b7d44fce82d244064686bad 100644
+--- a/app/Http/Controllers/UserManagementController.php
++++ b/app/Http/Controllers/UserManagementController.php
+@@ -3,11 +3,16 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Enums\UserRole;
++use App\Http\Requests\StoreSystemUserRequest;
++use App\Http\Requests\UpdateSystemUserRequest;
+ use App\Http\Requests\UpdateUserRoleRequest;
+ use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
+ use App\Models\User;
++use App\Support\AuditLogger;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
+ use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
+ use Inertia\Response;
+@@ -19,6 +24,11 @@ public function index(Request $request): Response
+         $search = $request->string('search')->trim()->toString();
+ 
+         $users = User::query()
++            ->with([
++                'employeeLink' => fn ($query) => $query
++                    ->where('is_active', true)
++                    ->with('officeLocation:id,name'),
++            ])
+             ->when($search !== '', function ($query) use ($search) {
+                 $query->where(function ($query) use ($search) {
+                     $query->where('name', 'like', "%{$search}%")
+@@ -27,8 +37,27 @@ public function index(Request $request): Response
+             })
+             ->orderBy('name')
+             ->paginate(15)
+-            ->withQueryString()
+-            ->through(fn (User $user) => [
++            ->withQueryString();
++        $employeeIds = $users->getCollection()
++            ->pluck('employeeLink.employee_id')
++            ->filter()
++            ->unique()
++            ->values();
++        $employees = $employeeIds->isEmpty()
++            ? collect()
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->whereIn('id', $employeeIds)
++                ->get(['id', 'employeeID', 'nama'])
++                ->keyBy(fn ($employee) => (string) $employee->id);
++
++        $users->through(function (User $user) use ($employees, $request) {
++            $link = $user->employeeLink;
++            $employee = $link
++                ? ($employees[(string) $link->employee_id] ?? null)
++                : null;
++
++            return [
+                 'id' => $user->id,
+                 'name' => $user->name,
+                 'email' => $user->email,
+@@ -37,35 +66,198 @@ public function index(Request $request): Response
+                 'email_verified_at' => $user->email_verified_at,
+                 'created_at' => $user->created_at,
+                 'is_current_user' => $user->is($request->user()),
+-            ]);
++                'employee' => $employee
++                    ? [
++                        'id' => (int) $employee->id,
++                        'employee_id' => $employee->employeeID,
++                        'name' => $employee->nama,
++                        'office' => $link?->officeLocation?->name,
++                    ]
++                    : null,
++            ];
++        });
+ 
+         $roleCounts = collect(UserRole::cases())
+             ->mapWithKeys(fn (UserRole $role) => [
+                 $role->value => User::query()->where('role', $role->value)->count(),
+             ]);
+ 
+-        $roleOptions = collect(UserRole::cases())
+-            ->map(fn (UserRole $role) => [
+-                'value' => $role->value,
+-                'label' => $role->label(),
+-                'description' => $role->description(),
+-                'permissions' => $role->permissions(),
+-            ]);
+-
+         return Inertia::render('users/index', [
+             'users' => $users,
+             'filters' => [
+                 'search' => $search,
+             ],
+             'roleCounts' => $roleCounts,
+-            'roleOptions' => $roleOptions,
++            'roleOptions' => $this->roleOptions(),
++        ]);
++    }
++
++    public function create(Request $request): Response
++    {
++        $defaultRole = UserRole::tryFrom(
++            $request->string('role')->toString(),
++        ) ?? UserRole::Viewer;
++
++        return Inertia::render('users/create', [
++            'options' => $this->formOptions(),
++            'defaultRole' => $defaultRole->value,
+         ]);
+     }
+ 
++    public function store(StoreSystemUserRequest $request): RedirectResponse
++    {
++        $validated = $request->validated();
++        $this->validateEmployeeAssignment($validated);
++
++        $user = DB::transaction(function () use ($request, $validated) {
++            $user = User::query()->create([
++                'name' => $validated['name'],
++                'email' => $validated['email'],
++                'password' => $validated['password'],
++                'role' => $validated['role'],
++            ]);
++            $user->forceFill(['email_verified_at' => now()])->save();
++
++            $this->syncEmployeeLink($request, $user, $validated);
++
++            AuditLogger::record(
++                $request,
++                'user.created',
++                'users',
++                $user->getKey(),
++                newValues: $this->userAuditValues($user),
++            );
++
++            return $user;
++        });
++
++        return redirect()
++            ->route('users.index')
++            ->with('toast', [
++                'type' => 'success',
++                'message' => "Pengguna {$user->name} berjaya didaftarkan.",
++            ]);
++    }
++
++    public function edit(Request $request, User $user): Response
++    {
++        $link = EmployeeUserLink::query()
++            ->where('user_id', $user->getKey())
++            ->where('is_active', true)
++            ->first();
++
++        return Inertia::render('users/edit', [
++            'managedUser' => [
++                'id' => $user->getKey(),
++                'name' => $user->name,
++                'email' => $user->email,
++                'role' => $user->resolvedRole()->value,
++                'is_current_user' => $user->is($request->user()),
++                'employee_id' => $link?->employee_id,
++                'office_location_id' => $link?->office_location_id,
++            ],
++            'options' => $this->formOptions($user),
++        ]);
++    }
++
++    public function update(
++        UpdateSystemUserRequest $request,
++        User $user,
++    ): RedirectResponse {
++        $validated = $request->validated();
++        $role = UserRole::from($validated['role']);
++
++        $this->guardRoleChange($request, $user, $role);
++        $this->validateEmployeeAssignment($validated, $user);
++
++        DB::transaction(function () use ($request, $user, $validated) {
++            $before = $this->userAuditValues($user);
++            $attributes = [
++                'name' => $validated['name'],
++                'email' => $validated['email'],
++                'role' => $validated['role'],
++            ];
++
++            if (! empty($validated['password'])) {
++                $attributes['password'] = $validated['password'];
++            }
++
++            $user->fill($attributes);
++
++            if ($user->isDirty('email')) {
++                $user->email_verified_at = now();
++            }
++
++            $user->save();
++            $this->syncEmployeeLink($request, $user, $validated);
++
++            AuditLogger::record(
++                $request,
++                'user.updated',
++                'users',
++                $user->getKey(),
++                oldValues: $before,
++                newValues: $this->userAuditValues($user),
++            );
++        });
++
++        return redirect()
++            ->route('users.index')
++            ->with('toast', [
++                'type' => 'success',
++                'message' => "Maklumat pengguna {$user->name} berjaya dikemas kini.",
++            ]);
++    }
++
+     public function updateRole(UpdateUserRoleRequest $request, User $user): RedirectResponse
+     {
+         $role = UserRole::from($request->validated('role'));
+ 
++        $this->guardRoleChange($request, $user, $role);
++
++        if (
++            $role === UserRole::Employee
++            && ! EmployeeUserLink::query()
++                ->where('user_id', $user->getKey())
++                ->where('is_active', true)
++                ->exists()
++        ) {
++            throw ValidationException::withMessages([
++                'role' => 'Gunakan butang Edit untuk memilih pekerja dan lokasi sebelum menetapkan role Employee.',
++            ]);
++        }
++
++        DB::transaction(function () use ($request, $user, $role) {
++            $before = $this->userAuditValues($user);
++            $user->update(['role' => $role]);
++
++            if ($role !== UserRole::Employee) {
++                $this->syncEmployeeLink($request, $user, ['role' => $role->value]);
++            }
++
++            AuditLogger::record(
++                $request,
++                'user.updated',
++                'users',
++                $user->getKey(),
++                oldValues: $before,
++                newValues: $this->userAuditValues($user),
++            );
++        });
++
++        Inertia::flash('toast', [
++            'type' => 'success',
++            'message' => "Role {$user->name} berjaya dikemas kini kepada {$role->label()}.",
++        ]);
++
++        return back();
++    }
++
++    private function guardRoleChange(
++        Request $request,
++        User $user,
++        UserRole $role,
++    ): void {
+         if ($user->is($request->user()) && $role !== $user->resolvedRole()) {
+             throw ValidationException::withMessages([
+                 'role' => 'Role akaun anda sendiri tidak boleh diubah.',
+@@ -81,25 +273,200 @@ public function updateRole(UpdateUserRoleRequest $request, User $user): Redirect
+                 'role' => 'Sekurang-kurangnya satu akaun Super Admin mesti dikekalkan.',
+             ]);
+         }
++    }
++
++    /**
++     * @param  array<string, mixed>  $validated
++     */
++    private function validateEmployeeAssignment(
++        array $validated,
++        ?User $user = null,
++    ): void {
++        if (
++            UserRole::from($validated['role']) !== UserRole::Employee
++        ) {
++            return;
++        }
++
++        $employee = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $validated['employee_id'])
++            ->where('rcd_enable', 1)
++            ->first(['id']);
++
++        if (! $employee) {
++            throw ValidationException::withMessages([
++                'employee_id' => 'Rekod pekerja aktif tidak ditemui dalam db_spp.',
++            ]);
++        }
+ 
+-        $user->update(['role' => $role]);
++        $duplicate = EmployeeUserLink::query()
++            ->where('employee_id', $validated['employee_id'])
++            ->where('is_active', true)
++            ->when(
++                $user,
++                fn ($query) => $query->where('user_id', '!=', $user->getKey()),
++            )
++            ->exists();
++
++        if ($duplicate) {
++            throw ValidationException::withMessages([
++                'employee_id' => 'Pekerja ini sudah didaftarkan sebagai pengguna sistem.',
++            ]);
++        }
++    }
+ 
+-        if ($role !== UserRole::Employee) {
+-            EmployeeUserLink::query()
++    /**
++     * @param  array<string, mixed>  $validated
++     */
++    private function syncEmployeeLink(
++        Request $request,
++        User $user,
++        array $validated,
++    ): void {
++        if (UserRole::from($validated['role']) !== UserRole::Employee) {
++            $link = EmployeeUserLink::query()
+                 ->where('user_id', $user->getKey())
+                 ->where('is_active', true)
+-                ->update([
+-                    'is_active' => false,
+-                    'updated_by' => $request->user()->getAuthIdentifier(),
+-                    'updated_at' => now(),
+-                ]);
++                ->first();
++
++            if (! $link) {
++                return;
++            }
++
++            $before = $this->linkAuditValues($link);
++            $link->update([
++                'is_active' => false,
++                'updated_by' => $request->user()->getAuthIdentifier(),
++            ]);
++
++            AuditLogger::record(
++                $request,
++                'employee_link.deactivated',
++                'employee_user_links',
++                $link->getKey(),
++                oldValues: $before,
++                newValues: $this->linkAuditValues($link),
++            );
++
++            return;
+         }
+ 
+-        Inertia::flash('toast', [
+-            'type' => 'success',
+-            'message' => "Role {$user->name} berjaya dikemas kini kepada {$role->label()}.",
++        $link = EmployeeUserLink::query()->firstOrNew([
++            'user_id' => $user->getKey(),
+         ]);
++        $before = $link->exists ? $this->linkAuditValues($link) : [];
+ 
+-        return back();
++        $link->fill([
++            'employee_id' => $validated['employee_id'],
++            'office_location_id' => $validated['office_location_id'],
++            'is_active' => true,
++            'updated_by' => $request->user()->getAuthIdentifier(),
++        ]);
++
++        if (! $link->exists) {
++            $link->created_by = $request->user()->getAuthIdentifier();
++        }
++
++        if ($link->exists && ! $link->isDirty()) {
++            return;
++        }
++
++        $link->save();
++
++        AuditLogger::record(
++            $request,
++            $before === [] ? 'employee_link.created' : 'employee_link.updated',
++            'employee_user_links',
++            $link->getKey(),
++            oldValues: $before,
++            newValues: $this->linkAuditValues($link),
++        );
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function formOptions(?User $user = null): array
++    {
++        $unavailableEmployeeIds = EmployeeUserLink::query()
++            ->where('is_active', true)
++            ->when(
++                $user,
++                fn ($query) => $query->where('user_id', '!=', $user->getKey()),
++            )
++            ->pluck('employee_id');
++
++        $employees = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('rcd_enable', 1)
++            ->when(
++                $unavailableEmployeeIds->isNotEmpty(),
++                fn ($query) => $query->whereNotIn('id', $unavailableEmployeeIds),
++            )
++            ->orderBy('nama')
++            ->get(['id', 'employeeID', 'nama', 'email'])
++            ->map(fn ($employee) => [
++                'id' => (int) $employee->id,
++                'employee_id' => $employee->employeeID,
++                'name' => $employee->nama,
++                'email' => $employee->email,
++            ]);
++
++        return [
++            'roles' => $this->roleOptions(),
++            'employees' => $employees,
++            'offices' => OfficeLocation::query()
++                ->where('is_active', true)
++                ->orderBy('name')
++                ->get(['id', 'name', 'radius_meters'])
++                ->map(fn (OfficeLocation $office) => [
++                    'id' => $office->getKey(),
++                    'name' => $office->name,
++                    'radius_meters' => $office->radius_meters,
++                ]),
++        ];
++    }
++
++    /**
++     * @return array<int, array<string, mixed>>
++     */
++    private function roleOptions(): array
++    {
++        return collect(UserRole::cases())
++            ->map(fn (UserRole $role) => [
++                'value' => $role->value,
++                'label' => $role->label(),
++                'description' => $role->description(),
++                'permissions' => $role->permissions(),
++            ])
++            ->values()
++            ->all();
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function userAuditValues(User $user): array
++    {
++        return [
++            'name' => $user->name,
++            'email' => $user->email,
++            'role' => $user->resolvedRole()->value,
++            'email_verified_at' => $user->email_verified_at?->toIso8601String(),
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function linkAuditValues(EmployeeUserLink $link): array
++    {
++        return [
++            'user_id' => $link->user_id,
++            'employee_id' => $link->employee_id,
++            'office_location_id' => $link->office_location_id,
++            'is_active' => $link->is_active,
++        ];
+     }
+ }
+diff --git a/app/Http/Requests/StoreSystemUserRequest.php b/app/Http/Requests/StoreSystemUserRequest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..d757203beb42d3be93020af6314a99e1ab471241
+--- /dev/null
++++ b/app/Http/Requests/StoreSystemUserRequest.php
+@@ -0,0 +1,66 @@
++<?php
++
++namespace App\Http\Requests;
++
++use App\Concerns\PasswordValidationRules;
++use App\Concerns\ProfileValidationRules;
++use App\Enums\UserRole;
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class StoreSystemUserRequest extends FormRequest
++{
++    use PasswordValidationRules, ProfileValidationRules;
++
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('users.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function rules(): array
++    {
++        $isEmployee = UserRole::tryFrom((string) $this->input('role'))
++            === UserRole::Employee;
++
++        return [
++            ...$this->profileRules(),
++            'role' => ['required', Rule::enum(UserRole::class)],
++            'employee_id' => [
++                Rule::requiredIf($isEmployee),
++                'nullable',
++                'integer',
++                'min:1',
++            ],
++            'office_location_id' => [
++                Rule::requiredIf($isEmployee),
++                'nullable',
++                'integer',
++                Rule::exists('office_locations', 'id')->where('is_active', true),
++            ],
++            'password' => $this->passwordRules(),
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'name.required' => 'Nama pengguna wajib diisi.',
++            'email.required' => 'Alamat e-mel wajib diisi.',
++            'email.email' => 'Sila masukkan alamat e-mel yang sah.',
++            'email.unique' => 'Alamat e-mel ini sudah digunakan.',
++            'role.required' => 'Sila pilih role pengguna.',
++            'role.enum' => 'Role yang dipilih tidak sah.',
++            'employee_id.required' => 'Sila pilih pekerja untuk akaun Employee.',
++            'office_location_id.required' => 'Sila pilih lokasi pejabat untuk akaun Employee.',
++            'office_location_id.exists' => 'Lokasi pejabat yang dipilih mesti aktif.',
++            'password.required' => 'Kata laluan sementara wajib diisi.',
++            'password.confirmed' => 'Pengesahan kata laluan tidak sepadan.',
++        ];
++    }
++}
+diff --git a/app/Http/Requests/UpdateSystemUserRequest.php b/app/Http/Requests/UpdateSystemUserRequest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a248a5b3169b67cb69f0b809de9aae769c32df0
+--- /dev/null
++++ b/app/Http/Requests/UpdateSystemUserRequest.php
+@@ -0,0 +1,77 @@
++<?php
++
++namespace App\Http\Requests;
++
++use App\Enums\UserRole;
++use App\Models\User;
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++use Illuminate\Validation\Rules\Password;
++
++class UpdateSystemUserRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('users.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function rules(): array
++    {
++        /** @var User $managedUser */
++        $managedUser = $this->route('user');
++        $isEmployee = UserRole::tryFrom((string) $this->input('role'))
++            === UserRole::Employee;
++
++        return [
++            'name' => ['required', 'string', 'max:255'],
++            'email' => [
++                'required',
++                'string',
++                'email',
++                'max:255',
++                Rule::unique(User::class)->ignore($managedUser->getKey()),
++            ],
++            'role' => ['required', Rule::enum(UserRole::class)],
++            'employee_id' => [
++                Rule::requiredIf($isEmployee),
++                'nullable',
++                'integer',
++                'min:1',
++            ],
++            'office_location_id' => [
++                Rule::requiredIf($isEmployee),
++                'nullable',
++                'integer',
++                Rule::exists('office_locations', 'id')->where('is_active', true),
++            ],
++            'password' => [
++                'nullable',
++                'string',
++                Password::default(),
++                'confirmed',
++            ],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'name.required' => 'Nama pengguna wajib diisi.',
++            'email.required' => 'Alamat e-mel wajib diisi.',
++            'email.email' => 'Sila masukkan alamat e-mel yang sah.',
++            'email.unique' => 'Alamat e-mel ini sudah digunakan.',
++            'role.required' => 'Sila pilih role pengguna.',
++            'role.enum' => 'Role yang dipilih tidak sah.',
++            'employee_id.required' => 'Sila pilih pekerja untuk akaun Employee.',
++            'office_location_id.required' => 'Sila pilih lokasi pejabat untuk akaun Employee.',
++            'office_location_id.exists' => 'Lokasi pejabat yang dipilih mesti aktif.',
++            'password.confirmed' => 'Pengesahan kata laluan tidak sepadan.',
++        ];
++    }
++}
+diff --git a/resources/js/pages/users/create.tsx b/resources/js/pages/users/create.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..98a1a79d7c57fa764b653191fd2d57fbc6b02ece
+--- /dev/null
++++ b/resources/js/pages/users/create.tsx
+@@ -0,0 +1,42 @@
++import { Head } from '@inertiajs/react';
++import type { UserRole } from '@/types';
++import UserForm from './partials/user-form';
++import type {
++    SystemUserFormData,
++    SystemUserFormOptions,
++} from './partials/user-form';
++
++type CreateUserProps = {
++    options: SystemUserFormOptions;
++    defaultRole: UserRole;
++};
++
++export default function CreateUser({ options, defaultRole }: CreateUserProps) {
++    const initialValues: SystemUserFormData = {
++        name: '',
++        email: '',
++        role: defaultRole,
++        employee_id: '',
++        office_location_id: '',
++        password: '',
++        password_confirmation: '',
++    };
++
++    return (
++        <>
++            <Head title="Tambah Pengguna" />
++            <UserForm
++                mode="create"
++                initialValues={initialValues}
++                options={options}
++            />
++        </>
++    );
++}
++
++CreateUser.layout = {
++    breadcrumbs: [
++        { title: 'Roles & Permissions', href: '/pengguna' },
++        { title: 'Tambah Pengguna', href: '/pengguna/create' },
++    ],
++};
+diff --git a/resources/js/pages/users/edit.tsx b/resources/js/pages/users/edit.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..c17e00f47929749d79e3e9ff0984b68796b2f755
+--- /dev/null
++++ b/resources/js/pages/users/edit.tsx
+@@ -0,0 +1,58 @@
++import { Head } from '@inertiajs/react';
++import type { UserRole } from '@/types';
++import UserForm from './partials/user-form';
++import type {
++    SystemUserFormData,
++    SystemUserFormOptions,
++} from './partials/user-form';
++
++type ManagedUser = {
++    id: number;
++    name: string;
++    email: string;
++    role: UserRole;
++    is_current_user: boolean;
++    employee_id: number | null;
++    office_location_id: number | null;
++};
++
++type EditUserProps = {
++    managedUser: ManagedUser;
++    options: SystemUserFormOptions;
++};
++
++export default function EditUser({ managedUser, options }: EditUserProps) {
++    const initialValues: SystemUserFormData = {
++        name: managedUser.name,
++        email: managedUser.email,
++        role: managedUser.role,
++        employee_id: managedUser.employee_id
++            ? String(managedUser.employee_id)
++            : '',
++        office_location_id: managedUser.office_location_id
++            ? String(managedUser.office_location_id)
++            : '',
++        password: '',
++        password_confirmation: '',
++    };
++
++    return (
++        <>
++            <Head title={`Edit ${managedUser.name}`} />
++            <UserForm
++                mode="edit"
++                initialValues={initialValues}
++                options={options}
++                userId={managedUser.id}
++                lockRole={managedUser.is_current_user}
++            />
++        </>
++    );
++}
++
++EditUser.layout = {
++    breadcrumbs: [
++        { title: 'Roles & Permissions', href: '/pengguna' },
++        { title: 'Kemas Kini Pengguna', href: '#' },
++    ],
++};
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index 723f16f129839d6d53cfb0aaa8b3a09b08c924d4..87195a9244d3dbeddcd4b18ddf75a186538eb9aa 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -1,11 +1,14 @@
+-import { Head, router, useForm } from '@inertiajs/react';
++import { Head, Link, router, useForm } from '@inertiajs/react';
+ import {
+     CheckCircle2,
+     KeyRound,
++    Pencil,
++    Plus,
+     Save,
+     Search,
+     ShieldCheck,
+     UserCog,
++    UserPlus,
+     UsersRound,
+ } from 'lucide-react';
+ import { useEffect, useState } from 'react';
+@@ -47,6 +50,12 @@ type ManagedUser = {
+     email_verified_at: string | null;
+     created_at: string;
+     is_current_user: boolean;
++    employee: {
++        id: number;
++        employee_id: string | null;
++        name: string | null;
++        office: string | null;
++    } | null;
+ };
+ 
+ type PaginationLink = {
+@@ -130,6 +139,9 @@ function RoleEditor({
+     user: ManagedUser;
+     roleOptions: RoleOption[];
+ }) {
++    const availableRoles = roleOptions.filter(
++        (role) => role.value !== 'employee' || user.role === 'employee',
++    );
+     const { data, setData, patch, processing, errors, recentlySuccessful } =
+         useForm<{ role: UserRole }>({
+             role: user.role,
+@@ -171,7 +183,7 @@ function RoleEditor({
+                         <SelectValue />
+                     </SelectTrigger>
+                     <SelectContent align="end">
+-                        {roleOptions.map((role) => (
++                        {availableRoles.map((role) => (
+                             <SelectItem key={role.value} value={role.value}>
+                                 {role.label}
+                             </SelectItem>
+@@ -269,15 +281,33 @@ export default function UserManagement({
+                         </Badge>
+                     </div>
+ 
+-                    <div className="relative w-full lg:max-w-sm">
+-                        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+-                        <Input
+-                            value={search}
+-                            onChange={(event) => setSearch(event.target.value)}
+-                            placeholder="Cari nama atau e-mel..."
+-                            className="pl-9"
+-                            aria-label="Cari pengguna"
+-                        />
++                    <div className="flex w-full flex-col gap-3 lg:max-w-xl">
++                        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
++                            <Button asChild variant="outline">
++                                <Link href="/pengguna/create">
++                                    <Plus />
++                                    Tambah Pengguna
++                                </Link>
++                            </Button>
++                            <Button asChild>
++                                <Link href="/pengguna/create?role=employee">
++                                    <UserPlus />
++                                    Daftar Pekerja
++                                </Link>
++                            </Button>
++                        </div>
++                        <div className="relative w-full lg:ml-auto lg:max-w-sm">
++                            <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                            <Input
++                                value={search}
++                                onChange={(event) =>
++                                    setSearch(event.target.value)
++                                }
++                                placeholder="Cari nama atau e-mel..."
++                                className="pl-9"
++                                aria-label="Cari pengguna"
++                            />
++                        </div>
+                     </div>
+                 </div>
+ 
+@@ -332,8 +362,8 @@ export default function UserManagement({
+                             Senarai Pengguna
+                         </CardTitle>
+                         <CardDescription>
+-                            Pengguna baharu menerima role Employee secara
+-                            automatik dan perlu dipautkan kepada rekod pekerja.
++                            Daftar, pautkan pekerja, kemas kini akaun dan
++                            tetapkan tahap akses pengguna sistem.
+                         </CardDescription>
+                     </CardHeader>
+ 
+@@ -342,11 +372,15 @@ export default function UserManagement({
+                             <TableHeader className="bg-muted/60">
+                                 <TableRow>
+                                     <TableHead>Pengguna</TableHead>
++                                    <TableHead>Pekerja Dipautkan</TableHead>
+                                     <TableHead>Status E-mel</TableHead>
+                                     <TableHead>Tarikh Daftar</TableHead>
+                                     <TableHead className="min-w-72">
+                                         Role
+                                     </TableHead>
++                                    <TableHead className="text-right">
++                                        Tindakan
++                                    </TableHead>
+                                 </TableRow>
+                             </TableHeader>
+                             <TableBody>
+@@ -361,6 +395,30 @@ export default function UserManagement({
+                                                     {user.email}
+                                                 </p>
+                                             </TableCell>
++                                            <TableCell>
++                                                {user.employee ? (
++                                                    <div>
++                                                        <p className="font-medium">
++                                                            {user.employee
++                                                                .name ||
++                                                                'Tanpa nama'}
++                                                        </p>
++                                                        <p className="text-xs text-muted-foreground">
++                                                            {user.employee
++                                                                .employee_id ||
++                                                                `#${user.employee.id}`}
++                                                            {user.employee
++                                                                .office
++                                                                ? ` · ${user.employee.office}`
++                                                                : ''}
++                                                        </p>
++                                                    </div>
++                                                ) : (
++                                                    <span className="text-sm text-muted-foreground">
++                                                        Tidak berkaitan
++                                                    </span>
++                                                )}
++                                            </TableCell>
+                                             <TableCell>
+                                                 <Badge
+                                                     variant={
+@@ -383,12 +441,26 @@ export default function UserManagement({
+                                                     roleOptions={roleOptions}
+                                                 />
+                                             </TableCell>
++                                            <TableCell className="text-right">
++                                                <Button
++                                                    asChild
++                                                    size="sm"
++                                                    variant="outline"
++                                                >
++                                                    <Link
++                                                        href={`/pengguna/${user.id}/edit`}
++                                                    >
++                                                        <Pencil />
++                                                        Edit
++                                                    </Link>
++                                                </Button>
++                                            </TableCell>
+                                         </TableRow>
+                                     ))
+                                 ) : (
+                                     <TableRow>
+                                         <TableCell
+-                                            colSpan={4}
++                                            colSpan={6}
+                                             className="h-28 text-center text-muted-foreground"
+                                         >
+                                             Tiada pengguna ditemui.
+@@ -424,10 +496,38 @@ export default function UserManagement({
+                                             Daftar {formatDate(user.created_at)}
+                                         </span>
+                                     </div>
++                                    {user.employee && (
++                                        <div className="rounded-md bg-muted p-3 text-sm">
++                                            <p className="font-medium">
++                                                {user.employee.name ||
++                                                    'Tanpa nama'}
++                                            </p>
++                                            <p className="text-xs text-muted-foreground">
++                                                {user.employee.employee_id ||
++                                                    `#${user.employee.id}`}
++                                                {user.employee.office
++                                                    ? ` · ${user.employee.office}`
++                                                    : ''}
++                                            </p>
++                                        </div>
++                                    )}
+                                     <RoleEditor
+                                         user={user}
+                                         roleOptions={roleOptions}
+                                     />
++                                    <Button
++                                        asChild
++                                        size="sm"
++                                        variant="outline"
++                                        className="w-full"
++                                    >
++                                        <Link
++                                            href={`/pengguna/${user.id}/edit`}
++                                        >
++                                            <Pencil />
++                                            Kemas Kini Pengguna
++                                        </Link>
++                                    </Button>
+                                 </div>
+                             ))
+                         ) : (
+diff --git a/resources/js/pages/users/partials/user-form.tsx b/resources/js/pages/users/partials/user-form.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ce1685d1c726d8b32679658f63186efbf115a02
+--- /dev/null
++++ b/resources/js/pages/users/partials/user-form.tsx
+@@ -0,0 +1,410 @@
++import { Link, useForm } from '@inertiajs/react';
++import {
++    ArrowLeft,
++    Database,
++    Save,
++    ShieldCheck,
++    UserRound,
++} from 'lucide-react';
++import type { FormEvent } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import InputError from '@/components/input-error';
++import PasswordInput from '@/components/password-input';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import type { UserRole } from '@/types';
++
++export type SystemUserFormData = {
++    name: string;
++    email: string;
++    role: UserRole;
++    employee_id: string;
++    office_location_id: string;
++    password: string;
++    password_confirmation: string;
++};
++
++type RoleOption = {
++    value: UserRole;
++    label: string;
++    description: string;
++};
++
++type EmployeeOption = {
++    id: number;
++    employee_id: string | null;
++    name: string | null;
++    email: string | null;
++};
++
++type OfficeOption = {
++    id: number;
++    name: string;
++    radius_meters: number;
++};
++
++export type SystemUserFormOptions = {
++    roles: RoleOption[];
++    employees: EmployeeOption[];
++    offices: OfficeOption[];
++};
++
++type UserFormProps = {
++    mode: 'create' | 'edit';
++    initialValues: SystemUserFormData;
++    options: SystemUserFormOptions;
++    userId?: number;
++    lockRole?: boolean;
++};
++
++export default function UserForm({
++    mode,
++    initialValues,
++    options,
++    userId,
++    lockRole = false,
++}: UserFormProps) {
++    const { data, setData, post, put, processing, errors, transform } =
++        useForm<SystemUserFormData>(initialValues);
++    const selectedRole = options.roles.find((role) => role.value === data.role);
++    const isEmployee = data.role === 'employee';
++
++    const selectEmployee = (value: string) => {
++        const employee = options.employees.find(
++            (option) => String(option.id) === value,
++        );
++
++        setData({
++            ...data,
++            employee_id: value,
++            name: employee?.name || data.name,
++            email: employee?.email || data.email,
++        });
++    };
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++
++        transform((formData) => ({
++            ...formData,
++            employee_id: isEmployee ? formData.employee_id : '',
++            office_location_id: isEmployee ? formData.office_location_id : '',
++        }));
++
++        if (mode === 'create') {
++            post('/pengguna');
++
++            return;
++        }
++
++        put(`/pengguna/${userId}`);
++    };
++
++    return (
++        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
++                <div className="space-y-2">
++                    <HeadingSmall
++                        title={
++                            mode === 'create'
++                                ? 'Tambah Pengguna Sistem'
++                                : 'Kemas Kini Pengguna'
++                        }
++                        description={
++                            mode === 'create'
++                                ? 'Daftarkan pekerja atau pengguna pentadbiran dengan role yang sesuai.'
++                                : 'Kemas kini identiti, role, pautan pekerja atau kata laluan pengguna.'
++                        }
++                    />
++                    <Badge variant="secondary" className="gap-1.5 font-normal">
++                        <ShieldCheck className="size-3.5" />
++                        Akaun disimpan dalam ibco-hr-solutions
++                    </Badge>
++                </div>
++
++                <Button asChild variant="outline">
++                    <Link href="/pengguna">
++                        <ArrowLeft />
++                        Kembali
++                    </Link>
++                </Button>
++            </div>
++
++            <form onSubmit={submit} className="space-y-6">
++                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <UserRound className="size-5 text-muted-foreground" />
++                                Maklumat Akaun
++                            </CardTitle>
++                            <CardDescription>
++                                E-mel digunakan semasa login. Akaun yang
++                                didaftarkan oleh Super Admin dianggap telah
++                                disahkan.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-5 sm:grid-cols-2">
++                            <div className="space-y-2 sm:col-span-2">
++                                <Label htmlFor="user-role">Role Pengguna</Label>
++                                <Select
++                                    value={data.role}
++                                    onValueChange={(value) =>
++                                        setData('role', value as UserRole)
++                                    }
++                                    disabled={lockRole || processing}
++                                >
++                                    <SelectTrigger id="user-role">
++                                        <SelectValue placeholder="Pilih role" />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        {options.roles.map((role) => (
++                                            <SelectItem
++                                                key={role.value}
++                                                value={role.value}
++                                            >
++                                                {role.label}
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                                <InputError message={errors.role} />
++                                {lockRole && (
++                                    <p className="text-xs text-muted-foreground">
++                                        Role akaun anda sendiri tidak boleh
++                                        diubah di sini.
++                                    </p>
++                                )}
++                            </div>
++
++                            <div className="space-y-2">
++                                <Label htmlFor="user-name">Nama Penuh</Label>
++                                <Input
++                                    id="user-name"
++                                    value={data.name}
++                                    onChange={(event) =>
++                                        setData('name', event.target.value)
++                                    }
++                                    autoComplete="name"
++                                    placeholder="Nama pengguna"
++                                />
++                                <InputError message={errors.name} />
++                            </div>
++
++                            <div className="space-y-2">
++                                <Label htmlFor="user-email">Alamat E-mel</Label>
++                                <Input
++                                    id="user-email"
++                                    type="email"
++                                    value={data.email}
++                                    onChange={(event) =>
++                                        setData('email', event.target.value)
++                                    }
++                                    autoComplete="email"
++                                    placeholder="nama@ibco.com"
++                                />
++                                <InputError message={errors.email} />
++                            </div>
++
++                            <div className="space-y-2">
++                                <Label htmlFor="user-password">
++                                    {mode === 'create'
++                                        ? 'Kata Laluan Sementara'
++                                        : 'Kata Laluan Baharu'}
++                                </Label>
++                                <PasswordInput
++                                    id="user-password"
++                                    value={data.password}
++                                    onChange={(event) =>
++                                        setData('password', event.target.value)
++                                    }
++                                    autoComplete="new-password"
++                                    placeholder={
++                                        mode === 'create'
++                                            ? 'Masukkan kata laluan'
++                                            : 'Biarkan kosong jika tidak berubah'
++                                    }
++                                    required={mode === 'create'}
++                                />
++                                <InputError message={errors.password} />
++                            </div>
++
++                            <div className="space-y-2">
++                                <Label htmlFor="user-password-confirmation">
++                                    Sahkan Kata Laluan
++                                </Label>
++                                <PasswordInput
++                                    id="user-password-confirmation"
++                                    value={data.password_confirmation}
++                                    onChange={(event) =>
++                                        setData(
++                                            'password_confirmation',
++                                            event.target.value,
++                                        )
++                                    }
++                                    autoComplete="new-password"
++                                    placeholder="Ulang kata laluan"
++                                    required={mode === 'create'}
++                                />
++                                <InputError
++                                    message={errors.password_confirmation}
++                                />
++                            </div>
++                        </CardContent>
++                    </Card>
++
++                    <Card className="h-fit">
++                        <CardHeader>
++                            <CardTitle className="text-base">
++                                Akses Role
++                            </CardTitle>
++                            <CardDescription>
++                                {selectedRole?.description ||
++                                    'Pilih role pengguna.'}
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="space-y-3 text-sm">
++                            <div className="rounded-lg bg-muted p-3">
++                                <p className="font-medium">
++                                    {selectedRole?.label || 'Belum dipilih'}
++                                </p>
++                                <p className="mt-1 text-xs text-muted-foreground">
++                                    Akses route dan menu akan dikawal secara
++                                    automatik berdasarkan role ini.
++                                </p>
++                            </div>
++                            {mode === 'edit' && (
++                                <p className="text-xs text-muted-foreground">
++                                    Isi kata laluan hanya jika Super Admin mahu
++                                    menetapkan kata laluan baharu.
++                                </p>
++                            )}
++                        </CardContent>
++                    </Card>
++                </div>
++
++                {isEmployee && (
++                    <Card>
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2">
++                                <Database className="size-5 text-muted-foreground" />
++                                Pautan Pekerja & Kehadiran
++                            </CardTitle>
++                            <CardDescription>
++                                Pilih rekod pekerja aktif dan lokasi geofence.
++                                Maklumat pekerja daripada db_spp hanya dibaca;
++                                tiada jadual asal diubah.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-5 lg:grid-cols-2">
++                            <div className="space-y-2">
++                                <Label>Rekod Pekerja db_spp</Label>
++                                <Select
++                                    value={data.employee_id}
++                                    onValueChange={selectEmployee}
++                                    disabled={processing}
++                                >
++                                    <SelectTrigger>
++                                        <SelectValue placeholder="Pilih pekerja aktif" />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        {options.employees.map((employee) => (
++                                            <SelectItem
++                                                key={employee.id}
++                                                value={String(employee.id)}
++                                            >
++                                                {employee.employee_id ||
++                                                    `#${employee.id}`}{' '}
++                                                —{' '}
++                                                {employee.name || 'Tanpa nama'}
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                                <InputError message={errors.employee_id} />
++                                {options.employees.length === 0 && (
++                                    <p className="text-xs text-amber-700 dark:text-amber-300">
++                                        Tiada pekerja aktif yang belum
++                                        didaftarkan sebagai pengguna.
++                                    </p>
++                                )}
++                            </div>
++
++                            <div className="space-y-2">
++                                <Label>Lokasi Pejabat / Geofence</Label>
++                                <Select
++                                    value={data.office_location_id}
++                                    onValueChange={(value) =>
++                                        setData('office_location_id', value)
++                                    }
++                                    disabled={processing}
++                                >
++                                    <SelectTrigger>
++                                        <SelectValue placeholder="Pilih lokasi pejabat" />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        {options.offices.map((office) => (
++                                            <SelectItem
++                                                key={office.id}
++                                                value={String(office.id)}
++                                            >
++                                                {office.name} (
++                                                {office.radius_meters} m)
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                                <InputError
++                                    message={errors.office_location_id}
++                                />
++                                {options.offices.length === 0 && (
++                                    <p className="text-xs text-amber-700 dark:text-amber-300">
++                                        Tambah lokasi aktif dalam Tetapan
++                                        Kehadiran sebelum mendaftarkan Employee.
++                                    </p>
++                                )}
++                            </div>
++                        </CardContent>
++                    </Card>
++                )}
++
++                <div className="flex flex-col-reverse gap-3 border-t pt-5 sm:flex-row sm:justify-end">
++                    <Button asChild type="button" variant="outline">
++                        <Link href="/pengguna">Batal</Link>
++                    </Button>
++                    <Button
++                        type="submit"
++                        disabled={
++                            processing ||
++                            (isEmployee &&
++                                (!data.employee_id || !data.office_location_id))
++                        }
++                    >
++                        <Save />
++                        {processing
++                            ? 'Menyimpan...'
++                            : mode === 'create'
++                              ? 'Daftar Pengguna'
++                              : 'Simpan Perubahan'}
++                    </Button>
++                </div>
++            </form>
++        </div>
++    );
++}
+diff --git a/routes/web.php b/routes/web.php
+index c3b4b4af8f8c5096781d6ebf47d3dbcafb8b6306..c0b54a25c973daf39262aceec4c9d9ecd125138b 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -104,12 +104,23 @@
+         ->whereNumber('id')
+         ->name('audit.employees.restore');
+ 
+-    Route::get('pengguna', [UserManagementController::class, 'index'])
+-        ->middleware('permission:users.manage')
+-        ->name('users.index');
+-    Route::patch('pengguna/{user}/role', [UserManagementController::class, 'updateRole'])
+-        ->middleware('permission:users.manage')
+-        ->name('users.role.update');
++    Route::middleware('permission:users.manage')->group(function () {
++        Route::get('pengguna', [UserManagementController::class, 'index'])
++            ->name('users.index');
++        Route::get('pengguna/create', [UserManagementController::class, 'create'])
++            ->name('users.create');
++        Route::post('pengguna', [UserManagementController::class, 'store'])
++            ->name('users.store');
++        Route::get('pengguna/{user}/edit', [UserManagementController::class, 'edit'])
++            ->whereNumber('user')
++            ->name('users.edit');
++        Route::put('pengguna/{user}', [UserManagementController::class, 'update'])
++            ->whereNumber('user')
++            ->name('users.update');
++        Route::patch('pengguna/{user}/role', [UserManagementController::class, 'updateRole'])
++            ->whereNumber('user')
++            ->name('users.role.update');
++    });
+ 
+     Route::middleware('permission:attendance.settings')->group(function () {
+         Route::get('tetapan-kehadiran', [AttendanceSettingsController::class, 'index'])
+diff --git a/tests/Feature/UserManagementTest.php b/tests/Feature/UserManagementTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4d851591bcc910aa4a194cf39da885c128443af
+--- /dev/null
++++ b/tests/Feature/UserManagementTest.php
+@@ -0,0 +1,249 @@
++<?php
++
++use App\Enums\UserRole;
++use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
++use App\Models\User;
++use Illuminate\Database\Events\QueryExecuted;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Hash;
++use Illuminate\Support\Facades\Schema;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('employeeID', 15)->nullable();
++        $table->string('nama')->nullable();
++        $table->string('email')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++});
++
++afterEach(function () {
++    DB::disconnect('ibco');
++});
++
++function createManagedEmployee(array $overrides = []): int
++{
++    return DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => 'EMP-USER-001',
++        'nama' => 'Pekerja Sistem',
++        'email' => 'pekerja@ibco.test',
++        'rcd_enable' => 1,
++        ...$overrides,
++    ]);
++}
++
++function createManagedOffice(): OfficeLocation
++{
++    return OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.1390000,
++        'longitude' => 101.6869000,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++}
++
++test('super admin can open the add user form with employee options', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeId = createManagedEmployee();
++    createManagedOffice();
++
++    $this->actingAs($superAdmin)
++        ->get(route('users.create', ['role' => UserRole::Employee->value]))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('users/create')
++            ->where('defaultRole', UserRole::Employee->value)
++            ->where('options.employees.0.id', $employeeId)
++            ->where('options.offices.0.radius_meters', 100));
++});
++
++test('super admin can register and link an employee without writing to db_spp', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeId = createManagedEmployee();
++    $office = createManagedOffice();
++    $legacyQueries = [];
++
++    DB::listen(function (QueryExecuted $event) use (&$legacyQueries) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(trim($event->sql));
++        }
++    });
++
++    $this->actingAs($superAdmin)
++        ->post(route('users.store'), [
++            'name' => 'Pekerja Sistem',
++            'email' => 'pengguna@ibco.test',
++            'role' => UserRole::Employee->value,
++            'employee_id' => $employeeId,
++            'office_location_id' => $office->getKey(),
++            'password' => 'Password123!',
++            'password_confirmation' => 'Password123!',
++        ])
++        ->assertRedirect(route('users.index'))
++        ->assertSessionDoesntHaveErrors();
++
++    $user = User::query()->where('email', 'pengguna@ibco.test')->sole();
++
++    expect($user->resolvedRole())->toBe(UserRole::Employee);
++    expect($user->email_verified_at)->not->toBeNull();
++    expect(Hash::check('Password123!', $user->password))->toBeTrue();
++    expect($legacyQueries)->not->toBeEmpty();
++    expect($legacyQueries)->each->toStartWith('select');
++
++    $this->assertDatabaseHas('employee_user_links', [
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => 1,
++    ]);
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'user.created',
++        'auditable_type' => 'users',
++        'auditable_id' => (string) $user->getKey(),
++    ]);
++});
++
++test('the same employee cannot be linked to two active system accounts', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $existingUser = User::factory()->employee()->create();
++    $employeeId = createManagedEmployee();
++    $office = createManagedOffice();
++
++    EmployeeUserLink::query()->create([
++        'user_id' => $existingUser->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => true,
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.create'))
++        ->post(route('users.store'), [
++            'name' => 'Akaun Pendua',
++            'email' => 'pendua@ibco.test',
++            'role' => UserRole::Employee->value,
++            'employee_id' => $employeeId,
++            'office_location_id' => $office->getKey(),
++            'password' => 'Password123!',
++            'password_confirmation' => 'Password123!',
++        ])
++        ->assertRedirect(route('users.create'))
++        ->assertSessionHasErrors('employee_id');
++
++    expect(User::query()->where('email', 'pendua@ibco.test')->exists())
++        ->toBeFalse();
++});
++
++test('super admin can update user details and reset the password', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $managedUser = User::factory()->create([
++        'name' => 'Nama Lama',
++        'email' => 'lama@ibco.test',
++        'role' => UserRole::Viewer,
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->put(route('users.update', $managedUser), [
++            'name' => 'Nama Baharu',
++            'email' => 'baharu@ibco.test',
++            'role' => UserRole::HrAdmin->value,
++            'password' => 'NewPassword123!',
++            'password_confirmation' => 'NewPassword123!',
++        ])
++        ->assertRedirect(route('users.index'))
++        ->assertSessionDoesntHaveErrors();
++
++    $managedUser->refresh();
++
++    expect($managedUser->name)->toBe('Nama Baharu');
++    expect($managedUser->email)->toBe('baharu@ibco.test');
++    expect($managedUser->resolvedRole())->toBe(UserRole::HrAdmin);
++    expect(Hash::check('NewPassword123!', $managedUser->password))->toBeTrue();
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'user.updated',
++        'auditable_type' => 'users',
++        'auditable_id' => (string) $managedUser->getKey(),
++    ]);
++});
++
++test('changing employee to another role deactivates the attendance link', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createManagedEmployee();
++    $office = createManagedOffice();
++    $link = EmployeeUserLink::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => true,
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->put(route('users.update', $employeeUser), [
++            'name' => $employeeUser->name,
++            'email' => $employeeUser->email,
++            'role' => UserRole::Viewer->value,
++            'password' => '',
++            'password_confirmation' => '',
++        ])
++        ->assertRedirect(route('users.index'));
++
++    expect($employeeUser->fresh()->resolvedRole())->toBe(UserRole::Viewer);
++    expect($link->fresh()->is_active)->toBeFalse();
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'employee_link.deactivated',
++        'auditable_id' => (string) $link->getKey(),
++    ]);
++});
++
++test('non super admin cannot create or update system users', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $managedUser = User::factory()->create();
++
++    $this->actingAs($hrAdmin)
++        ->get(route('users.create'))
++        ->assertForbidden();
++
++    $this->actingAs($hrAdmin)
++        ->post(route('users.store'), [
++            'name' => 'Tidak Dibenarkan',
++            'email' => 'blocked@ibco.test',
++            'role' => UserRole::Viewer->value,
++            'password' => 'Password123!',
++            'password_confirmation' => 'Password123!',
++        ])
++        ->assertForbidden();
++
++    $this->actingAs($hrAdmin)
++        ->put(route('users.update', $managedUser), [
++            'name' => 'Cubaan Edit',
++            'email' => $managedUser->email,
++            'role' => UserRole::Viewer->value,
++            'password' => '',
++            'password_confirmation' => '',
++        ])
++        ->assertForbidden();
++
++    expect(User::query()->where('email', 'blocked@ibco.test')->exists())
++        ->toBeFalse();
++    expect($managedUser->fresh()->name)->not->toBe('Cubaan Edit');
++});

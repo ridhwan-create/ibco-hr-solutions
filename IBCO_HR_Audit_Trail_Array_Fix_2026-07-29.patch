@@ -1,0 +1,154 @@
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 04bab71..1be3704 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Enums\UserRole;
+ use App\Models\AuditLog;
+ use App\Models\MaklumatPekerja;
+ use App\Models\OfficeLocation;
+@@ -507,6 +508,12 @@ private function referenceLookups(): array
+             ->pluck('name', 'id')
+             ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
+             ->all();
++        $roleLabels = collect(UserRole::cases())
++            ->mapWithKeys(fn (UserRole $role) => [$role->value => $role->label()])
++            ->all();
++        $lookups['role'] = $roleLabels;
++        $lookups['primary_role'] = $roleLabels;
++        $lookups['roles'] = $roleLabels;
+ 
+         return $lookups;
+     }
+@@ -520,19 +527,65 @@ private function resolveAuditValues(?array $values, array $referenceLookups): ar
+     {
+         return collect($values ?? [])
+             ->mapWithKeys(function ($value, string $field) use ($referenceLookups) {
+-                if (in_array($field, ['rcd_enable', 'is_active'], true)) {
+-                    return [$field => (int) $value === 1 ? 'Aktif' : 'Tidak Aktif'];
+-                }
+-
+-                if (
+-                    $value !== null
+-                    && isset($referenceLookups[$field][(string) $value])
+-                ) {
+-                    return [$field => $referenceLookups[$field][(string) $value]];
+-                }
+-
+-                return [$field => $value];
++                return [
++                    $field => $this->resolveAuditValue(
++                        $field,
++                        $value,
++                        $referenceLookups,
++                    ),
++                ];
+             })
+             ->all();
+     }
++
++    /**
++     * @param  array<string, array<string, string>>  $referenceLookups
++     */
++    private function resolveAuditValue(
++        string $field,
++        mixed $value,
++        array $referenceLookups,
++    ): string|int|float|bool|null {
++        if (is_array($value)) {
++            return collect($value)
++                ->map(fn ($item) => $this->resolveAuditValue(
++                    $field,
++                    $item,
++                    $referenceLookups,
++                ))
++                ->filter(fn ($item) => $item !== null && $item !== '')
++                ->map(fn ($item) => is_bool($item)
++                    ? ($item ? 'Ya' : 'Tidak')
++                    : (string) $item)
++                ->implode(', ');
++        }
++
++        if ($value === null) {
++            return null;
++        }
++
++        if (
++            in_array($field, ['rcd_enable', 'is_active'], true)
++            && is_scalar($value)
++        ) {
++            return (int) $value === 1 ? 'Aktif' : 'Tidak Aktif';
++        }
++
++        if (is_scalar($value)) {
++            $lookupKey = (string) $value;
++
++            if (isset($referenceLookups[$field][$lookupKey])) {
++                return $referenceLookups[$field][$lookupKey];
++            }
++
++            return $value;
++        }
++
++        $encoded = json_encode(
++            $value,
++            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
++        );
++
++        return $encoded === false ? 'Nilai tidak dapat dipaparkan' : $encoded;
++    }
+ }
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index e2323f1..378a6b6 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -190,6 +190,12 @@ const fieldLabels: Record<string, string> = {
+     requested_days: 'Bil. Hari Dipohon',
+     review_notes: 'Catatan HR',
+     reviewed_by: 'Disemak Oleh',
++    name: 'Nama Pengguna',
++    user_id: 'ID Pengguna',
++    role: 'Role Utama',
++    primary_role: 'Role Utama',
++    roles: 'Role',
++    email_verified_at: 'E-mel Disahkan',
+ };
+ 
+ const actionStyles: Record<string, string> = {
+diff --git a/tests/Feature/AuditTrailTest.php b/tests/Feature/AuditTrailTest.php
+index ad0193f..23fda8a 100644
+--- a/tests/Feature/AuditTrailTest.php
++++ b/tests/Feature/AuditTrailTest.php
+@@ -160,6 +160,29 @@ function createAuditEmployee(array $overrides = []): int
+             ->where('audits.data.0.user.id', $hrAdmin->id));
+ });
+ 
++test('multiple role arrays are displayed using readable role labels', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++
++    AuditLog::query()->create([
++        'user_id' => $superAdmin->id,
++        'action' => 'user.updated',
++        'auditable_type' => 'users',
++        'auditable_id' => (string) $superAdmin->id,
++        'old_values' => ['roles' => ['employee']],
++        'new_values' => ['roles' => ['super_admin', 'employee']],
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->get(route('audit.index'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->where('audits.data.0.old_values.roles', 'Employee')
++            ->where(
++                'audits.data.0.new_values.roles',
++                'Super Admin, Employee',
++            ));
++});
++
+ test('position changes appear in the audit trail with the related employee', function () {
+     $hrAdmin = User::factory()->hrAdmin()->create();
+     $employeeId = createAuditEmployee(['rcd_enable' => 1]);

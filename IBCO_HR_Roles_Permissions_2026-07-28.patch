@@ -1,0 +1,2127 @@
+diff --git a/README.md b/README.md
+index 1ccd0dc..9bfd174 100644
+--- a/README.md
++++ b/README.md
+@@ -18,6 +18,7 @@ untuk membuka halaman index modul berkaitan.
+ - Kerja lebih masa
+ - Payroll
+ - Laporan bulanan
++- Roles & Permissions
+ 
+ Semua modul index menggunakan carian, pagination dan hanya memaparkan rekod
+ aktif (`rcd_enable = 1`). Paparan ini tidak mengubah rekod dalam database asal.
+@@ -29,6 +30,22 @@ menggabungkan maklumat peribadi, jawatan terkini, jabatan, gaji asas, maklumat
+ bank serta ringkasan kehadiran, cuti, kerja lebih masa dan payroll. Setiap
+ bahagian aktiviti memaparkan sehingga lima rekod terkini daripada `db_spp`.
+ 
++Maklumat gaji, bank, KWSP, PERKESO dan payroll dalam profil hanya dihantar
++kepada pengguna yang mempunyai kebenaran melihat payroll.
++
++## Roles & Permissions
++
++Kawalan akses disimpan dalam jadual `users` pada database sistem:
++
++- **Super Admin** — akses penuh termasuk pengurusan pengguna dan role.
++- **HR Admin** — akses semua modul HR termasuk payroll dan laporan.
++- **Viewer / Manager** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
++  dan Kerja Lebih Masa sahaja.
++
++Akaun sedia ada paling awal akan menjadi Super Admin apabila migration role
++dijalankan. Pengguna baharu menerima Viewer / Manager secara lalai, kecuali
++pengguna pertama bagi pemasangan kosong yang akan menjadi Super Admin.
++
+ ## Sambungan database
+ 
+ Projek menggunakan dua sambungan MySQL. Database utama menyimpan jadual
+diff --git a/app/Actions/Fortify/CreateNewUser.php b/app/Actions/Fortify/CreateNewUser.php
+index 3c7c00c..b09b655 100644
+--- a/app/Actions/Fortify/CreateNewUser.php
++++ b/app/Actions/Fortify/CreateNewUser.php
+@@ -4,6 +4,7 @@ namespace App\Actions\Fortify;
+ 
+ use App\Concerns\PasswordValidationRules;
+ use App\Concerns\ProfileValidationRules;
++use App\Enums\UserRole;
+ use App\Models\User;
+ use Illuminate\Support\Facades\Validator;
+ use Laravel\Fortify\Contracts\CreatesNewUsers;
+@@ -28,6 +29,9 @@ class CreateNewUser implements CreatesNewUsers
+             'name' => $input['name'],
+             'email' => $input['email'],
+             'password' => $input['password'],
++            'role' => User::query()->exists()
++                ? UserRole::Viewer
++                : UserRole::SuperAdmin,
+         ]);
+     }
+ }
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+new file mode 100644
+index 0000000..99e20b9
+--- /dev/null
++++ b/app/Enums/UserRole.php
+@@ -0,0 +1,71 @@
++<?php
++
++namespace App\Enums;
++
++enum UserRole: string
++{
++    case SuperAdmin = 'super_admin';
++    case HrAdmin = 'hr_admin';
++    case Viewer = 'viewer';
++
++    /**
++     * @return array<int, string>
++     */
++    public function permissions(): array
++    {
++        return match ($this) {
++            self::SuperAdmin => [
++                'dashboard.view',
++                'employees.view',
++                'positions.view',
++                'attendance.view',
++                'leave.view',
++                'overtime.view',
++                'payroll.view',
++                'reports.view',
++                'users.manage',
++            ],
++            self::HrAdmin => [
++                'dashboard.view',
++                'employees.view',
++                'positions.view',
++                'attendance.view',
++                'leave.view',
++                'overtime.view',
++                'payroll.view',
++                'reports.view',
++            ],
++            self::Viewer => [
++                'dashboard.view',
++                'employees.view',
++                'positions.view',
++                'attendance.view',
++                'leave.view',
++                'overtime.view',
++            ],
++        };
++    }
++
++    public function hasPermission(string $permission): bool
++    {
++        return in_array($permission, $this->permissions(), true);
++    }
++
++    public function label(): string
++    {
++        return match ($this) {
++            self::SuperAdmin => 'Super Admin',
++            self::HrAdmin => 'HR Admin',
++            self::Viewer => 'Viewer / Manager',
++        };
++    }
++
++    public function description(): string
++    {
++        return match ($this) {
++            self::SuperAdmin => 'Akses penuh termasuk pengurusan pengguna dan role.',
++            self::HrAdmin => 'Akses semua modul HR termasuk payroll dan laporan.',
++            self::Viewer => 'Akses paparan operasi tanpa payroll, laporan dan pengurusan pengguna.',
++        };
++    }
++}
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 2ba521d..ef7593e 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -2,57 +2,74 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
+ use Inertia\Inertia;
+ 
+ class DashboardController extends Controller
+ {
+-    public function index()
++    public function index(Request $request)
+     {
+-        $statistics = [
+-            'pekerja' => DB::connection('ibco')->table('maklumatpekerja')->where('rcd_enable', 1)->count(),
+-            'jawatan' => DB::connection('ibco')->table('maklumatjawatan')->where('rcd_enable', 1)->count(),
+-            'kehadiran' => DB::connection('ibco')->table('maklumatkehadiran')->where('rcd_enable', 1)->count(),
+-            'cuti' => DB::connection('ibco')->table('maklumatcuti')->where('rcd_enable', 1)->count(),
+-            'kerja_lebih_masa' => DB::connection('ibco')->table('maklumatot')->where('rcd_enable', 1)->count(),
+-            'payroll' => DB::connection('ibco')->table('maklumatpayroll')->where('rcd_enable', 1)->count(),
+-            'laporan_bulanan' => DB::connection('ibco')->table('reportbulanan')->where('rcd_enable', 1)->count(),
++        $connection = DB::connection('ibco');
++        $user = $request->user();
++        $statistics = [];
++
++        $modules = [
++            'pekerja' => ['employees.view', 'maklumatpekerja'],
++            'jawatan' => ['positions.view', 'maklumatjawatan'],
++            'kehadiran' => ['attendance.view', 'maklumatkehadiran'],
++            'cuti' => ['leave.view', 'maklumatcuti'],
++            'kerja_lebih_masa' => ['overtime.view', 'maklumatot'],
++            'payroll' => ['payroll.view', 'maklumatpayroll'],
++            'laporan_bulanan' => ['reports.view', 'reportbulanan'],
+         ];
+ 
+-        $recentAttendance = DB::connection('ibco')->table('maklumatkehadiran as k')
+-            ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
+-            ->where('k.rcd_enable', 1)
+-            ->select([
+-                'k.id',
+-                'p.employeeID as employee_id',
+-                'p.nama as nama_pekerja',
+-                'k.waktu_masuk',
+-                'k.waktu_keluar',
+-                'k.catatan',
+-            ])
+-            ->orderByDesc('k.waktu_masuk')
+-            ->orderByDesc('k.id')
+-            ->limit(5)
+-            ->get();
+-
+-        $recentLeave = DB::connection('ibco')->table('maklumatcuti as c')
+-            ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
+-            ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
+-            ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
+-            ->where('c.rcd_enable', 1)
+-            ->select([
+-                'c.id',
+-                'p.employeeID as employee_id',
+-                'p.nama as nama_pekerja',
+-                'sc.description as jenis_cuti',
+-                'c.date_mulacuti as tarikh_mula',
+-                'c.date_tamatcuti as tarikh_tamat',
+-                'st.description as status_permohonan',
+-            ])
+-            ->orderByDesc('c.date_mulacuti')
+-            ->orderByDesc('c.id')
+-            ->limit(5)
+-            ->get();
++        foreach ($modules as $key => [$permission, $table]) {
++            if ($user->hasPermission($permission)) {
++                $statistics[$key] = $connection->table($table)
++                    ->where('rcd_enable', 1)
++                    ->count();
++            }
++        }
++
++        $recentAttendance = $user->hasPermission('attendance.view')
++            ? $connection->table('maklumatkehadiran as k')
++                ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
++                ->where('k.rcd_enable', 1)
++                ->select([
++                    'k.id',
++                    'p.employeeID as employee_id',
++                    'p.nama as nama_pekerja',
++                    'k.waktu_masuk',
++                    'k.waktu_keluar',
++                    'k.catatan',
++                ])
++                ->orderByDesc('k.waktu_masuk')
++                ->orderByDesc('k.id')
++                ->limit(5)
++                ->get()
++            : [];
++
++        $recentLeave = $user->hasPermission('leave.view')
++            ? $connection->table('maklumatcuti as c')
++                ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
++                ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
++                ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
++                ->where('c.rcd_enable', 1)
++                ->select([
++                    'c.id',
++                    'p.employeeID as employee_id',
++                    'p.nama as nama_pekerja',
++                    'sc.description as jenis_cuti',
++                    'c.date_mulacuti as tarikh_mula',
++                    'c.date_tamatcuti as tarikh_tamat',
++                    'st.description as status_permohonan',
++                ])
++                ->orderByDesc('c.date_mulacuti')
++                ->orderByDesc('c.id')
++                ->limit(5)
++                ->get()
++            : [];
+ 
+         return Inertia::render('dashboard', [
+             'statistics' => $statistics,
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index 4d783dc..70cde26 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -45,9 +45,10 @@ class MaklumatPekerjaController extends Controller
+         ]);
+     }
+ 
+-    public function show(int $id)
++    public function show(Request $request, int $id)
+     {
+         $connection = DB::connection('ibco');
++        $canViewPayroll = $request->user()->hasPermission('payroll.view');
+ 
+         $pekerja = $connection->table('maklumatpekerja as p')
+             ->leftJoin('xjantina as jantina', 'p.jantina', '=', 'jantina.id')
+@@ -85,24 +86,32 @@ class MaklumatPekerjaController extends Controller
+         unset($pekerja->status_perkahwinan_id);
+         $pekerja->status_perkahwinan = $statusPerkahwinan;
+ 
+-        $jawatan = $connection->table('maklumatjawatan as j')
+-            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
+-            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
+-            ->where('j.id_pekerja', $id)
+-            ->where('j.rcd_enable', 1)
+-            ->select([
+-                'j.id',
+-                'j.jawatan',
+-                'd.description as jabatan',
+-                'j.date_lapordiri as tarikh_lapor_diri',
+-                'j.date_tempohcubaan as tarikh_tamat_tempoh_cubaan',
++        $jawatanFields = [
++            'j.id',
++            'j.jawatan',
++            'd.description as jabatan',
++            'j.date_lapordiri as tarikh_lapor_diri',
++            'j.date_tempohcubaan as tarikh_tamat_tempoh_cubaan',
++            'j.jumlahcuti as kelayakan_cuti',
++        ];
++
++        if ($canViewPayroll) {
++            array_push(
++                $jawatanFields,
+                 'j.salary as gaji_asas',
+                 'b.description as bank',
+                 'j.noakaun as no_akaun',
+                 'j.noepf as no_kwsp',
+                 'j.nosocso as no_perkeso',
+-                'j.jumlahcuti as kelayakan_cuti',
+-            ])
++            );
++        }
++
++        $jawatan = $connection->table('maklumatjawatan as j')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.id_pekerja', $id)
++            ->where('j.rcd_enable', 1)
++            ->select($jawatanFields)
+             ->orderByDesc('j.id')
+             ->first();
+ 
+@@ -119,7 +128,10 @@ class MaklumatPekerjaController extends Controller
+                 ->where('id_pekerja', $id)
+                 ->where('rcd_enable', 1)
+                 ->count(),
+-            'payroll' => $connection->table('maklumatpayroll')
++        ];
++
++        if ($canViewPayroll) {
++            $statistics['payroll'] = $connection->table('maklumatpayroll')
+                 ->where(function ($query) use ($id, $pekerja) {
+                     $query->where('id_pekerja', $id)
+                         ->when($pekerja->employee_id, function ($query) use ($pekerja) {
+@@ -127,8 +139,8 @@ class MaklumatPekerjaController extends Controller
+                         });
+                 })
+                 ->where('rcd_enable', 1)
+-                ->count(),
+-        ];
++                ->count();
++        }
+ 
+         $recentAttendance = $connection->table('maklumatkehadiran as k')
+             ->leftJoin('xpilihanjam as pj', 'k.pilihan_jam', '=', 'pj.id')
+@@ -181,26 +193,28 @@ class MaklumatPekerjaController extends Controller
+             ->limit(5)
+             ->get();
+ 
+-        $recentPayroll = $connection->table('maklumatpayroll as py')
+-            ->where(function ($query) use ($id, $pekerja) {
+-                $query->where('py.id_pekerja', $id)
+-                    ->when($pekerja->employee_id, function ($query) use ($pekerja) {
+-                        $query->orWhere('py.employeeID', $pekerja->employee_id);
+-                    });
+-            })
+-            ->where('py.rcd_enable', 1)
+-            ->select([
+-                'py.id',
+-                'py.pay_period as tempoh_gaji',
+-                'py.bulan',
+-                'py.no_kwsp',
+-                'py.no_socso',
+-                'py.no_akaun',
+-            ])
+-            ->orderByDesc('py.pay_period')
+-            ->orderByDesc('py.id')
+-            ->limit(5)
+-            ->get();
++        $recentPayroll = $canViewPayroll
++            ? $connection->table('maklumatpayroll as py')
++                ->where(function ($query) use ($id, $pekerja) {
++                    $query->where('py.id_pekerja', $id)
++                        ->when($pekerja->employee_id, function ($query) use ($pekerja) {
++                            $query->orWhere('py.employeeID', $pekerja->employee_id);
++                        });
++                })
++                ->where('py.rcd_enable', 1)
++                ->select([
++                    'py.id',
++                    'py.pay_period as tempoh_gaji',
++                    'py.bulan',
++                    'py.no_kwsp',
++                    'py.no_socso',
++                    'py.no_akaun',
++                ])
++                ->orderByDesc('py.pay_period')
++                ->orderByDesc('py.id')
++                ->limit(5)
++                ->get()
++            : [];
+ 
+         return Inertia::render('MaklumatPekerja/Show', [
+             'pekerja' => $pekerja,
+@@ -210,6 +224,7 @@ class MaklumatPekerjaController extends Controller
+             'recentLeave' => $recentLeave,
+             'recentOvertime' => $recentOvertime,
+             'recentPayroll' => $recentPayroll,
++            'canViewPayroll' => $canViewPayroll,
+         ]);
+     }
+ 
+diff --git a/app/Http/Controllers/Settings/ProfileController.php b/app/Http/Controllers/Settings/ProfileController.php
+index d19f963..6bdd4f8 100644
+--- a/app/Http/Controllers/Settings/ProfileController.php
++++ b/app/Http/Controllers/Settings/ProfileController.php
+@@ -2,13 +2,16 @@
+ 
+ namespace App\Http\Controllers\Settings;
+ 
++use App\Enums\UserRole;
+ use App\Http\Controllers\Controller;
+ use App\Http\Requests\Settings\ProfileDeleteRequest;
+ use App\Http\Requests\Settings\ProfileUpdateRequest;
++use App\Models\User;
+ use Illuminate\Contracts\Auth\MustVerifyEmail;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\Auth;
++use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
+ use Inertia\Response;
+ 
+@@ -50,6 +53,15 @@ class ProfileController extends Controller
+     {
+         $user = $request->user();
+ 
++        if (
++            $user->resolvedRole() === UserRole::SuperAdmin
++            && User::query()->where('role', UserRole::SuperAdmin->value)->count() <= 1
++        ) {
++            throw ValidationException::withMessages([
++                'password' => 'Akaun ini ialah satu-satunya Super Admin dan tidak boleh dipadam.',
++            ]);
++        }
++
+         Auth::logout();
+ 
+         $user->delete();
+diff --git a/app/Http/Controllers/UserManagementController.php b/app/Http/Controllers/UserManagementController.php
+new file mode 100644
+index 0000000..b68c430
+--- /dev/null
++++ b/app/Http/Controllers/UserManagementController.php
+@@ -0,0 +1,93 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Enums\UserRole;
++use App\Http\Requests\UpdateUserRoleRequest;
++use App\Models\User;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class UserManagementController extends Controller
++{
++    public function index(Request $request): Response
++    {
++        $search = $request->string('search')->trim()->toString();
++
++        $users = User::query()
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('name', 'like', "%{$search}%")
++                        ->orWhere('email', 'like', "%{$search}%");
++                });
++            })
++            ->orderBy('name')
++            ->paginate(15)
++            ->withQueryString()
++            ->through(fn (User $user) => [
++                'id' => $user->id,
++                'name' => $user->name,
++                'email' => $user->email,
++                'role' => $user->resolvedRole()->value,
++                'role_label' => $user->resolvedRole()->label(),
++                'email_verified_at' => $user->email_verified_at,
++                'created_at' => $user->created_at,
++                'is_current_user' => $user->is($request->user()),
++            ]);
++
++        $roleCounts = collect(UserRole::cases())
++            ->mapWithKeys(fn (UserRole $role) => [
++                $role->value => User::query()->where('role', $role->value)->count(),
++            ]);
++
++        $roleOptions = collect(UserRole::cases())
++            ->map(fn (UserRole $role) => [
++                'value' => $role->value,
++                'label' => $role->label(),
++                'description' => $role->description(),
++                'permissions' => $role->permissions(),
++            ]);
++
++        return Inertia::render('users/index', [
++            'users' => $users,
++            'filters' => [
++                'search' => $search,
++            ],
++            'roleCounts' => $roleCounts,
++            'roleOptions' => $roleOptions,
++        ]);
++    }
++
++    public function updateRole(UpdateUserRoleRequest $request, User $user): RedirectResponse
++    {
++        $role = UserRole::from($request->validated('role'));
++
++        if ($user->is($request->user()) && $role !== $user->resolvedRole()) {
++            throw ValidationException::withMessages([
++                'role' => 'Role akaun anda sendiri tidak boleh diubah.',
++            ]);
++        }
++
++        if (
++            $user->resolvedRole() === UserRole::SuperAdmin
++            && $role !== UserRole::SuperAdmin
++            && User::query()->where('role', UserRole::SuperAdmin->value)->count() <= 1
++        ) {
++            throw ValidationException::withMessages([
++                'role' => 'Sekurang-kurangnya satu akaun Super Admin mesti dikekalkan.',
++            ]);
++        }
++
++        $user->update(['role' => $role]);
++
++        Inertia::flash('toast', [
++            'type' => 'success',
++            'message' => "Role {$user->name} berjaya dikemas kini kepada {$role->label()}.",
++        ]);
++
++        return back();
++    }
++}
+diff --git a/app/Http/Middleware/EnsureUserHasPermission.php b/app/Http/Middleware/EnsureUserHasPermission.php
+new file mode 100644
+index 0000000..83611a7
+--- /dev/null
++++ b/app/Http/Middleware/EnsureUserHasPermission.php
+@@ -0,0 +1,22 @@
++<?php
++
++namespace App\Http\Middleware;
++
++use Closure;
++use Illuminate\Http\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++class EnsureUserHasPermission
++{
++    /**
++     * Handle an incoming request.
++     *
++     * @param  Closure(Request): Response  $next
++     */
++    public function handle(Request $request, Closure $next, string $permission): Response
++    {
++        abort_unless($request->user()?->hasPermission($permission), 403);
++
++        return $next($request);
++    }
++}
+diff --git a/app/Http/Middleware/HandleInertiaRequests.php b/app/Http/Middleware/HandleInertiaRequests.php
+index f4cc770..716daaf 100644
+--- a/app/Http/Middleware/HandleInertiaRequests.php
++++ b/app/Http/Middleware/HandleInertiaRequests.php
+@@ -40,6 +40,7 @@ class HandleInertiaRequests extends Middleware
+             'name' => config('app.name'),
+             'auth' => [
+                 'user' => $request->user(),
++                'permissions' => $request->user()?->permissions() ?? [],
+             ],
+             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
+         ];
+diff --git a/app/Http/Requests/UpdateUserRoleRequest.php b/app/Http/Requests/UpdateUserRoleRequest.php
+new file mode 100644
+index 0000000..601584f
+--- /dev/null
++++ b/app/Http/Requests/UpdateUserRoleRequest.php
+@@ -0,0 +1,36 @@
++<?php
++
++namespace App\Http\Requests;
++
++use App\Enums\UserRole;
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class UpdateUserRoleRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('users.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function rules(): array
++    {
++        return [
++            'role' => ['required', Rule::enum(UserRole::class)],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'role.required' => 'Sila pilih role pengguna.',
++            'role.enum' => 'Role yang dipilih tidak sah.',
++        ];
++    }
++}
+diff --git a/app/Models/User.php b/app/Models/User.php
+index e961e8e..f7ea976 100644
+--- a/app/Models/User.php
++++ b/app/Models/User.php
+@@ -3,6 +3,7 @@
+ namespace App\Models;
+ 
+ // use Illuminate\Contracts\Auth\MustVerifyEmail;
++use App\Enums\UserRole;
+ use Database\Factories\UserFactory;
+ use Illuminate\Database\Eloquent\Attributes\Fillable;
+ use Illuminate\Database\Eloquent\Attributes\Hidden;
+@@ -13,13 +14,33 @@ use Laravel\Fortify\Contracts\PasskeyUser;
+ use Laravel\Fortify\PasskeyAuthenticatable;
+ use Laravel\Fortify\TwoFactorAuthenticatable;
+ 
+-#[Fillable(['name', 'email', 'password'])]
++#[Fillable(['name', 'email', 'password', 'role'])]
+ #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
+ class User extends Authenticatable implements PasskeyUser
+ {
+     /** @use HasFactory<UserFactory> */
+     use HasFactory, Notifiable, PasskeyAuthenticatable, TwoFactorAuthenticatable;
+ 
++    public function resolvedRole(): UserRole
++    {
++        return $this->role instanceof UserRole
++            ? $this->role
++            : UserRole::tryFrom((string) $this->role) ?? UserRole::Viewer;
++    }
++
++    /**
++     * @return array<int, string>
++     */
++    public function permissions(): array
++    {
++        return $this->resolvedRole()->permissions();
++    }
++
++    public function hasPermission(string $permission): bool
++    {
++        return $this->resolvedRole()->hasPermission($permission);
++    }
++
+     /**
+      * Get the attributes that should be cast.
+      *
+@@ -30,6 +51,7 @@ class User extends Authenticatable implements PasskeyUser
+         return [
+             'email_verified_at' => 'datetime',
+             'password' => 'hashed',
++            'role' => UserRole::class,
+             'two_factor_confirmed_at' => 'datetime',
+         ];
+     }
+diff --git a/bootstrap/app.php b/bootstrap/app.php
+index c4f1cc5..3eb7e0f 100644
+--- a/bootstrap/app.php
++++ b/bootstrap/app.php
+@@ -1,5 +1,6 @@
+ <?php
+ 
++use App\Http\Middleware\EnsureUserHasPermission;
+ use App\Http\Middleware\HandleAppearance;
+ use App\Http\Middleware\HandleInertiaRequests;
+ use Illuminate\Foundation\Application;
+@@ -16,6 +17,10 @@ return Application::configure(basePath: dirname(__DIR__))
+     ->withMiddleware(function (Middleware $middleware): void {
+         $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);
+ 
++        $middleware->alias([
++            'permission' => EnsureUserHasPermission::class,
++        ]);
++
+         $middleware->web(append: [
+             HandleAppearance::class,
+             HandleInertiaRequests::class,
+diff --git a/database/factories/UserFactory.php b/database/factories/UserFactory.php
+index 98825c8..4fe120a 100644
+--- a/database/factories/UserFactory.php
++++ b/database/factories/UserFactory.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Database\Factories;
+ 
++use App\Enums\UserRole;
+ use App\Models\User;
+ use Illuminate\Database\Eloquent\Factories\Factory;
+ use Illuminate\Support\Facades\Hash;
+@@ -29,6 +30,7 @@ class UserFactory extends Factory
+             'email' => fake()->unique()->safeEmail(),
+             'email_verified_at' => now(),
+             'password' => static::$password ??= Hash::make('password'),
++            'role' => UserRole::Viewer,
+             'remember_token' => Str::random(10),
+             'two_factor_secret' => null,
+             'two_factor_recovery_codes' => null,
+@@ -46,6 +48,20 @@ class UserFactory extends Factory
+         ]);
+     }
+ 
++    public function superAdmin(): static
++    {
++        return $this->state(fn (array $attributes) => [
++            'role' => UserRole::SuperAdmin,
++        ]);
++    }
++
++    public function hrAdmin(): static
++    {
++        return $this->state(fn (array $attributes) => [
++            'role' => UserRole::HrAdmin,
++        ]);
++    }
++
+     /**
+      * Indicate that the model has two-factor authentication configured.
+      */
+diff --git a/database/migrations/2026_07_28_000000_add_role_to_users_table.php b/database/migrations/2026_07_28_000000_add_role_to_users_table.php
+new file mode 100644
+index 0000000..eb9d921
+--- /dev/null
++++ b/database/migrations/2026_07_28_000000_add_role_to_users_table.php
+@@ -0,0 +1,37 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    /**
++     * Run the migrations.
++     */
++    public function up(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->string('role', 32)->default('viewer')->index();
++        });
++
++        $firstUserId = DB::table('users')->min('id');
++
++        if ($firstUserId !== null) {
++            DB::table('users')
++                ->where('id', $firstUserId)
++                ->update(['role' => 'super_admin']);
++        }
++    }
++
++    /**
++     * Reverse the migrations.
++     */
++    public function down(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->dropColumn('role');
++        });
++    }
++};
+diff --git a/database/seeders/DatabaseSeeder.php b/database/seeders/DatabaseSeeder.php
+index d01a0ef..12438ec 100644
+--- a/database/seeders/DatabaseSeeder.php
++++ b/database/seeders/DatabaseSeeder.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Database\Seeders;
+ 
++use App\Enums\UserRole;
+ use App\Models\User;
+ // use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+ use Illuminate\Database\Seeder;
+@@ -18,6 +19,7 @@ class DatabaseSeeder extends Seeder
+         User::factory()->create([
+             'name' => 'Test User',
+             'email' => 'test@example.com',
++            'role' => UserRole::SuperAdmin,
+         ]);
+     }
+ }
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index 7a13e50..d5b3fd0 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -1,4 +1,4 @@
+-import { Link } from '@inertiajs/react';
++import { Link, usePage } from '@inertiajs/react';
+ import {
+     Banknote,
+     BriefcaseBusiness,
+@@ -8,6 +8,7 @@ import {
+     FileText,
+     FolderGit2,
+     LayoutGrid,
++    ShieldCheck,
+     UsersRound,
+ } from 'lucide-react';
+ import AppLogo from '@/components/app-logo';
+@@ -23,58 +24,80 @@ import {
+     SidebarMenuButton,
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+-import type { NavItem } from '@/types';
++import { hasPermission } from '@/lib/permissions';
++import type { Auth, NavItem, Permission } from '@/types';
+ import { dashboard } from '@/routes';
+ 
+-const mainNavItems: NavItem[] = [
++type AuthorizedNavItem = NavItem & {
++    permission: Permission;
++};
++
++const mainNavItems: AuthorizedNavItem[] = [
+     {
+         title: 'Dashboard',
+         href: dashboard(),
+         icon: LayoutGrid,
++        permission: 'dashboard.view',
+     },
+ ];
+ 
+-const employeeNavItems: NavItem[] = [
++const employeeNavItems: AuthorizedNavItem[] = [
+     {
+         title: 'Pekerja',
+         href: '/pekerja',
+         icon: UsersRound,
++        permission: 'employees.view',
+     },
+     {
+         title: 'Jawatan',
+         href: '/jawatan',
+         icon: BriefcaseBusiness,
++        permission: 'positions.view',
+     },
+ ];
+ 
+-const attendanceNavItems: NavItem[] = [
++const attendanceNavItems: AuthorizedNavItem[] = [
+     {
+         title: 'Kehadiran',
+         href: '/kehadiran',
+         icon: CalendarCheck2,
++        permission: 'attendance.view',
+     },
+     {
+         title: 'Cuti',
+         href: '/cuti',
+         icon: CalendarDays,
++        permission: 'leave.view',
+     },
+     {
+         title: 'Kerja Lebih Masa',
+         href: '/kerja-lebih-masa',
+         icon: Clock3,
++        permission: 'overtime.view',
+     },
+ ];
+ 
+-const payrollNavItems: NavItem[] = [
++const payrollNavItems: AuthorizedNavItem[] = [
+     {
+         title: 'Payroll',
+         href: '/payroll',
+         icon: Banknote,
++        permission: 'payroll.view',
+     },
+     {
+         title: 'Laporan Bulanan',
+         href: '/laporan-bulanan',
+         icon: FileText,
++        permission: 'reports.view',
++    },
++];
++
++const administrationNavItems: AuthorizedNavItem[] = [
++    {
++        title: 'Pengurusan Pengguna',
++        href: '/pengguna',
++        icon: ShieldCheck,
++        permission: 'users.manage',
+     },
+ ];
+ 
+@@ -87,6 +110,16 @@ const footerNavItems: NavItem[] = [
+ ];
+ 
+ export function AppSidebar() {
++    const { auth } = usePage<{ auth: Auth }>().props;
++    const visibleItems = (items: AuthorizedNavItem[]) =>
++        items.filter((item) => hasPermission(auth, item.permission));
++
++    const visibleMainItems = visibleItems(mainNavItems);
++    const visibleEmployeeItems = visibleItems(employeeNavItems);
++    const visibleAttendanceItems = visibleItems(attendanceNavItems);
++    const visiblePayrollItems = visibleItems(payrollNavItems);
++    const visibleAdministrationItems = visibleItems(administrationNavItems);
++
+     return (
+         <Sidebar collapsible="icon" variant="inset">
+             <SidebarHeader>
+@@ -102,10 +135,30 @@ export function AppSidebar() {
+             </SidebarHeader>
+ 
+             <SidebarContent>
+-                <NavMain items={mainNavItems} label="Utama" />
+-                <NavMain items={employeeNavItems} label="Pekerja" />
+-                <NavMain items={attendanceNavItems} label="Masa & Kehadiran" />
+-                <NavMain items={payrollNavItems} label="Gaji & Laporan" />
++                {visibleMainItems.length > 0 && (
++                    <NavMain items={visibleMainItems} label="Utama" />
++                )}
++                {visibleEmployeeItems.length > 0 && (
++                    <NavMain items={visibleEmployeeItems} label="Pekerja" />
++                )}
++                {visibleAttendanceItems.length > 0 && (
++                    <NavMain
++                        items={visibleAttendanceItems}
++                        label="Masa & Kehadiran"
++                    />
++                )}
++                {visiblePayrollItems.length > 0 && (
++                    <NavMain
++                        items={visiblePayrollItems}
++                        label="Gaji & Laporan"
++                    />
++                )}
++                {visibleAdministrationItems.length > 0 && (
++                    <NavMain
++                        items={visibleAdministrationItems}
++                        label="Pentadbiran"
++                    />
++                )}
+             </SidebarContent>
+ 
+             <SidebarFooter>
+diff --git a/resources/js/components/user-info.tsx b/resources/js/components/user-info.tsx
+index dd0848e..8ac5e87 100644
+--- a/resources/js/components/user-info.tsx
++++ b/resources/js/components/user-info.tsx
+@@ -1,5 +1,6 @@
+ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+ import { useInitials } from '@/hooks/use-initials';
++import { roleLabel } from '@/lib/permissions';
+ import type { User } from '@/types';
+ 
+ export function UserInfo({
+@@ -22,9 +23,14 @@ export function UserInfo({
+             <div className="grid flex-1 text-left text-sm leading-tight">
+                 <span className="truncate font-medium">{user.name}</span>
+                 {showEmail && (
+-                    <span className="truncate text-xs text-muted-foreground">
+-                        {user.email}
+-                    </span>
++                    <>
++                        <span className="truncate text-xs text-muted-foreground">
++                            {user.email}
++                        </span>
++                        <span className="truncate text-xs text-muted-foreground">
++                            {roleLabel(user.role)}
++                        </span>
++                    </>
+                 )}
+             </div>
+         </>
+diff --git a/resources/js/lib/permissions.ts b/resources/js/lib/permissions.ts
+new file mode 100644
+index 0000000..dc4c1cd
+--- /dev/null
++++ b/resources/js/lib/permissions.ts
+@@ -0,0 +1,15 @@
++import type { Auth, Permission, UserRole } from '@/types';
++
++const roleLabels: Record<UserRole, string> = {
++    super_admin: 'Super Admin',
++    hr_admin: 'HR Admin',
++    viewer: 'Viewer / Manager',
++};
++
++export function hasPermission(auth: Auth, permission: Permission): boolean {
++    return auth.permissions.includes(permission);
++}
++
++export function roleLabel(role: UserRole): string {
++    return roleLabels[role];
++}
+diff --git a/resources/js/pages/MaklumatPekerja/Show.tsx b/resources/js/pages/MaklumatPekerja/Show.tsx
+index ec5ced2..a8113a5 100644
+--- a/resources/js/pages/MaklumatPekerja/Show.tsx
++++ b/resources/js/pages/MaklumatPekerja/Show.tsx
+@@ -59,11 +59,11 @@ type Employment = {
+     jabatan: string | null;
+     tarikh_lapor_diri: string | null;
+     tarikh_tamat_tempoh_cubaan: string | null;
+-    gaji_asas: string | number | null;
+-    bank: string | null;
+-    no_akaun: string | null;
+-    no_kwsp: string | null;
+-    no_perkeso: string | null;
++    gaji_asas?: string | number | null;
++    bank?: string | null;
++    no_akaun?: string | null;
++    no_kwsp?: string | null;
++    no_perkeso?: string | null;
+     kelayakan_cuti: string | null;
+ };
+ 
+@@ -71,7 +71,7 @@ type Statistics = {
+     kehadiran: number;
+     cuti: number;
+     kerja_lebih_masa: number;
+-    payroll: number;
++    payroll?: number;
+ };
+ 
+ type AttendanceRecord = {
+@@ -117,6 +117,7 @@ type EmployeeProfileProps = {
+     recentLeave: LeaveRecord[];
+     recentOvertime: OvertimeRecord[];
+     recentPayroll: PayrollRecord[];
++    canViewPayroll: boolean;
+ };
+ 
+ type InformationItemProps = {
+@@ -283,6 +284,7 @@ export default function EmployeeProfile({
+     recentLeave,
+     recentOvertime,
+     recentPayroll,
++    canViewPayroll,
+ }: EmployeeProfileProps) {
+     const employeeSearch = encodeURIComponent(
+         pekerja.employee_id || pekerja.nama || '',
+@@ -359,34 +361,38 @@ export default function EmployeeProfile({
+                 </Card>
+ 
+                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+-                    {summaryCards.map((item) => {
+-                        const Icon = item.icon;
+-
+-                        return (
+-                            <Card key={item.key} className="gap-4">
+-                                <CardHeader className="flex-row items-start justify-between">
+-                                    <div className="space-y-1.5">
+-                                        <CardDescription>
+-                                            {item.label}
+-                                        </CardDescription>
+-                                        <CardTitle className="text-3xl tabular-nums">
+-                                            {statistics[
+-                                                item.key
+-                                            ].toLocaleString('ms-MY')}
+-                                        </CardTitle>
+-                                    </div>
+-                                    <div
+-                                        className={`rounded-lg p-2.5 ${item.iconClassName}`}
+-                                    >
+-                                        <Icon className="size-5" />
+-                                    </div>
+-                                </CardHeader>
+-                                <CardContent className="text-sm text-muted-foreground">
+-                                    {item.description}
+-                                </CardContent>
+-                            </Card>
+-                        );
+-                    })}
++                    {summaryCards
++                        .filter(
++                            (item) => item.key !== 'payroll' || canViewPayroll,
++                        )
++                        .map((item) => {
++                            const Icon = item.icon;
++
++                            return (
++                                <Card key={item.key} className="gap-4">
++                                    <CardHeader className="flex-row items-start justify-between">
++                                        <div className="space-y-1.5">
++                                            <CardDescription>
++                                                {item.label}
++                                            </CardDescription>
++                                            <CardTitle className="text-3xl tabular-nums">
++                                                {(
++                                                    statistics[item.key] ?? 0
++                                                ).toLocaleString('ms-MY')}
++                                            </CardTitle>
++                                        </div>
++                                        <div
++                                            className={`rounded-lg p-2.5 ${item.iconClassName}`}
++                                        >
++                                            <Icon className="size-5" />
++                                        </div>
++                                    </CardHeader>
++                                    <CardContent className="text-sm text-muted-foreground">
++                                        {item.description}
++                                    </CardContent>
++                                </Card>
++                            );
++                        })}
+                 </div>
+ 
+                 <div className="grid gap-6 xl:grid-cols-2">
+@@ -494,37 +500,45 @@ export default function EmployeeProfile({
+                                         }
+                                         type="date"
+                                     />
+-                                    <InformationItem
+-                                        icon={Banknote}
+-                                        label="Gaji Asas"
+-                                        value={jawatan.gaji_asas}
+-                                        type="currency"
+-                                    />
+                                     <InformationItem
+                                         icon={CalendarDays}
+                                         label="Kelayakan Cuti"
+                                         value={jawatan.kelayakan_cuti}
+                                     />
+-                                    <InformationItem
+-                                        icon={Landmark}
+-                                        label="Bank"
+-                                        value={jawatan.bank}
+-                                    />
+-                                    <InformationItem
+-                                        icon={CreditCard}
+-                                        label="No. Akaun"
+-                                        value={jawatan.no_akaun}
+-                                    />
+-                                    <InformationItem
+-                                        icon={IdCard}
+-                                        label="No. KWSP"
+-                                        value={jawatan.no_kwsp}
+-                                    />
+-                                    <InformationItem
+-                                        icon={ShieldCheck}
+-                                        label="No. PERKESO"
+-                                        value={jawatan.no_perkeso}
+-                                    />
++                                    {canViewPayroll && (
++                                        <>
++                                            <InformationItem
++                                                icon={Banknote}
++                                                label="Gaji Asas"
++                                                value={
++                                                    jawatan.gaji_asas ?? null
++                                                }
++                                                type="currency"
++                                            />
++                                            <InformationItem
++                                                icon={Landmark}
++                                                label="Bank"
++                                                value={jawatan.bank ?? null}
++                                            />
++                                            <InformationItem
++                                                icon={CreditCard}
++                                                label="No. Akaun"
++                                                value={jawatan.no_akaun ?? null}
++                                            />
++                                            <InformationItem
++                                                icon={IdCard}
++                                                label="No. KWSP"
++                                                value={jawatan.no_kwsp ?? null}
++                                            />
++                                            <InformationItem
++                                                icon={ShieldCheck}
++                                                label="No. PERKESO"
++                                                value={
++                                                    jawatan.no_perkeso ?? null
++                                                }
++                                            />
++                                        </>
++                                    )}
+                                 </div>
+                             ) : (
+                                 <EmptyRecords label="jawatan aktif" />
+@@ -709,69 +723,79 @@ export default function EmployeeProfile({
+                         </CardContent>
+                     </Card>
+ 
+-                    <Card>
+-                        <CardHeader className="flex-row items-start justify-between">
+-                            <div className="space-y-1.5">
+-                                <CardTitle className="flex items-center gap-2">
+-                                    <Banknote className="size-5 text-muted-foreground" />
+-                                    Payroll Terkini
+-                                </CardTitle>
+-                                <CardDescription>
+-                                    Lima rekod payroll paling baharu.
+-                                </CardDescription>
+-                            </div>
+-                            <Link
+-                                href={`/payroll?search=${employeeSearch}`}
+-                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
+-                            >
+-                                Lihat semua
+-                            </Link>
+-                        </CardHeader>
+-                        <CardContent className="space-y-1">
+-                            {recentPayroll.length > 0 ? (
+-                                recentPayroll.map((record) => (
+-                                    <div
+-                                        key={record.id}
+-                                        className="border-b py-3 last:border-0"
+-                                    >
+-                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+-                                            <div>
+-                                                <p className="text-sm font-medium">
+-                                                    Tempoh{' '}
+-                                                    {formatDate(
+-                                                        record.tempoh_gaji,
++                    {canViewPayroll && (
++                        <Card>
++                            <CardHeader className="flex-row items-start justify-between">
++                                <div className="space-y-1.5">
++                                    <CardTitle className="flex items-center gap-2">
++                                        <Banknote className="size-5 text-muted-foreground" />
++                                        Payroll Terkini
++                                    </CardTitle>
++                                    <CardDescription>
++                                        Lima rekod payroll paling baharu.
++                                    </CardDescription>
++                                </div>
++                                <Link
++                                    href={`/payroll?search=${employeeSearch}`}
++                                    className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                                >
++                                    Lihat semua
++                                </Link>
++                            </CardHeader>
++                            <CardContent className="space-y-1">
++                                {recentPayroll.length > 0 ? (
++                                    recentPayroll.map((record) => (
++                                        <div
++                                            key={record.id}
++                                            className="border-b py-3 last:border-0"
++                                        >
++                                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
++                                                <div>
++                                                    <p className="text-sm font-medium">
++                                                        Tempoh{' '}
++                                                        {formatDate(
++                                                            record.tempoh_gaji,
++                                                        )}
++                                                    </p>
++                                                    <p className="mt-1 text-xs text-muted-foreground">
++                                                        Bulan:{' '}
++                                                        {displayValue(
++                                                            record.bulan,
++                                                        )}
++                                                    </p>
++                                                </div>
++                                                <Badge variant="outline">
++                                                    Rekod #{record.id}
++                                                </Badge>
++                                            </div>
++                                            <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-3">
++                                                <span>
++                                                    Akaun:{' '}
++                                                    {displayValue(
++                                                        record.no_akaun,
+                                                     )}
+-                                                </p>
+-                                                <p className="mt-1 text-xs text-muted-foreground">
+-                                                    Bulan:{' '}
+-                                                    {displayValue(record.bulan)}
+-                                                </p>
++                                                </span>
++                                                <span>
++                                                    KWSP:{' '}
++                                                    {displayValue(
++                                                        record.no_kwsp,
++                                                    )}
++                                                </span>
++                                                <span>
++                                                    PERKESO:{' '}
++                                                    {displayValue(
++                                                        record.no_socso,
++                                                    )}
++                                                </span>
+                                             </div>
+-                                            <Badge variant="outline">
+-                                                Rekod #{record.id}
+-                                            </Badge>
+                                         </div>
+-                                        <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-3">
+-                                            <span>
+-                                                Akaun:{' '}
+-                                                {displayValue(record.no_akaun)}
+-                                            </span>
+-                                            <span>
+-                                                KWSP:{' '}
+-                                                {displayValue(record.no_kwsp)}
+-                                            </span>
+-                                            <span>
+-                                                PERKESO:{' '}
+-                                                {displayValue(record.no_socso)}
+-                                            </span>
+-                                        </div>
+-                                    </div>
+-                                ))
+-                            ) : (
+-                                <EmptyRecords label="payroll" />
+-                            )}
+-                        </CardContent>
+-                    </Card>
++                                    ))
++                                ) : (
++                                    <EmptyRecords label="payroll" />
++                                )}
++                            </CardContent>
++                        </Card>
++                    )}
+                 </div>
+             </div>
+         </>
+diff --git a/resources/js/pages/dashboard.tsx b/resources/js/pages/dashboard.tsx
+index 7dd6249..fd7d1e3 100644
+--- a/resources/js/pages/dashboard.tsx
++++ b/resources/js/pages/dashboard.tsx
+@@ -1,4 +1,4 @@
+-import { Head, Link } from '@inertiajs/react';
++import { Head, Link, usePage } from '@inertiajs/react';
+ import {
+     ArrowRight,
+     Banknote,
+@@ -20,16 +20,19 @@ import {
+     CardHeader,
+     CardTitle,
+ } from '@/components/ui/card';
++import { hasPermission } from '@/lib/permissions';
++import type { Auth, Permission } from '@/types';
+ 
+-type Statistics = {
+-    pekerja: number;
+-    jawatan: number;
+-    kehadiran: number;
+-    cuti: number;
+-    kerja_lebih_masa: number;
+-    payroll: number;
+-    laporan_bulanan: number;
+-};
++type StatisticKey =
++    | 'pekerja'
++    | 'jawatan'
++    | 'kehadiran'
++    | 'cuti'
++    | 'kerja_lebih_masa'
++    | 'payroll'
++    | 'laporan_bulanan';
++
++type Statistics = Partial<Record<StatisticKey, number>>;
+ 
+ type AttendanceRecord = {
+     id: number;
+@@ -57,12 +60,13 @@ type DashboardProps = {
+ };
+ 
+ type StatisticCard = {
+-    key: keyof Statistics;
++    key: StatisticKey;
+     title: string;
+     description: string;
+     href: string;
+     icon: LucideIcon;
+     iconClassName: string;
++    permission: Permission;
+ };
+ 
+ const statisticCards: StatisticCard[] = [
+@@ -73,6 +77,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/pekerja',
+         icon: UsersRound,
+         iconClassName: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
++        permission: 'employees.view',
+     },
+     {
+         key: 'jawatan',
+@@ -81,6 +86,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/jawatan',
+         icon: BriefcaseBusiness,
+         iconClassName: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
++        permission: 'positions.view',
+     },
+     {
+         key: 'kehadiran',
+@@ -90,6 +96,7 @@ const statisticCards: StatisticCard[] = [
+         icon: CalendarCheck2,
+         iconClassName:
+             'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
++        permission: 'attendance.view',
+     },
+     {
+         key: 'cuti',
+@@ -98,6 +105,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/cuti',
+         icon: CalendarDays,
+         iconClassName: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
++        permission: 'leave.view',
+     },
+     {
+         key: 'kerja_lebih_masa',
+@@ -106,6 +114,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/kerja-lebih-masa',
+         icon: Clock3,
+         iconClassName: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
++        permission: 'overtime.view',
+     },
+     {
+         key: 'payroll',
+@@ -114,6 +123,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/payroll',
+         icon: Banknote,
+         iconClassName: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
++        permission: 'payroll.view',
+     },
+     {
+         key: 'laporan_bulanan',
+@@ -122,6 +132,7 @@ const statisticCards: StatisticCard[] = [
+         href: '/laporan-bulanan',
+         icon: FileText,
+         iconClassName: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
++        permission: 'reports.view',
+     },
+ ];
+ 
+@@ -161,6 +172,11 @@ export default function Dashboard({
+     recentAttendance,
+     recentLeave,
+ }: DashboardProps) {
++    const { auth } = usePage<{ auth: Auth }>().props;
++    const visibleStatisticCards = statisticCards.filter((card) =>
++        hasPermission(auth, card.permission),
++    );
++
+     return (
+         <>
+             <Head title="Dashboard" />
+@@ -181,7 +197,7 @@ export default function Dashboard({
+                 </div>
+ 
+                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+-                    {statisticCards.map((item) => {
++                    {visibleStatisticCards.map((item) => {
+                         const Icon = item.icon;
+ 
+                         return (
+@@ -197,9 +213,9 @@ export default function Dashboard({
+                                                 {item.title}
+                                             </CardDescription>
+                                             <CardTitle className="text-3xl tabular-nums">
+-                                                {statistics[
+-                                                    item.key
+-                                                ].toLocaleString('ms-MY')}
++                                                {(
++                                                    statistics[item.key] ?? 0
++                                                ).toLocaleString('ms-MY')}
+                                             </CardTitle>
+                                         </div>
+                                         <div
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+new file mode 100644
+index 0000000..9ecf93e
+--- /dev/null
++++ b/resources/js/pages/users/index.tsx
+@@ -0,0 +1,471 @@
++import { Head, router, useForm } from '@inertiajs/react';
++import {
++    CheckCircle2,
++    KeyRound,
++    Save,
++    Search,
++    ShieldCheck,
++    UserCog,
++    UsersRound,
++} from 'lucide-react';
++import { useEffect, useState } from 'react';
++import type { FormEvent } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++import type { Permission, UserRole } from '@/types';
++
++type ManagedUser = {
++    id: number;
++    name: string;
++    email: string;
++    role: UserRole;
++    role_label: string;
++    email_verified_at: string | null;
++    created_at: string;
++    is_current_user: boolean;
++};
++
++type PaginationLink = {
++    url: string | null;
++    label: string;
++    active: boolean;
++};
++
++type RoleOption = {
++    value: UserRole;
++    label: string;
++    description: string;
++    permissions: Permission[];
++};
++
++type UserManagementProps = {
++    users: {
++        data: ManagedUser[];
++        current_page: number;
++        last_page: number;
++        from: number | null;
++        to: number | null;
++        total: number;
++        links: PaginationLink[];
++    };
++    filters: {
++        search?: string;
++    };
++    roleCounts: Record<UserRole, number>;
++    roleOptions: RoleOption[];
++};
++
++const permissionLabels: Record<Permission, string> = {
++    'dashboard.view': 'Dashboard',
++    'employees.view': 'Pekerja',
++    'positions.view': 'Jawatan',
++    'attendance.view': 'Kehadiran',
++    'leave.view': 'Cuti',
++    'overtime.view': 'Kerja Lebih Masa',
++    'payroll.view': 'Payroll',
++    'reports.view': 'Laporan Bulanan',
++    'users.manage': 'Pengurusan Pengguna',
++};
++
++const roleStyles: Record<UserRole, string> = {
++    super_admin:
++        'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
++    hr_admin:
++        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
++    viewer: 'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
++};
++
++function formatDate(value: string): string {
++    const parts = value.slice(0, 10).split('-');
++
++    if (parts.length !== 3) {
++        return value;
++    }
++
++    return `${parts[2]}/${parts[1]}/${parts[0]}`;
++}
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++function RoleEditor({
++    user,
++    roleOptions,
++}: {
++    user: ManagedUser;
++    roleOptions: RoleOption[];
++}) {
++    const { data, setData, patch, processing, errors, recentlySuccessful } =
++        useForm<{ role: UserRole }>({
++            role: user.role,
++        });
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++
++        patch(`/pengguna/${user.id}/role`, {
++            preserveScroll: true,
++        });
++    };
++
++    if (user.is_current_user) {
++        return (
++            <div className="space-y-1">
++                <Badge variant="outline" className={roleStyles[user.role]}>
++                    {user.role_label}
++                </Badge>
++                <p className="text-xs text-muted-foreground">Akaun anda</p>
++            </div>
++        );
++    }
++
++    return (
++        <form onSubmit={submit} className="space-y-2">
++            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
++                <Select
++                    value={data.role}
++                    onValueChange={(value) =>
++                        setData('role', value as UserRole)
++                    }
++                    disabled={processing}
++                >
++                    <SelectTrigger
++                        className="w-full min-w-44 sm:w-48"
++                        aria-label={`Role untuk ${user.name}`}
++                    >
++                        <SelectValue />
++                    </SelectTrigger>
++                    <SelectContent align="end">
++                        {roleOptions.map((role) => (
++                            <SelectItem key={role.value} value={role.value}>
++                                {role.label}
++                            </SelectItem>
++                        ))}
++                    </SelectContent>
++                </Select>
++                <Button
++                    type="submit"
++                    size="sm"
++                    variant="outline"
++                    disabled={processing || data.role === user.role}
++                >
++                    <Save />
++                    Simpan
++                </Button>
++            </div>
++            {errors.role && (
++                <p className="text-xs text-destructive">{errors.role}</p>
++            )}
++            {recentlySuccessful && (
++                <p className="flex items-center gap-1 text-xs text-emerald-600">
++                    <CheckCircle2 className="size-3.5" />
++                    Berjaya dikemas kini
++                </p>
++            )}
++        </form>
++    );
++}
++
++export default function UserManagement({
++    users,
++    filters,
++    roleCounts,
++    roleOptions,
++}: UserManagementProps) {
++    const [search, setSearch] = useState(filters.search ?? '');
++
++    useEffect(() => {
++        if (search === (filters.search ?? '')) {
++            return;
++        }
++
++        const timer = window.setTimeout(() => {
++            router.get(
++                '/pengguna',
++                { search },
++                {
++                    preserveState: true,
++                    preserveScroll: true,
++                    replace: true,
++                },
++            );
++        }, 450);
++
++        return () => window.clearTimeout(timer);
++    }, [filters.search, search]);
++
++    const goToPage = (url: string | null) => {
++        if (!url) {
++            return;
++        }
++
++        const page = new URL(url, window.location.origin).searchParams.get(
++            'page',
++        );
++
++        router.get(
++            '/pengguna',
++            { search, page },
++            {
++                preserveState: true,
++                preserveScroll: true,
++                replace: true,
++            },
++        );
++    };
++
++    return (
++        <>
++            <Head title="Roles & Permissions" />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                    <div className="space-y-2">
++                        <HeadingSmall
++                            title="Roles & Permissions"
++                            description="Urus tahap akses pengguna kepada modul IBCO HR Solutions."
++                        />
++                        <Badge
++                            variant="secondary"
++                            className="gap-1.5 font-normal"
++                        >
++                            <ShieldCheck className="size-3.5" />
++                            Database sistem: ibco-hr-solutions
++                        </Badge>
++                    </div>
++
++                    <div className="relative w-full lg:max-w-sm">
++                        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                        <Input
++                            value={search}
++                            onChange={(event) => setSearch(event.target.value)}
++                            placeholder="Cari nama atau e-mel..."
++                            className="pl-9"
++                            aria-label="Cari pengguna"
++                        />
++                    </div>
++                </div>
++
++                <div className="grid gap-4 md:grid-cols-3">
++                    {roleOptions.map((role) => (
++                        <Card key={role.value} className="gap-4">
++                            <CardHeader className="flex-row items-start justify-between">
++                                <div className="space-y-1.5">
++                                    <CardTitle className="text-base">
++                                        {role.label}
++                                    </CardTitle>
++                                    <CardDescription>
++                                        {role.description}
++                                    </CardDescription>
++                                </div>
++                                <div className="rounded-lg bg-primary/10 p-2.5 text-primary">
++                                    {role.value === 'super_admin' ? (
++                                        <ShieldCheck className="size-5" />
++                                    ) : role.value === 'hr_admin' ? (
++                                        <UserCog className="size-5" />
++                                    ) : (
++                                        <UsersRound className="size-5" />
++                                    )}
++                                </div>
++                            </CardHeader>
++                            <CardContent className="space-y-3">
++                                <p className="text-3xl font-semibold tabular-nums">
++                                    {(
++                                        roleCounts[role.value] ?? 0
++                                    ).toLocaleString('ms-MY')}
++                                </p>
++                                <div className="flex flex-wrap gap-1.5">
++                                    {role.permissions.map((permission) => (
++                                        <Badge
++                                            key={permission}
++                                            variant="outline"
++                                            className="font-normal"
++                                        >
++                                            {permissionLabels[permission]}
++                                        </Badge>
++                                    ))}
++                                </div>
++                            </CardContent>
++                        </Card>
++                    ))}
++                </div>
++
++                <Card className="gap-0 overflow-hidden">
++                    <CardHeader className="border-b">
++                        <CardTitle className="flex items-center gap-2">
++                            <KeyRound className="size-5 text-muted-foreground" />
++                            Senarai Pengguna
++                        </CardTitle>
++                        <CardDescription>
++                            Pengguna baharu menerima role Viewer / Manager
++                            secara automatik.
++                        </CardDescription>
++                    </CardHeader>
++
++                    <div className="hidden overflow-x-auto md:block">
++                        <Table>
++                            <TableHeader className="bg-muted/60">
++                                <TableRow>
++                                    <TableHead>Pengguna</TableHead>
++                                    <TableHead>Status E-mel</TableHead>
++                                    <TableHead>Tarikh Daftar</TableHead>
++                                    <TableHead className="min-w-72">
++                                        Role
++                                    </TableHead>
++                                </TableRow>
++                            </TableHeader>
++                            <TableBody>
++                                {users.data.length > 0 ? (
++                                    users.data.map((user) => (
++                                        <TableRow key={user.id}>
++                                            <TableCell>
++                                                <p className="font-medium">
++                                                    {user.name}
++                                                </p>
++                                                <p className="text-xs text-muted-foreground">
++                                                    {user.email}
++                                                </p>
++                                            </TableCell>
++                                            <TableCell>
++                                                <Badge
++                                                    variant={
++                                                        user.email_verified_at
++                                                            ? 'secondary'
++                                                            : 'outline'
++                                                    }
++                                                >
++                                                    {user.email_verified_at
++                                                        ? 'Disahkan'
++                                                        : 'Belum disahkan'}
++                                                </Badge>
++                                            </TableCell>
++                                            <TableCell>
++                                                {formatDate(user.created_at)}
++                                            </TableCell>
++                                            <TableCell>
++                                                <RoleEditor
++                                                    user={user}
++                                                    roleOptions={roleOptions}
++                                                />
++                                            </TableCell>
++                                        </TableRow>
++                                    ))
++                                ) : (
++                                    <TableRow>
++                                        <TableCell
++                                            colSpan={4}
++                                            className="h-28 text-center text-muted-foreground"
++                                        >
++                                            Tiada pengguna ditemui.
++                                        </TableCell>
++                                    </TableRow>
++                                )}
++                            </TableBody>
++                        </Table>
++                    </div>
++
++                    <CardContent className="space-y-3 py-4 md:hidden">
++                        {users.data.length > 0 ? (
++                            users.data.map((user) => (
++                                <div
++                                    key={user.id}
++                                    className="space-y-4 rounded-lg border p-4"
++                                >
++                                    <div>
++                                        <p className="font-medium">
++                                            {user.name}
++                                        </p>
++                                        <p className="text-sm break-all text-muted-foreground">
++                                            {user.email}
++                                        </p>
++                                    </div>
++                                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
++                                        <Badge variant="outline">
++                                            {user.email_verified_at
++                                                ? 'E-mel disahkan'
++                                                : 'E-mel belum disahkan'}
++                                        </Badge>
++                                        <span>
++                                            Daftar {formatDate(user.created_at)}
++                                        </span>
++                                    </div>
++                                    <RoleEditor
++                                        user={user}
++                                        roleOptions={roleOptions}
++                                    />
++                                </div>
++                            ))
++                        ) : (
++                            <p className="py-8 text-center text-sm text-muted-foreground">
++                                Tiada pengguna ditemui.
++                            </p>
++                        )}
++                    </CardContent>
++                </Card>
++
++                <div className="flex flex-col gap-3 rounded-xl border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
++                    <p className="text-sm text-muted-foreground">
++                        Menunjukkan {users.from ?? 0} hingga {users.to ?? 0}{' '}
++                        daripada {users.total} pengguna
++                    </p>
++
++                    {users.last_page > 1 && (
++                        <div className="flex flex-wrap gap-1">
++                            {users.links.map((link, index) => (
++                                <button
++                                    key={`${link.label}-${index}`}
++                                    type="button"
++                                    disabled={!link.url}
++                                    onClick={() => goToPage(link.url)}
++                                    className={`min-w-9 rounded-md border px-3 py-1.5 text-sm transition-colors ${
++                                        link.active
++                                            ? 'border-primary bg-primary text-primary-foreground'
++                                            : 'border-input bg-background hover:bg-accent'
++                                    } disabled:pointer-events-none disabled:opacity-40`}
++                                >
++                                    {paginationLabel(link.label)}
++                                </button>
++                            ))}
++                        </div>
++                    )}
++                </div>
++            </div>
++        </>
++    );
++}
++
++UserManagement.layout = {
++    breadcrumbs: [
++        {
++            title: 'Roles & Permissions',
++            href: '/pengguna',
++        },
++    ],
++};
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index bfda3af..3a4afef 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -1,7 +1,21 @@
++export type UserRole = 'super_admin' | 'hr_admin' | 'viewer';
++
++export type Permission =
++    | 'dashboard.view'
++    | 'employees.view'
++    | 'positions.view'
++    | 'attendance.view'
++    | 'leave.view'
++    | 'overtime.view'
++    | 'payroll.view'
++    | 'reports.view'
++    | 'users.manage';
++
+ export type User = {
+     id: number;
+     name: string;
+     email: string;
++    role: UserRole;
+     avatar?: string;
+     email_verified_at: string | null;
+     two_factor_enabled?: boolean;
+@@ -12,6 +26,7 @@ export type User = {
+ 
+ export type Auth = {
+     user: User;
++    permissions: Permission[];
+ };
+ 
+ /* @chisel-passkeys */
+diff --git a/routes/web.php b/routes/web.php
+index 9d5e08e..16f689f 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -8,23 +8,48 @@ use App\Http\Controllers\MaklumatOtController;
+ use App\Http\Controllers\MaklumatPayrollController;
+ use App\Http\Controllers\MaklumatPekerjaController;
+ use App\Http\Controllers\ReportBulananController;
++use App\Http\Controllers\UserManagementController;
+ use Illuminate\Support\Facades\Route;
+ 
+ Route::inertia('/', 'welcome')->name('home');
+ 
+ Route::middleware(['auth', 'verified'])->group(function () {
+-    Route::get('dashboard', [DashboardController::class, 'index'])->name('dashboard');
++    Route::get('dashboard', [DashboardController::class, 'index'])
++        ->middleware('permission:dashboard.view')
++        ->name('dashboard');
+ 
+-    Route::get('pekerja', [MaklumatPekerjaController::class, 'index'])->name('pekerja.index');
+-    Route::get('pekerja/{id}', [MaklumatPekerjaController::class, 'show'])
+-        ->whereNumber('id')
+-        ->name('pekerja.show');
+-    Route::get('jawatan', [MaklumatJawatanController::class, 'index'])->name('jawatan.index');
+-    Route::get('kehadiran', [MaklumatKehadiranController::class, 'index'])->name('kehadiran.index');
+-    Route::get('cuti', [MaklumatCutiController::class, 'index'])->name('cuti.index');
+-    Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])->name('kerja-lebih-masa.index');
+-    Route::get('payroll', [MaklumatPayrollController::class, 'index'])->name('payroll.index');
+-    Route::get('laporan-bulanan', [ReportBulananController::class, 'index'])->name('laporan-bulanan.index');
++    Route::middleware('permission:employees.view')->group(function () {
++        Route::get('pekerja', [MaklumatPekerjaController::class, 'index'])->name('pekerja.index');
++        Route::get('pekerja/{id}', [MaklumatPekerjaController::class, 'show'])
++            ->whereNumber('id')
++            ->name('pekerja.show');
++    });
++
++    Route::get('jawatan', [MaklumatJawatanController::class, 'index'])
++        ->middleware('permission:positions.view')
++        ->name('jawatan.index');
++    Route::get('kehadiran', [MaklumatKehadiranController::class, 'index'])
++        ->middleware('permission:attendance.view')
++        ->name('kehadiran.index');
++    Route::get('cuti', [MaklumatCutiController::class, 'index'])
++        ->middleware('permission:leave.view')
++        ->name('cuti.index');
++    Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])
++        ->middleware('permission:overtime.view')
++        ->name('kerja-lebih-masa.index');
++    Route::get('payroll', [MaklumatPayrollController::class, 'index'])
++        ->middleware('permission:payroll.view')
++        ->name('payroll.index');
++    Route::get('laporan-bulanan', [ReportBulananController::class, 'index'])
++        ->middleware('permission:reports.view')
++        ->name('laporan-bulanan.index');
++
++    Route::get('pengguna', [UserManagementController::class, 'index'])
++        ->middleware('permission:users.manage')
++        ->name('users.index');
++    Route::patch('pengguna/{user}/role', [UserManagementController::class, 'updateRole'])
++        ->middleware('permission:users.manage')
++        ->name('users.role.update');
+ });
+ 
+ require __DIR__ . '/settings.php';
+diff --git a/tests/Feature/RolePermissionsTest.php b/tests/Feature/RolePermissionsTest.php
+new file mode 100644
+index 0000000..d99ab6f
+--- /dev/null
++++ b/tests/Feature/RolePermissionsTest.php
+@@ -0,0 +1,74 @@
++<?php
++
++use App\Enums\UserRole;
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++
++uses(RefreshDatabase::class);
++
++test('super admin can open user management', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++
++    $this->actingAs($superAdmin)
++        ->get(route('users.index'))
++        ->assertOk();
++});
++
++test('hr admin and viewer cannot open user management', function (UserRole $role) {
++    $user = User::factory()->create(['role' => $role]);
++
++    $this->actingAs($user)
++        ->get(route('users.index'))
++        ->assertForbidden();
++})->with([
++    'HR Admin' => UserRole::HrAdmin,
++    'Viewer / Manager' => UserRole::Viewer,
++]);
++
++test('super admin can update another user role', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $user = User::factory()->create();
++
++    $this->actingAs($superAdmin)
++        ->patch(route('users.role.update', $user), [
++            'role' => UserRole::HrAdmin->value,
++        ])
++        ->assertRedirect();
++
++    expect($user->fresh()->resolvedRole())->toBe(UserRole::HrAdmin);
++});
++
++test('super admin cannot change their own role', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.index'))
++        ->patch(route('users.role.update', $superAdmin), [
++            'role' => UserRole::Viewer->value,
++        ])
++        ->assertRedirect(route('users.index'))
++        ->assertSessionHasErrors('role');
++
++    expect($superAdmin->fresh()->resolvedRole())->toBe(UserRole::SuperAdmin);
++});
++
++test('viewer cannot access payroll directly', function () {
++    $viewer = User::factory()->create();
++
++    $this->actingAs($viewer)
++        ->get(route('payroll.index'))
++        ->assertForbidden();
++});
++
++test('hr admin cannot manage user roles directly', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $user = User::factory()->create();
++
++    $this->actingAs($hrAdmin)
++        ->patch(route('users.role.update', $user), [
++            'role' => UserRole::SuperAdmin->value,
++        ])
++        ->assertForbidden();
++
++    expect($user->fresh()->resolvedRole())->toBe(UserRole::Viewer);
++});

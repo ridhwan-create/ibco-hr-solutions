@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Support\LeaveApprovalAlerts;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -35,12 +36,23 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
+        $user = $request->user();
+
         return [
             ...parent::share($request),
             'name' => config('app.name'),
             'auth' => [
-                'user' => $request->user(),
+                'user' => $user
+                    ? [
+                        ...$user->toArray(),
+                        'role' => $user->resolvedRole()->value,
+                        'roles' => $user->roleValues(),
+                    ]
+                    : null,
+                'permissions' => $user?->permissions() ?? [],
             ],
+            'leaveApprovalAlerts' => fn () => app(LeaveApprovalAlerts::class)
+                ->summarizeFor($user),
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];
     }

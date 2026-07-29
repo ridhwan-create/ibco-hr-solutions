@@ -1,0 +1,12 @@
+diff --git a/app/Models/UserRoleAssignment.php b/app/Models/UserRoleAssignment.php
+--- a/app/Models/UserRoleAssignment.php
++++ b/app/Models/UserRoleAssignment.php
+@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ class UserRoleAssignment extends Model
+ {
++    protected $table = 'user_roles';
++
+     protected $fillable = [
+         'user_id',
+         'role',

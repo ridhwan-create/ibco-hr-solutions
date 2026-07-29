@@ -1,0 +1,271 @@
+diff --git a/app/Http/Controllers/MaklumatKehadiranController.php b/app/Http/Controllers/MaklumatKehadiranController.php
+index f45a7b0..c919f92 100644
+--- a/app/Http/Controllers/MaklumatKehadiranController.php
++++ b/app/Http/Controllers/MaklumatKehadiranController.php
+@@ -2,14 +2,14 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Models\MaklumatKehadiran;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
+ use Inertia\Inertia;
++use Inertia\Response;
+ 
+ class MaklumatKehadiranController extends Controller
+ {
+-    public function index(Request $request)
++    public function index(Request $request): Response
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+@@ -44,52 +44,4 @@ class MaklumatKehadiranController extends Controller
+             'filters' => ['search' => $search],
+         ]);
+     }
+-
+-    /**
+-     * Show the form for creating a new resource.
+-     */
+-    public function create()
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Store a newly created resource in storage.
+-     */
+-    public function store(Request $request)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Display the specified resource.
+-     */
+-    public function show(MaklumatKehadiran $maklumatKehadiran)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Show the form for editing the specified resource.
+-     */
+-    public function edit(MaklumatKehadiran $maklumatKehadiran)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Update the specified resource in storage.
+-     */
+-    public function update(Request $request, MaklumatKehadiran $maklumatKehadiran)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Remove the specified resource from storage.
+-     */
+-    public function destroy(MaklumatKehadiran $maklumatKehadiran)
+-    {
+-        //
+-    }
+ }
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index f836c7b..0bad9c7 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -5,6 +5,7 @@ import {
+     CalendarCheck2,
+     CalendarDays,
+     Clock3,
++    Database,
+     FileText,
+     FolderGit2,
+     History,
+@@ -72,6 +73,12 @@ const attendanceNavItems: AuthorizedNavItem[] = [
+         icon: CalendarCheck2,
+         permission: 'attendance.view',
+     },
++    {
++        title: 'Kehadiran Asal',
++        href: '/kehadiran-asal',
++        icon: Database,
++        permission: 'attendance.view',
++    },
+     {
+         title: 'Cuti',
+         href: '/cuti',
+diff --git a/resources/js/pages/GeoAttendance/Index.tsx b/resources/js/pages/GeoAttendance/Index.tsx
+index d983eba..f2af158 100644
+--- a/resources/js/pages/GeoAttendance/Index.tsx
++++ b/resources/js/pages/GeoAttendance/Index.tsx
+@@ -1,4 +1,4 @@
+-import { Head, router, useForm } from '@inertiajs/react';
++import { Head, Link, router, useForm } from '@inertiajs/react';
+ import {
+     AlertCircle,
+     CalendarCheck2,
+@@ -639,12 +639,20 @@ export default function GeoAttendanceIndex({
+                             </Badge>
+                         </div>
+                     </div>
+-                    {canManage && (
+-                        <ManualAttendanceDialog
+-                            employees={employeeOptions}
+-                            offices={offices}
+-                        />
+-                    )}
++                    <div className="flex flex-wrap gap-2">
++                        <Button asChild variant="outline">
++                            <Link href="/kehadiran-asal">
++                                <Database />
++                                Kehadiran Asal (db_spp)
++                            </Link>
++                        </Button>
++                        {canManage && (
++                            <ManualAttendanceDialog
++                                employees={employeeOptions}
++                                offices={offices}
++                            />
++                        )}
++                    </div>
+                 </div>
+ 
+                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+diff --git a/resources/js/pages/MaklumatKehadiran/Index.tsx b/resources/js/pages/MaklumatKehadiran/Index.tsx
+index 9d55f5b..e458716 100644
+--- a/resources/js/pages/MaklumatKehadiran/Index.tsx
++++ b/resources/js/pages/MaklumatKehadiran/Index.tsx
+@@ -5,9 +5,10 @@ import type {
+ } from '@/components/records-index';
+ 
+ const config: RecordPageConfig = {
+-    title: 'Rekod Kehadiran',
+-    description: 'Rekod waktu masuk dan keluar pekerja.',
+-    routePath: '/kehadiran',
++    title: 'Kehadiran Asal (db_spp)',
++    description:
++        'Paparan rujukan baca sahaja bagi rekod waktu masuk dan keluar daripada sistem asal.',
++    routePath: '/kehadiran-asal',
+     searchPlaceholder: 'Cari nama, ID, pilihan jam atau catatan...',
+     columns: [
+         { key: 'employee_id', label: 'ID Pekerja' },
+@@ -24,5 +25,8 @@ export default function KehadiranIndex(props: RecordsIndexPageProps) {
+ }
+ 
+ KehadiranIndex.layout = {
+-    breadcrumbs: [{ title: 'Kehadiran', href: '/kehadiran' }],
++    breadcrumbs: [
++        { title: 'Masa & Kehadiran', href: '/kehadiran' },
++        { title: 'Kehadiran Asal (db_spp)', href: '/kehadiran-asal' },
++    ],
+ };
+diff --git a/routes/web.php b/routes/web.php
+index 2513e8a..d2f8cdc 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -7,6 +7,7 @@ use App\Http\Controllers\EmployeeUserImportController;
+ use App\Http\Controllers\GeoAttendanceController;
+ use App\Http\Controllers\MaklumatCutiController;
+ use App\Http\Controllers\MaklumatJawatanController;
++use App\Http\Controllers\MaklumatKehadiranController;
+ use App\Http\Controllers\MaklumatOtController;
+ use App\Http\Controllers\MaklumatPayrollController;
+ use App\Http\Controllers\MaklumatPekerjaController;
+@@ -70,6 +71,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
+     Route::get('kehadiran', [GeoAttendanceController::class, 'index'])
+         ->middleware('permission:attendance.view')
+         ->name('kehadiran.index');
++    Route::get('kehadiran-asal', [MaklumatKehadiranController::class, 'index'])
++        ->middleware('permission:attendance.view')
++        ->name('kehadiran.legacy');
+     Route::post('kehadiran/manual', [GeoAttendanceController::class, 'storeManual'])
+         ->middleware('permission:attendance.manage')
+         ->name('kehadiran.manual.store');
+diff --git a/tests/Feature/GeoAttendanceTest.php b/tests/Feature/GeoAttendanceTest.php
+index a884248..352dece 100644
+--- a/tests/Feature/GeoAttendanceTest.php
++++ b/tests/Feature/GeoAttendanceTest.php
+@@ -33,6 +33,22 @@ beforeEach(function () {
+         $table->string('nric')->nullable();
+         $table->boolean('rcd_enable')->default(true);
+     });
++
++    Schema::connection('ibco')->create('xpilihanjam', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('description')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    Schema::connection('ibco')->create('maklumatkehadiran', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('id_pekerja', 4)->nullable();
++        $table->string('pilihan_jam', 2)->nullable();
++        $table->dateTime('waktu_masuk')->nullable();
++        $table->dateTime('waktu_keluar')->nullable();
++        $table->string('catatan')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
+ });
+ 
+ afterEach(function () {
+@@ -209,12 +225,57 @@ test('attendance administration respects role permissions', function () {
+     $superAdmin = User::factory()->superAdmin()->create();
+ 
+     $this->actingAs($employeeUser)->get(route('kehadiran.index'))->assertForbidden();
++    $this->actingAs($employeeUser)->get(route('kehadiran.legacy'))->assertForbidden();
+     $this->actingAs($viewer)->get(route('kehadiran.index'))->assertOk();
++    $this->actingAs($viewer)->get(route('kehadiran.legacy'))->assertOk();
+     $this->actingAs($hrAdmin)->get(route('kehadiran.index'))->assertOk();
+     $this->actingAs($hrAdmin)->get(route('attendance-settings.index'))->assertForbidden();
+     $this->actingAs($superAdmin)->get(route('attendance-settings.index'))->assertOk();
+ });
+ 
++test('authorised user can view original attendance from db_spp using select queries only', function () {
++    $viewer = User::factory()->create(['role' => UserRole::Viewer]);
++    $employeeId = createGeoEmployee([
++        'employeeID' => 'EMP-LEGACY-01',
++        'nama' => 'Pekerja Rekod Asal',
++    ]);
++    $shiftId = DB::connection('ibco')->table('xpilihanjam')->insertGetId([
++        'description' => 'Waktu Pejabat',
++        'rcd_enable' => 1,
++    ]);
++
++    DB::connection('ibco')->table('maklumatkehadiran')->insert([
++        'id_pekerja' => (string) $employeeId,
++        'pilihan_jam' => (string) $shiftId,
++        'waktu_masuk' => '2026-07-28 08:05:00',
++        'waktu_keluar' => '2026-07-28 17:15:00',
++        'catatan' => 'Rekod sistem asal',
++        'rcd_enable' => 1,
++    ]);
++
++    $legacyQueries = [];
++
++    DB::listen(function (QueryExecuted $event) use (&$legacyQueries) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(trim($event->sql));
++        }
++    });
++
++    $this->actingAs($viewer)
++        ->get(route('kehadiran.legacy', ['search' => 'Rekod Asal']))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('MaklumatKehadiran/Index')
++            ->where('records.total', 1)
++            ->where('records.data.0.employee_id', 'EMP-LEGACY-01')
++            ->where('records.data.0.nama_pekerja', 'Pekerja Rekod Asal')
++            ->where('records.data.0.pilihan_jam', 'Waktu Pejabat')
++            ->where('records.data.0.catatan', 'Rekod sistem asal'));
++
++    expect($legacyQueries)->not->toBeEmpty();
++    expect($legacyQueries)->each->toStartWith('select');
++});
++
+ test('super admin can create office and employee link without writing to db_spp', function () {
+     $superAdmin = User::factory()->superAdmin()->create();
+     $employeeUser = User::factory()->employee()->create();

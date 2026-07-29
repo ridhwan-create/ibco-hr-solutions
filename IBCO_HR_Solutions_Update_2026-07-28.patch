@@ -1,0 +1,2070 @@
+diff --git a/.env.example b/.env.example
+index c0660ea143a7a23e6a182cbe42dbd7fc6e242b45..2a426287f001af8e4f0e32778995c32aeec1671a 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,4 +1,4 @@
+-APP_NAME=Laravel
++APP_NAME="IBCO HR Solutions"
+ APP_ENV=local
+ APP_KEY=
+ APP_DEBUG=true
+@@ -20,12 +20,12 @@ LOG_STACK=single
+ LOG_DEPRECATIONS_CHANNEL=null
+ LOG_LEVEL=debug
+ 
+-DB_CONNECTION=sqlite
+-# DB_HOST=127.0.0.1
+-# DB_PORT=3306
+-# DB_DATABASE=laravel
+-# DB_USERNAME=root
+-# DB_PASSWORD=
++DB_CONNECTION=mysql
++DB_HOST=127.0.0.1
++DB_PORT=3306
++DB_DATABASE=db_spp
++DB_USERNAME=root
++DB_PASSWORD=
+ 
+ SESSION_DRIVER=database
+ SESSION_LIFETIME=120
+diff --git a/README.md b/README.md
+index c2b283c11d82ae5ca7744c4191f3c89d06f761ad..9f3ac228e141ff6c0b0a6811ebb134e81dc5b658 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,40 @@
+-"# ibco-hr-solutions" 
++# IBCO HR Solutions
++
++Sistem pengurusan sumber manusia berasaskan Laravel, React, Inertia.js dan
++database MySQL sedia ada `db_spp`.
++
++## Dashboard
++
++Dashboard memaparkan jumlah rekod aktif bagi setiap modul serta lima rekod
++kehadiran dan permohonan cuti terkini. Semua kad ringkasan boleh digunakan
++untuk membuka halaman index modul berkaitan.
++
++## Modul index
++
++- Pekerja
++- Jawatan
++- Kehadiran
++- Cuti
++- Kerja lebih masa
++- Payroll
++- Laporan bulanan
++
++Semua modul index menggunakan carian, pagination dan hanya memaparkan rekod
++aktif (`rcd_enable = 1`). Paparan ini tidak mengubah rekod dalam database asal.
++
++## Sambungan database
++
++Salin `.env.example` kepada `.env`, kemudian isi maklumat sambungan MySQL:
++
++```env
++DB_CONNECTION=mysql
++DB_HOST=127.0.0.1
++DB_PORT=3306
++DB_DATABASE=db_spp
++DB_USERNAME=root
++DB_PASSWORD=
++```
++
++Gunakan akaun database dengan akses minimum yang diperlukan. Tujuh paparan
++index di atas hanya membaca jadual HR lama; jadual rangka kerja Laravel seperti
++pengguna, sesi, cache dan queue mungkin masih memerlukan akses tulis.
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..888cef9961bf35a63fb6f88c8b97feaa9e51ed99
+--- /dev/null
++++ b/app/Http/Controllers/DashboardController.php
+@@ -0,0 +1,63 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
++
++class DashboardController extends Controller
++{
++    public function index()
++    {
++        $statistics = [
++            'pekerja' => DB::table('maklumatpekerja')->where('rcd_enable', 1)->count(),
++            'jawatan' => DB::table('maklumatjawatan')->where('rcd_enable', 1)->count(),
++            'kehadiran' => DB::table('maklumatkehadiran')->where('rcd_enable', 1)->count(),
++            'cuti' => DB::table('maklumatcuti')->where('rcd_enable', 1)->count(),
++            'kerja_lebih_masa' => DB::table('maklumatot')->where('rcd_enable', 1)->count(),
++            'payroll' => DB::table('maklumatpayroll')->where('rcd_enable', 1)->count(),
++            'laporan_bulanan' => DB::table('reportbulanan')->where('rcd_enable', 1)->count(),
++        ];
++
++        $recentAttendance = DB::table('maklumatkehadiran as k')
++            ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
++            ->where('k.rcd_enable', 1)
++            ->select([
++                'k.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'k.waktu_masuk',
++                'k.waktu_keluar',
++                'k.catatan',
++            ])
++            ->orderByDesc('k.waktu_masuk')
++            ->orderByDesc('k.id')
++            ->limit(5)
++            ->get();
++
++        $recentLeave = DB::table('maklumatcuti as c')
++            ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
++            ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
++            ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
++            ->where('c.rcd_enable', 1)
++            ->select([
++                'c.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'sc.description as jenis_cuti',
++                'c.date_mulacuti as tarikh_mula',
++                'c.date_tamatcuti as tarikh_tamat',
++                'st.description as status_permohonan',
++            ])
++            ->orderByDesc('c.date_mulacuti')
++            ->orderByDesc('c.id')
++            ->limit(5)
++            ->get();
++
++        return Inertia::render('dashboard', [
++            'statistics' => $statistics,
++            'recentAttendance' => $recentAttendance,
++            'recentLeave' => $recentLeave,
++        ]);
++    }
++}
+diff --git a/app/Http/Controllers/MaklumatCutiController.php b/app/Http/Controllers/MaklumatCutiController.php
+index c725545e622ac3b69fe1b8a4faf32325ec539ae4..017e884c93f4d30385e220ab84356becf9b44788 100644
+--- a/app/Http/Controllers/MaklumatCutiController.php
++++ b/app/Http/Controllers/MaklumatCutiController.php
+@@ -4,15 +4,49 @@
+ 
+ use App\Models\MaklumatCuti;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class MaklumatCutiController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatcuti as c')
++            ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
++            ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
++            ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
++            ->where('c.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('sc.description', 'like', "%{$search}%")
++                        ->orWhere('st.description', 'like', "%{$search}%")
++                        ->orWhere('c.title', 'like', "%{$search}%")
++                        ->orWhere('c.tahun', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'c.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'sc.description as jenis_cuti',
++                'c.date_mulacuti as tarikh_mula',
++                'c.date_tamatcuti as tarikh_tamat',
++                'c.bil_cutidipohon as bilangan_hari',
++                'st.description as status_permohonan',
++            ])
++            ->orderByDesc('c.date_mulacuti')
++            ->orderByDesc('c.id')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('MaklumatCuti/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatJawatanController.php b/app/Http/Controllers/MaklumatJawatanController.php
+index 8740cc1fa957580aa8ccedd47b72e1e63a7cd95d..17d17082997c7e97ec33621decd6363331b8a929 100644
+--- a/app/Http/Controllers/MaklumatJawatanController.php
++++ b/app/Http/Controllers/MaklumatJawatanController.php
+@@ -4,15 +4,46 @@
+ 
+ use App\Models\MaklumatJawatan;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class MaklumatJawatanController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatjawatan as j')
++            ->leftJoin('maklumatpekerja as p', 'j.id_pekerja', '=', 'p.id')
++            ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++            ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
++            ->where('j.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('j.jawatan', 'like', "%{$search}%")
++                        ->orWhere('d.description', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'j.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'd.description as jabatan',
++                'j.jawatan',
++                'j.salary as gaji_asas',
++                'j.date_lapordiri as tarikh_lapor_diri',
++                'b.description as bank',
++            ])
++            ->orderBy('p.nama')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('MaklumatJawatan/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatKehadiranController.php b/app/Http/Controllers/MaklumatKehadiranController.php
+index 0e5e4c5f9bc4f546028c76070b620b84d6a6900c..3d05e1b37069c91d3b01cce2317a94320a50c9e2 100644
+--- a/app/Http/Controllers/MaklumatKehadiranController.php
++++ b/app/Http/Controllers/MaklumatKehadiranController.php
+@@ -4,15 +4,45 @@
+ 
+ use App\Models\MaklumatKehadiran;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class MaklumatKehadiranController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatkehadiran as k')
++            ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
++            ->leftJoin('xpilihanjam as pj', 'k.pilihan_jam', '=', 'pj.id')
++            ->where('k.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('pj.description', 'like', "%{$search}%")
++                        ->orWhere('k.catatan', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'k.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'pj.description as pilihan_jam',
++                'k.waktu_masuk',
++                'k.waktu_keluar',
++                'k.catatan',
++            ])
++            ->orderByDesc('k.waktu_masuk')
++            ->orderByDesc('k.id')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('MaklumatKehadiran/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatOtController.php b/app/Http/Controllers/MaklumatOtController.php
+index fdf49838b01d80a3fb652bd33d084f1bf200dd05..b61e674a6720c650fb16cce1fa3b7350b7b3144e 100644
+--- a/app/Http/Controllers/MaklumatOtController.php
++++ b/app/Http/Controllers/MaklumatOtController.php
+@@ -4,15 +4,46 @@
+ 
+ use App\Models\MaklumatOt;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class MaklumatOtController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatot as ot')
++            ->leftJoin('maklumatpekerja as p', 'ot.id_pekerja', '=', 'p.id')
++            ->leftJoin('xjenisot as jot', 'ot.jenis_ot', '=', 'jot.id')
++            ->where('ot.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('jot.description', 'like', "%{$search}%")
++                        ->orWhere('ot.catatan', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'ot.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'jot.description as jenis_ot',
++                'ot.tarikh',
++                'ot.waktu_masuk',
++                'ot.waktu_keluar',
++                'ot.catatan',
++            ])
++            ->orderByDesc('ot.tarikh')
++            ->orderByDesc('ot.id')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('MaklumatOt/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatPayrollController.php b/app/Http/Controllers/MaklumatPayrollController.php
+index 50817948c0787f3e8246a5d47b7e49f65d92bf99..542f00540e5d89324112068f49de5becea3989b4 100644
+--- a/app/Http/Controllers/MaklumatPayrollController.php
++++ b/app/Http/Controllers/MaklumatPayrollController.php
+@@ -4,15 +4,45 @@
+ 
+ use App\Models\MaklumatPayroll;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class MaklumatPayrollController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatpayroll as py')
++            ->where('py.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('py.nama', 'like', "%{$search}%")
++                        ->orWhere('py.employeeID', 'like', "%{$search}%")
++                        ->orWhere('py.nric', 'like', "%{$search}%")
++                        ->orWhere('py.bulan', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'py.id',
++                'py.employeeID as employee_id',
++                'py.nama',
++                'py.nric',
++                'py.pay_period as tempoh_gaji',
++                'py.bulan',
++                'py.no_kwsp',
++                'py.no_socso',
++                'py.no_akaun',
++            ])
++            ->orderByDesc('py.pay_period')
++            ->orderBy('py.nama')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('MaklumatPayroll/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index a67e2c4ff3a6efb113113908dc169c0fa5fb1d85..e5132eda73269b187b7753a8aab55e682ffaf6ae 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -4,31 +4,44 @@
+ 
+ use App\Models\MaklumatPekerja;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
+ use Inertia\Inertia;
+ 
+ class MaklumatPekerjaController extends Controller
+ {
+     public function index(Request $request)
+     {
+-        $query = MaklumatPekerja::where('rcd_enable', 1);
+-
+-        // Fungsi carian 
+-        if ($request->has('search') && $request->search != '') {
+-            $search = $request->search;
+-            $query->where(function ($q) use ($search) {
+-                $q->where('nama', 'like', "%{$search}%")
+-                    ->orWhere('employeeID', 'like', "%{$search}%")
+-                    ->orWhere('nric', 'like', "%{$search}%");
+-            });
+-        }
+-
+-        $pekerja = $query->latest('id')->paginate(10)->withQueryString();
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('maklumatpekerja as p')
++            ->leftJoin('xstatus as s', 'p.status', '=', 's.id')
++            ->where('p.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('p.nric', 'like', "%{$search}%")
++                        ->orWhere('p.email', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'p.id',
++                'p.employeeID as employee_id',
++                'p.nama',
++                'p.nric',
++                'p.notel as no_telefon',
++                'p.email',
++                's.description as status',
++            ])
++            ->orderBy('p.nama')
++            ->paginate(15)
++            ->withQueryString();
+ 
+         return Inertia::render('MaklumatPekerja/Index', [
+-            'pekerja' => $pekerja,
++            'records' => $records,
+             'filters' => [
+-                'search' => $request->search ?? ''
+-            ]
++                'search' => $search,
++            ],
+         ]);
+     }
+ 
+@@ -45,7 +58,6 @@ public function store(Request $request)
+             'nama' => 'required|string|max:255',
+             'email' => 'nullable|email|max:255',
+             'notel' => 'nullable|string|max:20',
+-            // tambah validasi lain mengikut keperluan
+         ]);
+ 
+         $validated['crt_dt'] = now();
+@@ -59,8 +71,9 @@ public function store(Request $request)
+     public function edit($id)
+     {
+         $pekerja = MaklumatPekerja::findOrFail($id);
++
+         return Inertia::render('MaklumatPekerja/Edit', [
+-            'pekerja' => $pekerja
++            'pekerja' => $pekerja,
+         ]);
+     }
+ 
+@@ -88,7 +101,6 @@ public function destroy($id)
+     {
+         $pekerja = MaklumatPekerja::findOrFail($id);
+ 
+-        // Soft delete cara manual
+         $pekerja->update(['rcd_enable' => 0]);
+ 
+         return redirect()->route('pekerja.index')->with('toast', ['type' => 'success', 'message' => 'Pekerja berjaya dipadam!']);
+diff --git a/app/Http/Controllers/ReportBulananController.php b/app/Http/Controllers/ReportBulananController.php
+index 997e6e82513bad78bc8d3ad9d49849e37da1bbe5..9358108fae7a5f904adbcd6e8aa11b2212779554 100644
+--- a/app/Http/Controllers/ReportBulananController.php
++++ b/app/Http/Controllers/ReportBulananController.php
+@@ -4,15 +4,42 @@
+ 
+ use App\Models\ReportBulanan;
+ use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Inertia\Inertia;
+ 
+ class ReportBulananController extends Controller
+ {
+-    /**
+-     * Display a listing of the resource.
+-     */
+-    public function index()
++    public function index(Request $request)
+     {
+-        //
++        $search = $request->string('search')->trim()->toString();
++
++        $records = DB::table('reportbulanan as r')
++            ->leftJoin('maklumatpekerja as p', 'r.id_pekerja', '=', 'p.id')
++            ->where('r.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('p.nama', 'like', "%{$search}%")
++                        ->orWhere('p.employeeID', 'like', "%{$search}%")
++                        ->orWhere('r.laporan', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'r.id',
++                'p.employeeID as employee_id',
++                'p.nama as nama_pekerja',
++                'r.date_mula as tarikh_mula',
++                'r.date_akhir as tarikh_akhir',
++                'r.laporan',
++            ])
++            ->orderByDesc('r.date_mula')
++            ->orderByDesc('r.id')
++            ->paginate(15)
++            ->withQueryString();
++
++        return Inertia::render('ReportBulanan/Index', [
++            'records' => $records,
++            'filters' => ['search' => $search],
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Models/MaklumatCuti.php b/app/Models/MaklumatCuti.php
+index 8e41775250da5a553cb9b499d3debc947c9c24b2..aaf511f90a02054c7a88a1624f7d0632019447a6 100644
+--- a/app/Models/MaklumatCuti.php
++++ b/app/Models/MaklumatCuti.php
+@@ -6,5 +6,7 @@
+ 
+ class MaklumatCuti extends Model
+ {
+-    //
++    protected $table = 'maklumatcuti';
++
++    public $timestamps = false;
+ }
+diff --git a/app/Models/MaklumatJawatan.php b/app/Models/MaklumatJawatan.php
+index 731b7aea1892f9f62043cfae9af15ccf7d6fd250..a5e9e97e190142f82afd6d7a59613afcf2f80397 100644
+--- a/app/Models/MaklumatJawatan.php
++++ b/app/Models/MaklumatJawatan.php
+@@ -6,5 +6,7 @@
+ 
+ class MaklumatJawatan extends Model
+ {
+-    //
++    protected $table = 'maklumatjawatan';
++
++    public $timestamps = false;
+ }
+diff --git a/app/Models/MaklumatKehadiran.php b/app/Models/MaklumatKehadiran.php
+index 1cdf9f711c74f32b76e4fdd652449244d4b8a34c..3bc370a9c69a03caed3f203e5cc2ddc2f24018af 100644
+--- a/app/Models/MaklumatKehadiran.php
++++ b/app/Models/MaklumatKehadiran.php
+@@ -6,5 +6,7 @@
+ 
+ class MaklumatKehadiran extends Model
+ {
+-    //
++    protected $table = 'maklumatkehadiran';
++
++    public $timestamps = false;
+ }
+diff --git a/app/Models/MaklumatOt.php b/app/Models/MaklumatOt.php
+index b28cc08f785618b03245e6a2fa6f065d2811e26c..aabdb12eecb6227e2c26dc97c9c1fd572b91bcb9 100644
+--- a/app/Models/MaklumatOt.php
++++ b/app/Models/MaklumatOt.php
+@@ -6,5 +6,7 @@
+ 
+ class MaklumatOt extends Model
+ {
+-    //
++    protected $table = 'maklumatot';
++
++    public $timestamps = false;
+ }
+diff --git a/app/Models/MaklumatPayroll.php b/app/Models/MaklumatPayroll.php
+index 6363d3fddfea27214f2b02f3ce88b492a988d6bf..50ebc6ce749de2386a5e06e63c231215291e2b3e 100644
+--- a/app/Models/MaklumatPayroll.php
++++ b/app/Models/MaklumatPayroll.php
+@@ -6,5 +6,7 @@
+ 
+ class MaklumatPayroll extends Model
+ {
+-    //
++    protected $table = 'maklumatpayroll';
++
++    public $timestamps = false;
+ }
+diff --git a/app/Models/ReportBulanan.php b/app/Models/ReportBulanan.php
+index 04da5a7127554e28088676b56c2f61e4f4fc8977..51e37d61c060c054e94e9cbafb947b67b7fad3be 100644
+--- a/app/Models/ReportBulanan.php
++++ b/app/Models/ReportBulanan.php
+@@ -6,5 +6,7 @@
+ 
+ class ReportBulanan extends Model
+ {
+-    //
++    protected $table = 'reportbulanan';
++
++    public $timestamps = false;
+ }
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index a38aa1d915feb8a970714a0f82207d2e4741819f..7a13e50b57d737b8c1dc215f748e4ddf415ee610 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -1,5 +1,15 @@
+ import { Link } from '@inertiajs/react';
+-import { BookOpen, FolderGit2, LayoutGrid } from 'lucide-react';
++import {
++    Banknote,
++    BriefcaseBusiness,
++    CalendarCheck2,
++    CalendarDays,
++    Clock3,
++    FileText,
++    FolderGit2,
++    LayoutGrid,
++    UsersRound,
++} from 'lucide-react';
+ import AppLogo from '@/components/app-logo';
+ import { NavFooter } from '@/components/nav-footer';
+ import { NavMain } from '@/components/nav-main';
+@@ -13,8 +23,8 @@ import {
+     SidebarMenuButton,
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+-import { dashboard } from '@/routes';
+ import type { NavItem } from '@/types';
++import { dashboard } from '@/routes';
+ 
+ const mainNavItems: NavItem[] = [
+     {
+@@ -24,17 +34,56 @@ const mainNavItems: NavItem[] = [
+     },
+ ];
+ 
++const employeeNavItems: NavItem[] = [
++    {
++        title: 'Pekerja',
++        href: '/pekerja',
++        icon: UsersRound,
++    },
++    {
++        title: 'Jawatan',
++        href: '/jawatan',
++        icon: BriefcaseBusiness,
++    },
++];
++
++const attendanceNavItems: NavItem[] = [
++    {
++        title: 'Kehadiran',
++        href: '/kehadiran',
++        icon: CalendarCheck2,
++    },
++    {
++        title: 'Cuti',
++        href: '/cuti',
++        icon: CalendarDays,
++    },
++    {
++        title: 'Kerja Lebih Masa',
++        href: '/kerja-lebih-masa',
++        icon: Clock3,
++    },
++];
++
++const payrollNavItems: NavItem[] = [
++    {
++        title: 'Payroll',
++        href: '/payroll',
++        icon: Banknote,
++    },
++    {
++        title: 'Laporan Bulanan',
++        href: '/laporan-bulanan',
++        icon: FileText,
++    },
++];
++
+ const footerNavItems: NavItem[] = [
+     {
+         title: 'Repository',
+-        href: 'https://github.com/laravel/react-starter-kit',
++        href: 'https://github.com/ridhwan-create/ibco-hr-solutions',
+         icon: FolderGit2,
+     },
+-    {
+-        title: 'Documentation',
+-        href: 'https://laravel.com/docs/starter-kits#react',
+-        icon: BookOpen,
+-    },
+ ];
+ 
+ export function AppSidebar() {
+@@ -53,7 +102,10 @@ export function AppSidebar() {
+             </SidebarHeader>
+ 
+             <SidebarContent>
+-                <NavMain items={mainNavItems} />
++                <NavMain items={mainNavItems} label="Utama" />
++                <NavMain items={employeeNavItems} label="Pekerja" />
++                <NavMain items={attendanceNavItems} label="Masa & Kehadiran" />
++                <NavMain items={payrollNavItems} label="Gaji & Laporan" />
+             </SidebarContent>
+ 
+             <SidebarFooter>
+diff --git a/resources/js/components/nav-main.tsx b/resources/js/components/nav-main.tsx
+index 54095ac73b8f4373be116214f13148ec1c875eef..777591da8b0342393d1b97cfda76f02c51f90c60 100644
+--- a/resources/js/components/nav-main.tsx
++++ b/resources/js/components/nav-main.tsx
+@@ -9,12 +9,18 @@ import {
+ import { useCurrentUrl } from '@/hooks/use-current-url';
+ import type { NavItem } from '@/types';
+ 
+-export function NavMain({ items = [] }: { items: NavItem[] }) {
++export function NavMain({
++    items = [],
++    label = 'Platform',
++}: {
++    items: NavItem[];
++    label?: string;
++}) {
+     const { isCurrentUrl } = useCurrentUrl();
+ 
+     return (
+         <SidebarGroup className="px-2 py-0">
+-            <SidebarGroupLabel>Platform</SidebarGroupLabel>
++            <SidebarGroupLabel>{label}</SidebarGroupLabel>
+             <SidebarMenu>
+                 {items.map((item) => (
+                     <SidebarMenuItem key={item.title}>
+diff --git a/resources/js/components/records-index.tsx b/resources/js/components/records-index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..82f3df2e67e8ec94cb70f2a77428a597e568d79a
+--- /dev/null
++++ b/resources/js/components/records-index.tsx
+@@ -0,0 +1,339 @@
++import { Head, router } from '@inertiajs/react';
++import { Database, Search } from 'lucide-react';
++import { useEffect, useState } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import { Badge } from '@/components/ui/badge';
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type RecordValue = string | number | boolean | null;
++
++export type RecordColumn = {
++    key: string;
++    label: string;
++    type?: 'text' | 'date' | 'datetime' | 'time' | 'currency' | 'badge';
++    align?: 'left' | 'center' | 'right';
++};
++
++export type RecordPageConfig = {
++    title: string;
++    description: string;
++    routePath: string;
++    searchPlaceholder: string;
++    columns: RecordColumn[];
++};
++
++type PaginationLink = {
++    url: string | null;
++    label: string;
++    active: boolean;
++};
++
++export type RecordsIndexPageProps = {
++    records: {
++        data: Array<Record<string, RecordValue>>;
++        current_page: number;
++        last_page: number;
++        from: number | null;
++        to: number | null;
++        total: number;
++        links: PaginationLink[];
++    };
++    filters: {
++        search?: string;
++    };
++};
++
++function formatDate(value: string): string {
++    const date = value.slice(0, 10).split('-');
++
++    if (date.length !== 3) {
++        return value;
++    }
++
++    return `${date[2]}/${date[1]}/${date[0]}`;
++}
++
++function formatValue(
++    value: RecordValue | undefined,
++    type: RecordColumn['type'],
++) {
++    if (value === null || value === undefined || value === '') {
++        return '-';
++    }
++
++    const text = String(value);
++
++    switch (type) {
++        case 'currency':
++            return new Intl.NumberFormat('ms-MY', {
++                style: 'currency',
++                currency: 'MYR',
++            }).format(Number(value));
++        case 'date':
++            return formatDate(text);
++        case 'datetime': {
++            const date = formatDate(text);
++            const time = text.slice(11, 16);
++
++            return time ? `${date}, ${time}` : date;
++        }
++        case 'time':
++            return text.slice(0, 5);
++        default:
++            return text;
++    }
++}
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++export default function RecordsIndex({
++    records,
++    filters,
++    config,
++}: RecordsIndexPageProps & { config: RecordPageConfig }) {
++    const [search, setSearch] = useState(filters.search ?? '');
++
++    useEffect(() => {
++        if (search === (filters.search ?? '')) {
++            return;
++        }
++
++        const timer = window.setTimeout(() => {
++            router.get(
++                config.routePath,
++                { search },
++                {
++                    preserveState: true,
++                    preserveScroll: true,
++                    replace: true,
++                },
++            );
++        }, 450);
++
++        return () => window.clearTimeout(timer);
++    }, [config.routePath, filters.search, search]);
++
++    const goToPage = (url: string | null) => {
++        if (!url) {
++            return;
++        }
++
++        const page = new URL(url, window.location.origin).searchParams.get(
++            'page',
++        );
++
++        router.get(
++            config.routePath,
++            { search, page },
++            {
++                preserveState: true,
++                preserveScroll: true,
++                replace: true,
++            },
++        );
++    };
++
++    return (
++        <>
++            <Head title={config.title} />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                    <div className="space-y-2">
++                        <HeadingSmall
++                            title={config.title}
++                            description={config.description}
++                        />
++                        <Badge
++                            variant="secondary"
++                            className="gap-1.5 font-normal"
++                        >
++                            <Database className="size-3.5" />
++                            Sumber data: db_spp
++                        </Badge>
++                    </div>
++
++                    <div className="relative w-full lg:max-w-sm">
++                        <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                        <Input
++                            value={search}
++                            onChange={(event) => setSearch(event.target.value)}
++                            placeholder={config.searchPlaceholder}
++                            className="pl-9"
++                            aria-label={`Cari ${config.title.toLowerCase()}`}
++                        />
++                    </div>
++                </div>
++
++                <div className="hidden overflow-hidden rounded-xl border bg-card md:block">
++                    <div className="overflow-x-auto">
++                        <Table>
++                            <TableHeader className="bg-muted/60">
++                                <TableRow>
++                                    <TableHead className="w-16">No.</TableHead>
++                                    {config.columns.map((column) => (
++                                        <TableHead
++                                            key={column.key}
++                                            className={
++                                                column.align === 'right'
++                                                    ? 'text-right'
++                                                    : column.align === 'center'
++                                                      ? 'text-center'
++                                                      : undefined
++                                            }
++                                        >
++                                            {column.label}
++                                        </TableHead>
++                                    ))}
++                                </TableRow>
++                            </TableHeader>
++                            <TableBody>
++                                {records.data.length > 0 ? (
++                                    records.data.map((record, index) => (
++                                        <TableRow key={String(record.id)}>
++                                            <TableCell className="text-muted-foreground">
++                                                {(records.from ?? 1) + index}
++                                            </TableCell>
++                                            {config.columns.map((column) => (
++                                                <TableCell
++                                                    key={column.key}
++                                                    className={
++                                                        column.align === 'right'
++                                                            ? 'text-right'
++                                                            : column.align ===
++                                                                'center'
++                                                              ? 'text-center'
++                                                              : undefined
++                                                    }
++                                                >
++                                                    {column.type === 'badge' ? (
++                                                        <Badge variant="outline">
++                                                            {formatValue(
++                                                                record[
++                                                                    column.key
++                                                                ],
++                                                                column.type,
++                                                            )}
++                                                        </Badge>
++                                                    ) : (
++                                                        <span
++                                                            className={
++                                                                column.type ===
++                                                                'currency'
++                                                                    ? 'font-medium tabular-nums'
++                                                                    : undefined
++                                                            }
++                                                            title={String(
++                                                                record[
++                                                                    column.key
++                                                                ] ?? '',
++                                                            )}
++                                                        >
++                                                            {formatValue(
++                                                                record[
++                                                                    column.key
++                                                                ],
++                                                                column.type,
++                                                            )}
++                                                        </span>
++                                                    )}
++                                                </TableCell>
++                                            ))}
++                                        </TableRow>
++                                    ))
++                                ) : (
++                                    <TableRow>
++                                        <TableCell
++                                            colSpan={config.columns.length + 1}
++                                            className="h-28 text-center text-muted-foreground"
++                                        >
++                                            Tiada rekod ditemui.
++                                        </TableCell>
++                                    </TableRow>
++                                )}
++                            </TableBody>
++                        </Table>
++                    </div>
++                </div>
++
++                <div className="space-y-3 md:hidden">
++                    {records.data.length > 0 ? (
++                        records.data.map((record, index) => (
++                            <Card key={String(record.id)}>
++                                <CardHeader className="pb-3">
++                                    <CardTitle className="text-sm">
++                                        Rekod {(records.from ?? 1) + index}
++                                    </CardTitle>
++                                </CardHeader>
++                                <CardContent className="grid gap-3">
++                                    {config.columns.map((column) => (
++                                        <div
++                                            key={column.key}
++                                            className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-3 text-sm"
++                                        >
++                                            <span className="text-muted-foreground">
++                                                {column.label}
++                                            </span>
++                                            <span className="font-medium break-words">
++                                                {formatValue(
++                                                    record[column.key],
++                                                    column.type,
++                                                )}
++                                            </span>
++                                        </div>
++                                    ))}
++                                </CardContent>
++                            </Card>
++                        ))
++                    ) : (
++                        <Card>
++                            <CardContent className="py-10 text-center text-sm text-muted-foreground">
++                                Tiada rekod ditemui.
++                            </CardContent>
++                        </Card>
++                    )}
++                </div>
++
++                <div className="flex flex-col gap-3 rounded-xl border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
++                    <p className="text-sm text-muted-foreground">
++                        Menunjukkan {records.from ?? 0} hingga {records.to ?? 0}{' '}
++                        daripada {records.total} rekod
++                    </p>
++
++                    {records.last_page > 1 && (
++                        <div className="flex flex-wrap gap-1">
++                            {records.links.map((link, index) => (
++                                <button
++                                    key={`${link.label}-${index}`}
++                                    type="button"
++                                    disabled={!link.url}
++                                    onClick={() => goToPage(link.url)}
++                                    className={`min-w-9 rounded-md border px-3 py-1.5 text-sm transition-colors ${
++                                        link.active
++                                            ? 'border-primary bg-primary text-primary-foreground'
++                                            : 'border-input bg-background hover:bg-accent'
++                                    } disabled:pointer-events-none disabled:opacity-40`}
++                                >
++                                    {paginationLabel(link.label)}
++                                </button>
++                            ))}
++                        </div>
++                    )}
++                </div>
++            </div>
++        </>
++    );
++}
+diff --git a/resources/js/pages/MaklumatCuti/Index.tsx b/resources/js/pages/MaklumatCuti/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..243fe6959a432f5a7043346308bbbd6cd80a6c91
+--- /dev/null
++++ b/resources/js/pages/MaklumatCuti/Index.tsx
+@@ -0,0 +1,33 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Maklumat Cuti',
++    description: 'Senarai permohonan dan baki cuti pekerja.',
++    routePath: '/cuti',
++    searchPlaceholder: 'Cari nama, ID, jenis atau status cuti...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama_pekerja', label: 'Nama' },
++        { key: 'jenis_cuti', label: 'Jenis Cuti' },
++        { key: 'tarikh_mula', label: 'Tarikh Mula', type: 'date' },
++        { key: 'tarikh_tamat', label: 'Tarikh Tamat', type: 'date' },
++        { key: 'bilangan_hari', label: 'Bil. Hari', align: 'center' },
++        {
++            key: 'status_permohonan',
++            label: 'Status',
++            type: 'badge',
++        },
++    ],
++};
++
++export default function CutiIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++CutiIndex.layout = {
++    breadcrumbs: [{ title: 'Cuti', href: '/cuti' }],
++};
+diff --git a/resources/js/pages/MaklumatJawatan/Index.tsx b/resources/js/pages/MaklumatJawatan/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3572fe83a8a7bd582e44514a1a5688118c30adf
+--- /dev/null
++++ b/resources/js/pages/MaklumatJawatan/Index.tsx
+@@ -0,0 +1,38 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Maklumat Jawatan',
++    description: 'Maklumat jawatan, jabatan dan gaji asas pekerja.',
++    routePath: '/jawatan',
++    searchPlaceholder: 'Cari nama, ID, jawatan atau jabatan...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama_pekerja', label: 'Nama' },
++        { key: 'jabatan', label: 'Jabatan' },
++        { key: 'jawatan', label: 'Jawatan' },
++        {
++            key: 'gaji_asas',
++            label: 'Gaji Asas',
++            type: 'currency',
++            align: 'right',
++        },
++        {
++            key: 'tarikh_lapor_diri',
++            label: 'Tarikh Lapor Diri',
++            type: 'date',
++        },
++        { key: 'bank', label: 'Bank' },
++    ],
++};
++
++export default function JawatanIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++JawatanIndex.layout = {
++    breadcrumbs: [{ title: 'Jawatan', href: '/jawatan' }],
++};
+diff --git a/resources/js/pages/MaklumatKehadiran/Index.tsx b/resources/js/pages/MaklumatKehadiran/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d55f5b19cf17b9e3819d4e0d3166cc081f855e5
+--- /dev/null
++++ b/resources/js/pages/MaklumatKehadiran/Index.tsx
+@@ -0,0 +1,28 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Rekod Kehadiran',
++    description: 'Rekod waktu masuk dan keluar pekerja.',
++    routePath: '/kehadiran',
++    searchPlaceholder: 'Cari nama, ID, pilihan jam atau catatan...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama_pekerja', label: 'Nama' },
++        { key: 'pilihan_jam', label: 'Pilihan Jam' },
++        { key: 'waktu_masuk', label: 'Waktu Masuk', type: 'datetime' },
++        { key: 'waktu_keluar', label: 'Waktu Keluar', type: 'datetime' },
++        { key: 'catatan', label: 'Catatan' },
++    ],
++};
++
++export default function KehadiranIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++KehadiranIndex.layout = {
++    breadcrumbs: [{ title: 'Kehadiran', href: '/kehadiran' }],
++};
+diff --git a/resources/js/pages/MaklumatOt/Index.tsx b/resources/js/pages/MaklumatOt/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfccc12c8fe3c07a98beba117143f53887d7a280
+--- /dev/null
++++ b/resources/js/pages/MaklumatOt/Index.tsx
+@@ -0,0 +1,29 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Kerja Lebih Masa',
++    description: 'Rekod kerja lebih masa yang telah dimasukkan.',
++    routePath: '/kerja-lebih-masa',
++    searchPlaceholder: 'Cari nama, ID, jenis OT atau catatan...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama_pekerja', label: 'Nama' },
++        { key: 'jenis_ot', label: 'Jenis OT' },
++        { key: 'tarikh', label: 'Tarikh', type: 'date' },
++        { key: 'waktu_masuk', label: 'Waktu Mula', type: 'time' },
++        { key: 'waktu_keluar', label: 'Waktu Tamat', type: 'time' },
++        { key: 'catatan', label: 'Catatan' },
++    ],
++};
++
++export default function OtIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++OtIndex.layout = {
++    breadcrumbs: [{ title: 'Kerja Lebih Masa', href: '/kerja-lebih-masa' }],
++};
+diff --git a/resources/js/pages/MaklumatPayroll/Index.tsx b/resources/js/pages/MaklumatPayroll/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e929dcf754f77bbbb4de3ef9a3d089369b9418f
+--- /dev/null
++++ b/resources/js/pages/MaklumatPayroll/Index.tsx
+@@ -0,0 +1,30 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Maklumat Payroll',
++    description: 'Senarai rekod payroll mengikut pekerja dan tempoh gaji.',
++    routePath: '/payroll',
++    searchPlaceholder: 'Cari nama, ID, NRIC atau bulan...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama', label: 'Nama' },
++        { key: 'nric', label: 'NRIC' },
++        { key: 'tempoh_gaji', label: 'Tempoh Gaji', type: 'date' },
++        { key: 'bulan', label: 'Bulan', align: 'center' },
++        { key: 'no_kwsp', label: 'No. KWSP' },
++        { key: 'no_socso', label: 'No. PERKESO' },
++        { key: 'no_akaun', label: 'No. Akaun' },
++    ],
++};
++
++export default function PayrollIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++PayrollIndex.layout = {
++    breadcrumbs: [{ title: 'Payroll', href: '/payroll' }],
++};
+diff --git a/resources/js/pages/MaklumatPekerja/Index.tsx b/resources/js/pages/MaklumatPekerja/Index.tsx
+index 5a031c0d644c1cb628b201f3339b7f0cf5b28d60..ecd2b5fee7796411b12de109826553bb7d39d7e0 100644
+--- a/resources/js/pages/MaklumatPekerja/Index.tsx
++++ b/resources/js/pages/MaklumatPekerja/Index.tsx
+@@ -1,283 +1,28 @@
+-import { type BreadcrumbItem } from '@/types';
+-import { Head, Link, usePage, useForm, router } from '@inertiajs/react';
+-import { PageProps } from '@inertiajs/core';
+-// Import AppLayout dibuang dari komponen utama kerana ia diuruskan oleh global layout
+-import { Button } from '@/components/ui/button';
+-import HeadingSmall from '@/components/heading-small';
+-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+-import { Edit, Trash2, Search, Eye } from 'lucide-react';
+-import { useManualDebounce } from '@/hooks/useManualDebounce';
+-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+-
+-const breadcrumbs: BreadcrumbItem[] = [
+-    { title: 'Senarai Pekerja', href: '/pekerja' },
+-];
+-
+-interface Pekerja {
+-    id: number;
+-    employeeID: string;
+-    nama: string;
+-    nric: string;
+-    notel: string;
+-}
+-
+-interface Props extends PageProps {
+-    pekerja: {
+-        data: Pekerja[];
+-        current_page: number;
+-        last_page: number;
+-        links: {
+-            url: string | null;
+-            label: string;
+-            active: boolean;
+-        }[];
+-    };
+-    filters: {
+-        search?: string;
+-    };
+-    flash?: {
+-        success?: string;
+-        error?: string;
+-    };
+-}
+-
+-export default function PekerjaIndex() {
+-    const { props } = usePage<Props>();
+-    const { pekerja, flash, filters } = props;
+-
+-    const { data, setData } = useForm({
+-        search: filters.search || '',
+-    });
+-
+-    useManualDebounce(() => {
+-        router.get('/pekerja', { search: data.search }, { preserveState: true, replace: true });
+-    }, 500, [data.search]);
+-
+-    const handleDelete = (id: number) => {
+-        if (confirm('Adakah anda pasti ingin memadam rekod pekerja ini?')) {
+-            router.delete(`/pekerja/${id}`);
+-        }
+-    };
+-
+-    return (
+-        <>
+-            <Head title="Senarai Pekerja" />
+-
+-            <div className='p-4 space-y-6'>
+-                {/* Flash Messages */}
+-                {flash?.success && <div className="bg-green-100 border border-green-400 text-green-700 px-3 py-2 rounded text-sm">{flash.success}</div>}
+-                {flash?.error && <div className="bg-red-100 border border-red-400 text-red-700 px-3 py-2 rounded text-sm">{flash.error}</div>}
+-
+-                {/* Header & Search Actions */}
+-                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+-                    <HeadingSmall title="Maklumat Pekerja" description="Senarai semua rekod maklumat pekerja" />
+-
+-                    <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
+-                        <div className="relative flex-grow">
+-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+-                            <input
+-                                type="text"
+-                                placeholder="Cari Nama, ID, IC..."
+-                                className="pl-9 w-full border rounded px-3 py-2 text-sm"
+-                                value={data.search}
+-                                onChange={(e) => setData('search', e.target.value)}
+-                            />
+-                        </div>
+-                        <div className="flex gap-2">
+-                            <Button asChild size="sm" className="flex-1">
+-                                <Link href="/pekerja/create">+ Baru</Link>
+-                            </Button>
+-                        </div>
+-                    </div>
+-                </div>
+-
+-                {/* Desktop Table */}
+-                <div className="hidden md:block overflow-hidden shadow ring-0 ring-gray-200 sm:rounded-lg">
+-                    <Table>
+-                        <TableHeader className="bg-muted">
+-                            <TableRow>
+-                                <TableHead>No.</TableHead>
+-                                <TableHead>ID Pekerja</TableHead>
+-                                <TableHead>Nama</TableHead>
+-                                <TableHead>NRIC</TableHead>
+-                                <TableHead>No Tel</TableHead>
+-                                <TableHead className="text-center">Tindakan</TableHead>
+-                            </TableRow>
+-                        </TableHeader>
+-                        <TableBody>
+-                            {pekerja.data.length > 0 ? pekerja.data.map((p, index) => (
+-                                <TableRow key={p.id}>
+-                                    <TableCell>{(pekerja.current_page - 1) * 10 + index + 1}</TableCell>
+-                                    <TableCell className="font-medium">{p.employeeID}</TableCell>
+-                                    <TableCell>{p.nama}</TableCell>
+-                                    <TableCell>{p.nric}</TableCell>
+-                                    <TableCell>{p.notel || '-'}</TableCell>
+-                                    <TableCell className="text-center">
+-                                        <div className="flex items-center space-x-3 justify-center">
+-                                            <Link href={`/pekerja/${p.id}`} className="text-blue-600 hover:text-blue-900" title="Papar">
+-                                                <Eye className="h-4 w-4" />
+-                                            </Link>
+-                                            <Link href={`/pekerja/${p.id}/edit`} className="text-indigo-600 hover:text-indigo-900" title="Edit">
+-                                                <Edit className="h-4 w-4" />
+-                                            </Link>
+-                                            <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:text-red-900" title="Padam">
+-                                                <Trash2 className="h-4 w-4" />
+-                                            </button>
+-                                        </div>
+-                                    </TableCell>
+-                                </TableRow>
+-                            )) : (
+-                                <TableRow>
+-                                    <TableCell colSpan={6} className="text-center py-4 text-sm text-muted-foreground">
+-                                        Tiada rekod pekerja ditemui.
+-                                    </TableCell>
+-                                </TableRow>
+-                            )}
+-                        </TableBody>
+-                    </Table>
+-                </div>
+-
+-                {/* Mobile Cards */}
+-                <div className="md:hidden space-y-3">
+-                    {pekerja.data.length > 0 ? pekerja.data.map((p, index) => (
+-                        <Card key={p.id}>
+-                            <CardHeader className="p-4 pb-2">
+-                                <CardTitle className="text-base flex justify-between items-start">
+-                                    <span>{(pekerja.current_page - 1) * 10 + index + 1}. {p.nama}</span>
+-                                    <div className="flex gap-3">
+-                                        <Link href={`/pekerja/${p.id}`} className="text-blue-600 hover:text-blue-900">
+-                                            <Eye className="h-4 w-4" />
+-                                        </Link>
+-                                        <Link href={`/pekerja/${p.id}/edit`} className="text-indigo-600 hover:text-indigo-900">
+-                                            <Edit className="h-4 w-4" />
+-                                        </Link>
+-                                        <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:text-red-900">
+-                                            <Trash2 className="h-4 w-4" />
+-                                        </button>
+-                                    </div>
+-                                </CardTitle>
+-                            </CardHeader>
+-                            <CardContent className="p-4 pt-0 text-sm">
+-                                <div className="grid grid-cols-2 gap-2 mt-2">
+-                                    <div>
+-                                        <p className="text-muted-foreground">ID Pekerja</p>
+-                                        <p className="font-medium">{p.employeeID}</p>
+-                                    </div>
+-                                    <div>
+-                                        <p className="text-muted-foreground">NRIC</p>
+-                                        <p>{p.nric}</p>
+-                                    </div>
+-                                    <div className="col-span-2">
+-                                        <p className="text-muted-foreground">No. Telefon</p>
+-                                        <p>{p.notel || '-'}</p>
+-                                    </div>
+-                                </div>
+-                            </CardContent>
+-                        </Card>
+-                    )) : (
+-                        <div className="text-center py-4 text-sm text-muted-foreground">
+-                            Tiada rekod pekerja ditemui.
+-                        </div>
+-                    )}
+-                </div>
+-
+-                {/* Pagination Desktop */}
+-                {pekerja.links && pekerja.links.length > 3 && (
+-                    <nav className="flex items-center justify-between px-4 py-3 bg-muted border-t border-gray-200 sm:px-6 rounded-b-lg">
+-                        <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+-                            <div className="flex gap-x-2 items-baseline">
+-                                <span className="text-sm">
+-                                    Menunjukkan{' '}
+-                                    <span className="font-medium">{(pekerja.current_page - 1) * 10 + 1}</span> hingga{' '}
+-                                    <span className="font-medium">
+-                                        {Math.min(pekerja.current_page * 10, pekerja.data.length + ((pekerja.current_page - 1) * 10))}
+-                                    </span>{' '}
+-                                    daripada{' '}
+-                                    <span className="font-medium">
+-                                        {pekerja.data.length + ((pekerja.current_page - 1) * 10)}
+-                                    </span>{' '}
+-                                    rekod
+-                                </span>
+-                            </div>
+-                            <div className="flex gap-1">
+-                                {pekerja.links.map((link, index) => (
+-                                    <button
+-                                        key={index}
+-                                        type="button"
+-                                        disabled={!link.url}
+-                                        onClick={() => {
+-                                            if (link.url) {
+-                                                const url = new URL(link.url, window.location.origin);
+-                                                const page = url.searchParams.get('page') ?? '1';
+-
+-                                                router.get('/pekerja', {
+-                                                    search: data.search,
+-                                                    page: page,
+-                                                }, {
+-                                                    preserveState: true,
+-                                                    replace: true,
+-                                                    only: ['pekerja'],
+-                                                });
+-                                            }
+-                                        }}
+-                                        className={`relative inline-flex items-center px-3 py-1 border text-sm font-medium rounded-md ${link.active
+-                                            ? 'z-10 bg-indigo-50 border-indigo-500 text-indigo-600'
+-                                            : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+-                                            } ${!link.url && 'pointer-events-none opacity-50'}`}
+-                                        dangerouslySetInnerHTML={{ __html: link.label }}
+-                                    />
+-                                ))}
+-                            </div>
+-                        </div>
+-
+-                        {/* Pagination Mobile */}
+-                        <div className="sm:hidden flex items-center justify-between w-full">
+-                            <button
+-                                type="button"
+-                                disabled={pekerja.current_page === 1}
+-                                onClick={() => {
+-                                    router.get('/pekerja', {
+-                                        search: data.search,
+-                                        page: pekerja.current_page - 1,
+-                                    }, {
+-                                        preserveState: true,
+-                                        replace: true,
+-                                        only: ['pekerja'],
+-                                    });
+-                                }}
+-                                className={`relative inline-flex items-center px-3 py-1 border text-sm font-medium rounded-md ${pekerja.current_page === 1 ? 'pointer-events-none opacity-50' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+-                            >
+-                                Previous
+-                            </button>
+-                            <span className="text-sm text-gray-700">
+-                                Halaman {pekerja.current_page} / {pekerja.last_page}
+-                            </span>
+-                            <button
+-                                type="button"
+-                                disabled={pekerja.current_page === pekerja.last_page}
+-                                onClick={() => {
+-                                    router.get('/pekerja', {
+-                                        search: data.search,
+-                                        page: pekerja.current_page + 1,
+-                                    }, {
+-                                        preserveState: true,
+-                                        replace: true,
+-                                        only: ['pekerja'],
+-                                    });
+-                                }}
+-                                className={`relative inline-flex items-center px-3 py-1 border text-sm font-medium rounded-md ${pekerja.current_page === pekerja.last_page ? 'pointer-events-none opacity-50' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+-                            >
+-                                Next
+-                            </button>
+-                        </div>
+-                    </nav>
+-                )}
+-            </div>
+-        </>
+-    );
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Maklumat Pekerja',
++    description: 'Senarai pekerja aktif yang direkodkan dalam sistem.',
++    routePath: '/pekerja',
++    searchPlaceholder: 'Cari nama, ID, NRIC atau e-mel...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama', label: 'Nama' },
++        { key: 'nric', label: 'NRIC' },
++        { key: 'no_telefon', label: 'No. Telefon' },
++        { key: 'email', label: 'E-mel' },
++        { key: 'status', label: 'Status', type: 'badge' },
++    ],
++};
++
++export default function PekerjaIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
+ }
+ 
+-// Layout configuration untuk breadcrumbs diletakkan di luar komponen
+ PekerjaIndex.layout = {
+-    breadcrumbs: breadcrumbs,
+-};
+\ No newline at end of file
++    breadcrumbs: [{ title: 'Pekerja', href: '/pekerja' }],
++};
+diff --git a/resources/js/pages/ReportBulanan/Index.tsx b/resources/js/pages/ReportBulanan/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8be31f8e713b5c58645dc72d8adfe380bbd7525
+--- /dev/null
++++ b/resources/js/pages/ReportBulanan/Index.tsx
+@@ -0,0 +1,27 @@
++import RecordsIndex from '@/components/records-index';
++import type {
++    RecordPageConfig,
++    RecordsIndexPageProps,
++} from '@/components/records-index';
++
++const config: RecordPageConfig = {
++    title: 'Laporan Bulanan',
++    description: 'Laporan bulanan yang direkodkan oleh pekerja.',
++    routePath: '/laporan-bulanan',
++    searchPlaceholder: 'Cari nama, ID atau kandungan laporan...',
++    columns: [
++        { key: 'employee_id', label: 'ID Pekerja' },
++        { key: 'nama_pekerja', label: 'Nama' },
++        { key: 'tarikh_mula', label: 'Tarikh Mula', type: 'date' },
++        { key: 'tarikh_akhir', label: 'Tarikh Akhir', type: 'date' },
++        { key: 'laporan', label: 'Laporan' },
++    ],
++};
++
++export default function LaporanBulananIndex(props: RecordsIndexPageProps) {
++    return <RecordsIndex {...props} config={config} />;
++}
++
++LaporanBulananIndex.layout = {
++    breadcrumbs: [{ title: 'Laporan Bulanan', href: '/laporan-bulanan' }],
++};
+diff --git a/resources/js/pages/dashboard.tsx b/resources/js/pages/dashboard.tsx
+index 3fe0cc7ff05edbfb43ab5b9c50e37a5becf284e9..7dd6249c84a42612ccf11afc9dae89036432dbe3 100644
+--- a/resources/js/pages/dashboard.tsx
++++ b/resources/js/pages/dashboard.tsx
+@@ -1,25 +1,346 @@
+-import { Head } from '@inertiajs/react';
+-import { PlaceholderPattern } from '@/components/ui/placeholder-pattern';
+-import { dashboard } from '@/routes';
++import { Head, Link } from '@inertiajs/react';
++import {
++    ArrowRight,
++    Banknote,
++    BriefcaseBusiness,
++    CalendarCheck2,
++    CalendarDays,
++    Clock3,
++    Database,
++    FileText,
++    UsersRound,
++} from 'lucide-react';
++import type { LucideIcon } from 'lucide-react';
++import HeadingSmall from '@/components/heading-small';
++import { Badge } from '@/components/ui/badge';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
+ 
+-export default function Dashboard() {
++type Statistics = {
++    pekerja: number;
++    jawatan: number;
++    kehadiran: number;
++    cuti: number;
++    kerja_lebih_masa: number;
++    payroll: number;
++    laporan_bulanan: number;
++};
++
++type AttendanceRecord = {
++    id: number;
++    employee_id: string | null;
++    nama_pekerja: string | null;
++    waktu_masuk: string | null;
++    waktu_keluar: string | null;
++    catatan: string | null;
++};
++
++type LeaveRecord = {
++    id: number;
++    employee_id: string | null;
++    nama_pekerja: string | null;
++    jenis_cuti: string | null;
++    tarikh_mula: string | null;
++    tarikh_tamat: string | null;
++    status_permohonan: string | null;
++};
++
++type DashboardProps = {
++    statistics: Statistics;
++    recentAttendance: AttendanceRecord[];
++    recentLeave: LeaveRecord[];
++};
++
++type StatisticCard = {
++    key: keyof Statistics;
++    title: string;
++    description: string;
++    href: string;
++    icon: LucideIcon;
++    iconClassName: string;
++};
++
++const statisticCards: StatisticCard[] = [
++    {
++        key: 'pekerja',
++        title: 'Pekerja',
++        description: 'Rekod pekerja aktif',
++        href: '/pekerja',
++        icon: UsersRound,
++        iconClassName: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
++    },
++    {
++        key: 'jawatan',
++        title: 'Jawatan',
++        description: 'Maklumat jawatan aktif',
++        href: '/jawatan',
++        icon: BriefcaseBusiness,
++        iconClassName: 'bg-violet-500/10 text-violet-600 dark:text-violet-400',
++    },
++    {
++        key: 'kehadiran',
++        title: 'Kehadiran',
++        description: 'Jumlah rekod kehadiran',
++        href: '/kehadiran',
++        icon: CalendarCheck2,
++        iconClassName:
++            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
++    },
++    {
++        key: 'cuti',
++        title: 'Cuti',
++        description: 'Jumlah rekod permohonan',
++        href: '/cuti',
++        icon: CalendarDays,
++        iconClassName: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
++    },
++    {
++        key: 'kerja_lebih_masa',
++        title: 'Kerja Lebih Masa',
++        description: 'Jumlah rekod OT',
++        href: '/kerja-lebih-masa',
++        icon: Clock3,
++        iconClassName: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
++    },
++    {
++        key: 'payroll',
++        title: 'Payroll',
++        description: 'Jumlah rekod payroll',
++        href: '/payroll',
++        icon: Banknote,
++        iconClassName: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
++    },
++    {
++        key: 'laporan_bulanan',
++        title: 'Laporan Bulanan',
++        description: 'Jumlah laporan pekerja',
++        href: '/laporan-bulanan',
++        icon: FileText,
++        iconClassName: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
++    },
++];
++
++function formatDate(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const parts = value.slice(0, 10).split('-');
++
++    if (parts.length !== 3) {
++        return value;
++    }
++
++    return `${parts[2]}/${parts[1]}/${parts[0]}`;
++}
++
++function formatDateTime(value: string | null): string {
++    if (!value) {
++        return '-';
++    }
++
++    const time = value.slice(11, 16);
++
++    return time ? `${formatDate(value)}, ${time}` : formatDate(value);
++}
++
++function employeeLabel(
++    employeeId: string | null,
++    employeeName: string | null,
++): string {
++    return employeeName || employeeId || 'Pekerja tidak dikenal pasti';
++}
++
++export default function Dashboard({
++    statistics,
++    recentAttendance,
++    recentLeave,
++}: DashboardProps) {
+     return (
+         <>
+             <Head title="Dashboard" />
+-            <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
+-                <div className="grid auto-rows-min gap-4 md:grid-cols-3">
+-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
+-                        <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
+-                    </div>
+-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
+-                        <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
+-                    </div>
+-                    <div className="relative aspect-video overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
+-                        <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
+-                    </div>
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
++                    <HeadingSmall
++                        title="Dashboard HR"
++                        description="Ringkasan data sumber manusia daripada pangkalan data sedia ada."
++                    />
++                    <Badge
++                        variant="secondary"
++                        className="gap-1.5 self-start font-normal sm:self-auto"
++                    >
++                        <Database className="size-3.5" />
++                        Sumber data: db_spp
++                    </Badge>
+                 </div>
+-                <div className="relative min-h-[100vh] flex-1 overflow-hidden rounded-xl border border-sidebar-border/70 md:min-h-min dark:border-sidebar-border">
+-                    <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                    {statisticCards.map((item) => {
++                        const Icon = item.icon;
++
++                        return (
++                            <Link
++                                key={item.key}
++                                href={item.href}
++                                className="group rounded-xl focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
++                            >
++                                <Card className="h-full gap-4 transition-colors group-hover:border-foreground/20 group-hover:bg-muted/30">
++                                    <CardHeader className="flex-row items-start justify-between">
++                                        <div className="space-y-1.5">
++                                            <CardDescription>
++                                                {item.title}
++                                            </CardDescription>
++                                            <CardTitle className="text-3xl tabular-nums">
++                                                {statistics[
++                                                    item.key
++                                                ].toLocaleString('ms-MY')}
++                                            </CardTitle>
++                                        </div>
++                                        <div
++                                            className={`rounded-lg p-2.5 ${item.iconClassName}`}
++                                        >
++                                            <Icon className="size-5" />
++                                        </div>
++                                    </CardHeader>
++                                    <CardContent className="flex items-center justify-between text-sm">
++                                        <span className="text-muted-foreground">
++                                            {item.description}
++                                        </span>
++                                        <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-1 group-hover:text-foreground" />
++                                    </CardContent>
++                                </Card>
++                            </Link>
++                        );
++                    })}
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-2">
++                    <Card className="gap-4">
++                        <CardHeader className="flex-row items-center justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle>Rekod Kehadiran Terkini</CardTitle>
++                                <CardDescription>
++                                    Lima rekod masuk atau keluar paling baharu.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href="/kehadiran"
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentAttendance.length > 0 ? (
++                                recentAttendance.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="flex flex-col gap-2 border-b py-3 last:border-0 sm:flex-row sm:items-center sm:justify-between"
++                                    >
++                                        <div className="min-w-0">
++                                            <p className="truncate text-sm font-medium">
++                                                {employeeLabel(
++                                                    record.employee_id,
++                                                    record.nama_pekerja,
++                                                )}
++                                            </p>
++                                            <p className="truncate text-xs text-muted-foreground">
++                                                {record.employee_id ||
++                                                    'Tiada ID pekerja'}
++                                                {record.catatan
++                                                    ? ` · ${record.catatan}`
++                                                    : ''}
++                                            </p>
++                                        </div>
++                                        <div className="shrink-0 text-left sm:text-right">
++                                            <p className="text-sm">
++                                                {formatDateTime(
++                                                    record.waktu_masuk,
++                                                )}
++                                            </p>
++                                            <p className="text-xs text-muted-foreground">
++                                                Keluar:{' '}
++                                                {formatDateTime(
++                                                    record.waktu_keluar,
++                                                )}
++                                            </p>
++                                        </div>
++                                    </div>
++                                ))
++                            ) : (
++                                <p className="py-8 text-center text-sm text-muted-foreground">
++                                    Tiada rekod kehadiran ditemui.
++                                </p>
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <Card className="gap-4">
++                        <CardHeader className="flex-row items-center justify-between">
++                            <div className="space-y-1.5">
++                                <CardTitle>Permohonan Cuti Terkini</CardTitle>
++                                <CardDescription>
++                                    Lima permohonan mengikut tarikh mula
++                                    terkini.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href="/cuti"
++                                className="text-sm font-medium text-muted-foreground hover:text-foreground"
++                            >
++                                Lihat semua
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-1">
++                            {recentLeave.length > 0 ? (
++                                recentLeave.map((record) => (
++                                    <div
++                                        key={record.id}
++                                        className="flex flex-col gap-2 border-b py-3 last:border-0 sm:flex-row sm:items-center sm:justify-between"
++                                    >
++                                        <div className="min-w-0">
++                                            <p className="truncate text-sm font-medium">
++                                                {employeeLabel(
++                                                    record.employee_id,
++                                                    record.nama_pekerja,
++                                                )}
++                                            </p>
++                                            <p className="truncate text-xs text-muted-foreground">
++                                                {record.jenis_cuti ||
++                                                    'Jenis cuti tidak dinyatakan'}
++                                            </p>
++                                        </div>
++                                        <div className="shrink-0 text-left sm:text-right">
++                                            <p className="text-sm">
++                                                {formatDate(record.tarikh_mula)}{' '}
++                                                –{' '}
++                                                {formatDate(
++                                                    record.tarikh_tamat,
++                                                )}
++                                            </p>
++                                            <Badge
++                                                variant="outline"
++                                                className="mt-1 font-normal"
++                                            >
++                                                {record.status_permohonan ||
++                                                    'Tiada status'}
++                                            </Badge>
++                                        </div>
++                                    </div>
++                                ))
++                            ) : (
++                                <p className="py-8 text-center text-sm text-muted-foreground">
++                                    Tiada rekod cuti ditemui.
++                                </p>
++                            )}
++                        </CardContent>
++                    </Card>
+                 </div>
+             </div>
+         </>
+@@ -30,7 +351,7 @@ Dashboard.layout = {
+     breadcrumbs: [
+         {
+             title: 'Dashboard',
+-            href: dashboard(),
++            href: '/dashboard',
+         },
+     ],
+ };
+diff --git a/routes/web.php b/routes/web.php
+index eeaf97378e5ea9279385c9eebd042f04e77027c6..56d036bff38eeec4cd5e54bc40ef7dcd2c87e019 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -1,13 +1,27 @@
+ <?php
+ 
+-use Illuminate\Support\Facades\Route;
++use App\Http\Controllers\DashboardController;
++use App\Http\Controllers\MaklumatCutiController;
++use App\Http\Controllers\MaklumatJawatanController;
++use App\Http\Controllers\MaklumatKehadiranController;
++use App\Http\Controllers\MaklumatOtController;
++use App\Http\Controllers\MaklumatPayrollController;
+ use App\Http\Controllers\MaklumatPekerjaController;
++use App\Http\Controllers\ReportBulananController;
++use Illuminate\Support\Facades\Route;
+ 
+ Route::inertia('/', 'welcome')->name('home');
+ 
+ Route::middleware(['auth', 'verified'])->group(function () {
+-    Route::inertia('dashboard', 'dashboard')->name('dashboard');
+-    Route::resource('pekerja', MaklumatPekerjaController::class);
++    Route::get('dashboard', [DashboardController::class, 'index'])->name('dashboard');
++
++    Route::get('pekerja', [MaklumatPekerjaController::class, 'index'])->name('pekerja.index');
++    Route::get('jawatan', [MaklumatJawatanController::class, 'index'])->name('jawatan.index');
++    Route::get('kehadiran', [MaklumatKehadiranController::class, 'index'])->name('kehadiran.index');
++    Route::get('cuti', [MaklumatCutiController::class, 'index'])->name('cuti.index');
++    Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])->name('kerja-lebih-masa.index');
++    Route::get('payroll', [MaklumatPayrollController::class, 'index'])->name('payroll.index');
++    Route::get('laporan-bulanan', [ReportBulananController::class, 'index'])->name('laporan-bulanan.index');
+ });
+ 
+ require __DIR__ . '/settings.php';

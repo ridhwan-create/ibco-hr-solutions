@@ -1,0 +1,312 @@
+diff --git a/.env.example b/.env.example
+index 2a42628..fa5c792 100644
+--- a/.env.example
++++ b/.env.example
+@@ -23,10 +23,17 @@ LOG_LEVEL=debug
+ DB_CONNECTION=mysql
+ DB_HOST=127.0.0.1
+ DB_PORT=3306
+-DB_DATABASE=db_spp
++DB_DATABASE=ibco-hr-solutions
+ DB_USERNAME=root
+ DB_PASSWORD=
+ 
++DB_CONNECTION_IBCO=mysql
++DB_HOST_IBCO=127.0.0.1
++DB_PORT_IBCO=3306
++DB_DATABASE_IBCO=db_spp
++DB_USERNAME_IBCO=root
++DB_PASSWORD_IBCO=
++
+ SESSION_DRIVER=database
+ SESSION_LIFETIME=120
+ SESSION_ENCRYPT=false
+diff --git a/README.md b/README.md
+index 9f3ac22..d11d99a 100644
+--- a/README.md
++++ b/README.md
+@@ -24,17 +24,28 @@ ## Modul index
+ 
+ ## Sambungan database
+ 
+-Salin `.env.example` kepada `.env`, kemudian isi maklumat sambungan MySQL:
++Projek menggunakan dua sambungan MySQL. Database utama menyimpan jadual
++Laravel seperti pengguna, sesi, cache dan queue. Connection `ibco` membaca
++data HR lama daripada `db_spp`.
++
++Salin `.env.example` kepada `.env`, kemudian isi maklumat kedua-dua sambungan:
+ 
+ ```env
+ DB_CONNECTION=mysql
+ DB_HOST=127.0.0.1
+ DB_PORT=3306
+-DB_DATABASE=db_spp
++DB_DATABASE=ibco-hr-solutions
+ DB_USERNAME=root
+ DB_PASSWORD=
++
++DB_CONNECTION_IBCO=mysql
++DB_HOST_IBCO=127.0.0.1
++DB_PORT_IBCO=3306
++DB_DATABASE_IBCO=db_spp
++DB_USERNAME_IBCO=root
++DB_PASSWORD_IBCO=
+ ```
+ 
+-Gunakan akaun database dengan akses minimum yang diperlukan. Tujuh paparan
+-index di atas hanya membaca jadual HR lama; jadual rangka kerja Laravel seperti
+-pengguna, sesi, cache dan queue mungkin masih memerlukan akses tulis.
++Selepas mengubah `.env`, jalankan `php artisan optimize:clear`. Gunakan akaun
++database dengan akses minimum yang diperlukan. Connection `ibco` hanya
++memerlukan akses baca untuk Dashboard dan tujuh paparan index semasa.
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 888cef9..2ba521d 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -10,16 +10,16 @@ class DashboardController extends Controller
+     public function index()
+     {
+         $statistics = [
+-            'pekerja' => DB::table('maklumatpekerja')->where('rcd_enable', 1)->count(),
+-            'jawatan' => DB::table('maklumatjawatan')->where('rcd_enable', 1)->count(),
+-            'kehadiran' => DB::table('maklumatkehadiran')->where('rcd_enable', 1)->count(),
+-            'cuti' => DB::table('maklumatcuti')->where('rcd_enable', 1)->count(),
+-            'kerja_lebih_masa' => DB::table('maklumatot')->where('rcd_enable', 1)->count(),
+-            'payroll' => DB::table('maklumatpayroll')->where('rcd_enable', 1)->count(),
+-            'laporan_bulanan' => DB::table('reportbulanan')->where('rcd_enable', 1)->count(),
++            'pekerja' => DB::connection('ibco')->table('maklumatpekerja')->where('rcd_enable', 1)->count(),
++            'jawatan' => DB::connection('ibco')->table('maklumatjawatan')->where('rcd_enable', 1)->count(),
++            'kehadiran' => DB::connection('ibco')->table('maklumatkehadiran')->where('rcd_enable', 1)->count(),
++            'cuti' => DB::connection('ibco')->table('maklumatcuti')->where('rcd_enable', 1)->count(),
++            'kerja_lebih_masa' => DB::connection('ibco')->table('maklumatot')->where('rcd_enable', 1)->count(),
++            'payroll' => DB::connection('ibco')->table('maklumatpayroll')->where('rcd_enable', 1)->count(),
++            'laporan_bulanan' => DB::connection('ibco')->table('reportbulanan')->where('rcd_enable', 1)->count(),
+         ];
+ 
+-        $recentAttendance = DB::table('maklumatkehadiran as k')
++        $recentAttendance = DB::connection('ibco')->table('maklumatkehadiran as k')
+             ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
+             ->where('k.rcd_enable', 1)
+             ->select([
+@@ -35,7 +35,7 @@ public function index()
+             ->limit(5)
+             ->get();
+ 
+-        $recentLeave = DB::table('maklumatcuti as c')
++        $recentLeave = DB::connection('ibco')->table('maklumatcuti as c')
+             ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
+             ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
+             ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
+diff --git a/app/Http/Controllers/MaklumatCutiController.php b/app/Http/Controllers/MaklumatCutiController.php
+index 017e884..852cf5e 100644
+--- a/app/Http/Controllers/MaklumatCutiController.php
++++ b/app/Http/Controllers/MaklumatCutiController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatcuti as c')
++        $records = DB::connection('ibco')->table('maklumatcuti as c')
+             ->leftJoin('maklumatpekerja as p', 'c.id_pekerja', '=', 'p.id')
+             ->leftJoin('xsenaraicuti as sc', 'c.jenis_cuti', '=', 'sc.id')
+             ->leftJoin('xstatuscuti as st', 'c.status_permohonan', '=', 'st.id')
+diff --git a/app/Http/Controllers/MaklumatJawatanController.php b/app/Http/Controllers/MaklumatJawatanController.php
+index 17d1708..4c036d5 100644
+--- a/app/Http/Controllers/MaklumatJawatanController.php
++++ b/app/Http/Controllers/MaklumatJawatanController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatjawatan as j')
++        $records = DB::connection('ibco')->table('maklumatjawatan as j')
+             ->leftJoin('maklumatpekerja as p', 'j.id_pekerja', '=', 'p.id')
+             ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
+             ->leftJoin('xbank as b', 'j.id_bank', '=', 'b.id')
+diff --git a/app/Http/Controllers/MaklumatKehadiranController.php b/app/Http/Controllers/MaklumatKehadiranController.php
+index 3d05e1b..f45a7b0 100644
+--- a/app/Http/Controllers/MaklumatKehadiranController.php
++++ b/app/Http/Controllers/MaklumatKehadiranController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatkehadiran as k')
++        $records = DB::connection('ibco')->table('maklumatkehadiran as k')
+             ->leftJoin('maklumatpekerja as p', 'k.id_pekerja', '=', 'p.id')
+             ->leftJoin('xpilihanjam as pj', 'k.pilihan_jam', '=', 'pj.id')
+             ->where('k.rcd_enable', 1)
+diff --git a/app/Http/Controllers/MaklumatOtController.php b/app/Http/Controllers/MaklumatOtController.php
+index b61e674..d7cb00e 100644
+--- a/app/Http/Controllers/MaklumatOtController.php
++++ b/app/Http/Controllers/MaklumatOtController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatot as ot')
++        $records = DB::connection('ibco')->table('maklumatot as ot')
+             ->leftJoin('maklumatpekerja as p', 'ot.id_pekerja', '=', 'p.id')
+             ->leftJoin('xjenisot as jot', 'ot.jenis_ot', '=', 'jot.id')
+             ->where('ot.rcd_enable', 1)
+diff --git a/app/Http/Controllers/MaklumatPayrollController.php b/app/Http/Controllers/MaklumatPayrollController.php
+index 542f005..a7a7876 100644
+--- a/app/Http/Controllers/MaklumatPayrollController.php
++++ b/app/Http/Controllers/MaklumatPayrollController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatpayroll as py')
++        $records = DB::connection('ibco')->table('maklumatpayroll as py')
+             ->where('py.rcd_enable', 1)
+             ->when($search !== '', function ($query) use ($search) {
+                 $query->where(function ($query) use ($search) {
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index e5132ed..ca8e070 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('maklumatpekerja as p')
++        $records = DB::connection('ibco')->table('maklumatpekerja as p')
+             ->leftJoin('xstatus as s', 'p.status', '=', 's.id')
+             ->where('p.rcd_enable', 1)
+             ->when($search !== '', function ($query) use ($search) {
+diff --git a/app/Http/Controllers/ReportBulananController.php b/app/Http/Controllers/ReportBulananController.php
+index 9358108..f6053a8 100644
+--- a/app/Http/Controllers/ReportBulananController.php
++++ b/app/Http/Controllers/ReportBulananController.php
+@@ -13,7 +13,7 @@ public function index(Request $request)
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::table('reportbulanan as r')
++        $records = DB::connection('ibco')->table('reportbulanan as r')
+             ->leftJoin('maklumatpekerja as p', 'r.id_pekerja', '=', 'p.id')
+             ->where('r.rcd_enable', 1)
+             ->when($search !== '', function ($query) use ($search) {
+diff --git a/app/Models/MaklumatCuti.php b/app/Models/MaklumatCuti.php
+index aaf511f..f9419f3 100644
+--- a/app/Models/MaklumatCuti.php
++++ b/app/Models/MaklumatCuti.php
+@@ -6,6 +6,8 @@
+ 
+ class MaklumatCuti extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'maklumatcuti';
+ 
+     public $timestamps = false;
+diff --git a/app/Models/MaklumatJawatan.php b/app/Models/MaklumatJawatan.php
+index a5e9e97..889518c 100644
+--- a/app/Models/MaklumatJawatan.php
++++ b/app/Models/MaklumatJawatan.php
+@@ -6,6 +6,8 @@
+ 
+ class MaklumatJawatan extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'maklumatjawatan';
+ 
+     public $timestamps = false;
+diff --git a/app/Models/MaklumatKehadiran.php b/app/Models/MaklumatKehadiran.php
+index 3bc370a..62d8091 100644
+--- a/app/Models/MaklumatKehadiran.php
++++ b/app/Models/MaklumatKehadiran.php
+@@ -6,6 +6,8 @@
+ 
+ class MaklumatKehadiran extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'maklumatkehadiran';
+ 
+     public $timestamps = false;
+diff --git a/app/Models/MaklumatOt.php b/app/Models/MaklumatOt.php
+index aabdb12..95a816c 100644
+--- a/app/Models/MaklumatOt.php
++++ b/app/Models/MaklumatOt.php
+@@ -6,6 +6,8 @@
+ 
+ class MaklumatOt extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'maklumatot';
+ 
+     public $timestamps = false;
+diff --git a/app/Models/MaklumatPayroll.php b/app/Models/MaklumatPayroll.php
+index 50ebc6c..8839942 100644
+--- a/app/Models/MaklumatPayroll.php
++++ b/app/Models/MaklumatPayroll.php
+@@ -6,6 +6,8 @@
+ 
+ class MaklumatPayroll extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'maklumatpayroll';
+ 
+     public $timestamps = false;
+diff --git a/app/Models/MaklumatPekerja.php b/app/Models/MaklumatPekerja.php
+index 10bb39f..72bcb6a 100644
+--- a/app/Models/MaklumatPekerja.php
++++ b/app/Models/MaklumatPekerja.php
+@@ -9,6 +9,8 @@ class MaklumatPekerja extends Model
+ {
+     use HasFactory;
+ 
++    protected $connection = 'ibco';
++
+     // Nyatakan nama jadual kerana ia bukan format plural standard bahasa Inggeris
+     protected $table = 'maklumatpekerja';
+ 
+diff --git a/app/Models/ReportBulanan.php b/app/Models/ReportBulanan.php
+index 51e37d6..210eeae 100644
+--- a/app/Models/ReportBulanan.php
++++ b/app/Models/ReportBulanan.php
+@@ -6,6 +6,8 @@
+ 
+ class ReportBulanan extends Model
+ {
++    protected $connection = 'ibco';
++
+     protected $table = 'reportbulanan';
+ 
+     public $timestamps = false;
+diff --git a/config/database.php b/config/database.php
+index 64709ce..f29a998 100644
+--- a/config/database.php
++++ b/config/database.php
+@@ -64,6 +64,26 @@
+             ]) : [],
+         ],
+ 
++        'ibco' => [
++            'driver' => env('DB_CONNECTION_IBCO', 'mysql'),
++            'url' => env('DB_URL_IBCO'),
++            'host' => env('DB_HOST_IBCO', '127.0.0.1'),
++            'port' => env('DB_PORT_IBCO', '3306'),
++            'database' => env('DB_DATABASE_IBCO', 'db_spp'),
++            'username' => env('DB_USERNAME_IBCO', 'root'),
++            'password' => env('DB_PASSWORD_IBCO', ''),
++            'unix_socket' => env('DB_SOCKET_IBCO', ''),
++            'charset' => env('DB_CHARSET_IBCO', 'utf8mb4'),
++            'collation' => env('DB_COLLATION_IBCO', 'utf8mb4_unicode_ci'),
++            'prefix' => '',
++            'prefix_indexes' => true,
++            'strict' => true,
++            'engine' => null,
++            'options' => extension_loaded('pdo_mysql') ? array_filter([
++                (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA_IBCO'),
++            ]) : [],
++        ],
++
+         'mariadb' => [
+             'driver' => 'mariadb',
+             'url' => env('DB_URL'),

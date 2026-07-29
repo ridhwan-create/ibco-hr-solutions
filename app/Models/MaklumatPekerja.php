@@ -9,6 +9,8 @@ class MaklumatPekerja extends Model
 {
     use HasFactory;
 
+    protected $connection = 'ibco';
+
     // Nyatakan nama jadual kerana ia bukan format plural standard bahasa Inggeris
     protected $table = 'maklumatpekerja';
 

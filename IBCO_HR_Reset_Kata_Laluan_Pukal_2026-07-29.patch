@@ -1,0 +1,1062 @@
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 701c4f5..344614b 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -40,6 +40,7 @@ class AuditTrailController extends Controller
+         'employee_link.deactivated' => 'Pautan Pekerja Dinyahaktifkan',
+         'user.created' => 'Pengguna Sistem Ditambah',
+         'user.updated' => 'Pengguna Sistem Dikemas Kini',
++        'user.password.bulk_reset' => 'Kata Laluan Direset Secara Pukal',
+     ];
+ 
+     private const AUDITABLE_TYPES = [
+@@ -246,6 +247,7 @@ public function index(Request $request): Response
+                     + ($actionCounts['office.updated'] ?? 0)
+                     + ($actionCounts['employee_link.updated'] ?? 0)
+                     + ($actionCounts['user.updated'] ?? 0)
++                    + ($actionCounts['user.password.bulk_reset'] ?? 0)
+                 ),
+                 'deactivated' => (int) (
+                     ($actionCounts['employee.deactivated'] ?? 0)
+diff --git a/app/Http/Controllers/UserPasswordBulkResetController.php b/app/Http/Controllers/UserPasswordBulkResetController.php
+new file mode 100644
+index 0000000..be71337
+--- /dev/null
++++ b/app/Http/Controllers/UserPasswordBulkResetController.php
+@@ -0,0 +1,142 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Enums\UserRole;
++use App\Http\Requests\BulkResetUserPasswordsRequest;
++use App\Models\User;
++use App\Support\AuditLogger;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class UserPasswordBulkResetController extends Controller
++{
++    public function create(Request $request): Response
++    {
++        $users = User::query()
++            ->with([
++                'roleAssignments',
++                'employeeLink' => fn ($query) => $query
++                    ->where('is_active', true)
++                    ->with('officeLocation:id,name'),
++            ])
++            ->whereKeyNot($request->user()->getAuthIdentifier())
++            ->whereHas(
++                'roleAssignments',
++                fn ($query) => $query
++                    ->where('role', UserRole::Employee->value),
++            )
++            ->whereHas(
++                'employeeLink',
++                fn ($query) => $query->where('is_active', true),
++            )
++            ->orderBy('name')
++            ->get()
++            ->map(function (User $user) {
++                $link = $user->employeeLink;
++
++                return [
++                    'id' => $user->getKey(),
++                    'name' => $user->name,
++                    'email' => $user->email,
++                    'roles' => $user->roleValues(),
++                    'role_labels' => collect($user->resolvedRoles())
++                        ->map(fn (UserRole $role) => $role->label())
++                        ->all(),
++                    'employee_id' => $link?->employee_id,
++                    'office' => $link?->officeLocation?->name,
++                ];
++            })
++            ->values();
++
++        return Inertia::render('users/reset-passwords', [
++            'users' => $users,
++            'resetResult' => $request->session()
++                ->get('bulk_password_reset_result'),
++        ]);
++    }
++
++    public function store(
++        BulkResetUserPasswordsRequest $request,
++    ): RedirectResponse {
++        $selectedIds = collect($request->validated('user_ids'))
++            ->map(fn ($id) => (int) $id)
++            ->unique()
++            ->values();
++
++        $result = DB::transaction(function () use ($request, $selectedIds) {
++            $users = User::query()
++                ->with('roleAssignments')
++                ->whereIn('id', $selectedIds)
++                ->whereKeyNot($request->user()->getAuthIdentifier())
++                ->whereHas(
++                    'roleAssignments',
++                    fn ($query) => $query
++                        ->where('role', UserRole::Employee->value),
++                )
++                ->whereHas(
++                    'employeeLink',
++                    fn ($query) => $query->where('is_active', true),
++                )
++                ->orderBy('id')
++                ->lockForUpdate()
++                ->get();
++
++            if ($users->count() !== $selectedIds->count()) {
++                throw ValidationException::withMessages([
++                    'user_ids' => 'Sebahagian pengguna tidak lagi layak untuk reset pukal. Muat semula halaman dan semak pilihan.',
++                ]);
++            }
++
++            $credentials = [];
++
++            foreach ($users as $user) {
++                $temporaryPassword = Str::password(16);
++
++                $user->forceFill([
++                    'password' => $temporaryPassword,
++                    'remember_token' => Str::random(60),
++                ])->save();
++
++                AuditLogger::record(
++                    $request,
++                    'user.password.bulk_reset',
++                    'users',
++                    $user->getKey(),
++                    newValues: [
++                        'method' => 'temporary_password',
++                        'source' => 'bulk_password_reset',
++                    ],
++                );
++
++                $credentials[] = [
++                    'user_id' => $user->getKey(),
++                    'name' => $user->name,
++                    'email' => $user->email,
++                    'temporary_password' => $temporaryPassword,
++                ];
++            }
++
++            return [
++                'reset_count' => count($credentials),
++                'credentials' => $credentials,
++            ];
++        });
++
++        return redirect()
++            ->route('users.password-reset.create')
++            ->with('bulk_password_reset_result', $result)
++            ->with('toast', [
++                'type' => 'success',
++                'message' => sprintf(
++                    '%d kata laluan pengguna berjaya ditetapkan semula.',
++                    $result['reset_count'],
++                ),
++            ]);
++    }
++}
+diff --git a/app/Http/Requests/BulkResetUserPasswordsRequest.php b/app/Http/Requests/BulkResetUserPasswordsRequest.php
+new file mode 100644
+index 0000000..6c28fb2
+--- /dev/null
++++ b/app/Http/Requests/BulkResetUserPasswordsRequest.php
+@@ -0,0 +1,43 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++
++class BulkResetUserPasswordsRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('users.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function rules(): array
++    {
++        return [
++            'user_ids' => ['required', 'array', 'min:1', 'max:200'],
++            'user_ids.*' => [
++                'required',
++                'integer',
++                'distinct',
++                'exists:users,id',
++            ],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'user_ids.required' => 'Pilih sekurang-kurangnya seorang pengguna.',
++            'user_ids.min' => 'Pilih sekurang-kurangnya seorang pengguna.',
++            'user_ids.max' => 'Maksimum 200 pengguna boleh diproses pada satu masa.',
++            'user_ids.*.distinct' => 'Senarai pengguna mengandungi pilihan berganda.',
++            'user_ids.*.exists' => 'Sebahagian pengguna yang dipilih tidak lagi wujud.',
++        ];
++    }
++}
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index 2c6d983..02006c2 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -73,7 +73,8 @@ type AuditRecord = {
+         | 'maklumatjawatan'
+         | 'geo_attendance_records'
+         | 'office_locations'
+-        | 'employee_user_links';
++        | 'employee_user_links'
++        | 'users';
+     auditable_id: string;
+     employee: AuditEmployee | null;
+     user: AuditActor | null;
+@@ -177,6 +178,8 @@ const fieldLabels: Record<string, string> = {
+     distance_meters: 'Jarak (meter)',
+     accuracy_meters: 'Ketepatan GPS (meter)',
+     reason: 'Alasan',
++    method: 'Kaedah',
++    source: 'Sumber',
+ };
+ 
+ const actionStyles: Record<string, string> = {
+@@ -204,6 +207,8 @@ const actionStyles: Record<string, string> = {
+         'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+     'attendance.cancelled':
+         'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
++    'user.password.bulk_reset':
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+ };
+ 
+ function formatDate(value: string | null): string {
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index cfc65ea..dd3aa05 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -213,6 +213,12 @@ export default function UserManagement({
+ 
+                     <div className="flex w-full flex-col gap-3 lg:max-w-xl">
+                         <div className="flex flex-wrap justify-end gap-2">
++                            <Button asChild variant="outline">
++                                <Link href="/pengguna/reset-kata-laluan">
++                                    <KeyRound />
++                                    Reset Kata Laluan
++                                </Link>
++                            </Button>
+                             <Button asChild variant="outline">
+                                 <Link href="/pengguna/import-pekerja">
+                                     <DatabaseZap />
+diff --git a/resources/js/pages/users/reset-passwords.tsx b/resources/js/pages/users/reset-passwords.tsx
+new file mode 100644
+index 0000000..cd620f9
+--- /dev/null
++++ b/resources/js/pages/users/reset-passwords.tsx
+@@ -0,0 +1,560 @@
++import { Head, Link, useForm } from '@inertiajs/react';
++import {
++    AlertTriangle,
++    ArrowLeft,
++    CheckCircle2,
++    ClipboardCopy,
++    Download,
++    KeyRound,
++    Search,
++    ShieldCheck,
++} from 'lucide-react';
++import { useMemo, useState } from 'react';
++import type { FormEvent } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import InputError from '@/components/input-error';
++import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Checkbox } from '@/components/ui/checkbox';
++import { Input } from '@/components/ui/input';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++import type { UserRole } from '@/types';
++
++type ResettableUser = {
++    id: number;
++    name: string;
++    email: string;
++    roles: UserRole[];
++    role_labels: string[];
++    employee_id: number | null;
++    office: string | null;
++};
++
++type Credential = {
++    user_id: number;
++    name: string;
++    email: string;
++    temporary_password: string;
++};
++
++type ResetResult = {
++    reset_count: number;
++    credentials: Credential[];
++};
++
++type ResetPasswordsProps = {
++    users: ResettableUser[];
++    resetResult: ResetResult | null;
++};
++
++type ResetForm = {
++    user_ids: number[];
++};
++
++const roleStyles: Record<UserRole, string> = {
++    super_admin:
++        'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
++    hr_admin:
++        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
++    viewer: 'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
++    employee:
++        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
++};
++
++function csvCell(value: string | number): string {
++    let safeValue = String(value);
++
++    if (/^[=+\-@]/.test(safeValue)) {
++        safeValue = `'${safeValue}`;
++    }
++
++    return `"${safeValue.replaceAll('"', '""')}"`;
++}
++
++function credentialText(credentials: Credential[]): string {
++    return credentials
++        .map(
++            (credential) =>
++                `${credential.name} | ${credential.email} | ${credential.temporary_password}`,
++        )
++        .join('\n');
++}
++
++function RoleBadges({ user }: { user: ResettableUser }) {
++    return (
++        <div className="flex flex-wrap gap-1.5">
++            {user.roles.map((role, index) => (
++                <Badge
++                    key={role}
++                    variant="outline"
++                    className={roleStyles[role]}
++                >
++                    {user.role_labels[index]}
++                </Badge>
++            ))}
++        </div>
++    );
++}
++
++export default function ResetPasswords({
++    users,
++    resetResult,
++}: ResetPasswordsProps) {
++    const [search, setSearch] = useState('');
++    const [credentialsCopied, setCredentialsCopied] = useState(false);
++    const { data, setData, post, processing, errors } = useForm<ResetForm>({
++        user_ids: [],
++    });
++    const visibleUsers = useMemo(() => {
++        const term = search.trim().toLocaleLowerCase('ms-MY');
++
++        if (!term) {
++            return users;
++        }
++
++        return users.filter((user) =>
++            [
++                user.name,
++                user.email,
++                user.office ?? '',
++                ...user.role_labels,
++            ].some((value) => value.toLocaleLowerCase('ms-MY').includes(term)),
++        );
++    }, [search, users]);
++    const visibleUserIds = visibleUsers.map((user) => user.id);
++    const allVisibleSelected =
++        visibleUserIds.length > 0 &&
++        visibleUserIds.every((id) => data.user_ids.includes(id));
++
++    const toggleUser = (userId: number, checked: boolean) => {
++        if (checked && data.user_ids.length >= 200) {
++            return;
++        }
++
++        setData(
++            'user_ids',
++            checked
++                ? [...new Set([...data.user_ids, userId])]
++                : data.user_ids.filter((id) => id !== userId),
++        );
++    };
++
++    const toggleVisible = (checked: boolean) => {
++        if (!checked) {
++            setData(
++                'user_ids',
++                data.user_ids.filter((id) => !visibleUserIds.includes(id)),
++            );
++
++            return;
++        }
++
++        setData(
++            'user_ids',
++            [...new Set([...data.user_ids, ...visibleUserIds])].slice(0, 200),
++        );
++    };
++
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++
++        if (
++            !window.confirm(
++                `Tetapkan semula kata laluan untuk ${data.user_ids.length} pengguna? Kata laluan lama mereka tidak lagi boleh digunakan.`,
++            )
++        ) {
++            return;
++        }
++
++        post('/pengguna/reset-kata-laluan', {
++            preserveScroll: true,
++        });
++    };
++
++    const copyCredentials = async () => {
++        if (!resetResult?.credentials.length) {
++            return;
++        }
++
++        await navigator.clipboard.writeText(
++            credentialText(resetResult.credentials),
++        );
++        setCredentialsCopied(true);
++        window.setTimeout(() => setCredentialsCopied(false), 2500);
++    };
++
++    const downloadCredentials = () => {
++        if (!resetResult?.credentials.length) {
++            return;
++        }
++
++        const rows = [
++            ['ID Pengguna', 'Nama', 'E-mel', 'Kata Laluan Sementara'],
++            ...resetResult.credentials.map((credential) => [
++                credential.user_id,
++                credential.name,
++                credential.email,
++                credential.temporary_password,
++            ]),
++        ];
++        const csv = rows
++            .map((row) => row.map((value) => csvCell(value)).join(','))
++            .join('\r\n');
++        const blob = new Blob([`\uFEFF${csv}`], {
++            type: 'text/csv;charset=utf-8',
++        });
++        const url = URL.createObjectURL(blob);
++        const anchor = document.createElement('a');
++
++        anchor.href = url;
++        anchor.download = `reset-kata-laluan-${new Date()
++            .toISOString()
++            .slice(0, 10)}.csv`;
++        document.body.appendChild(anchor);
++        anchor.click();
++        anchor.remove();
++        URL.revokeObjectURL(url);
++    };
++
++    return (
++        <>
++            <Head title="Reset Kata Laluan Pukal" />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
++                    <div className="space-y-2">
++                        <HeadingSmall
++                            title="Reset Kata Laluan Pukal"
++                            description="Jana kata laluan sementara baharu untuk pengguna Employee yang dipautkan."
++                        />
++                        <Badge
++                            variant="secondary"
++                            className="gap-1.5 font-normal"
++                        >
++                            <ShieldCheck className="size-3.5" />
++                            Tiada perubahan pada role, pautan atau db_spp
++                        </Badge>
++                    </div>
++
++                    <Button asChild variant="outline">
++                        <Link href="/pengguna">
++                            <ArrowLeft />
++                            Kembali ke Pengguna
++                        </Link>
++                    </Button>
++                </div>
++
++                {resetResult && resetResult.credentials.length > 0 && (
++                    <Card className="border-emerald-500/30 bg-emerald-500/5">
++                        <CardHeader>
++                            <CardTitle className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
++                                <CheckCircle2 className="size-5" />
++                                {resetResult.reset_count} Kata Laluan Berjaya
++                                Ditetapkan Semula
++                            </CardTitle>
++                            <CardDescription>
++                                Muat turun CSV sekarang. Kata laluan sementara
++                                ini hanya dipaparkan pada halaman ini dan tidak
++                                boleh dipulihkan selepas halaman dimuat semula.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="space-y-4">
++                            <Alert>
++                                <AlertTriangle className="size-4" />
++                                <AlertTitle>Simpan sebelum keluar</AlertTitle>
++                                <AlertDescription>
++                                    Fail CSV mengandungi maklumat sulit. Simpan
++                                    di lokasi selamat dan serahkan kata laluan
++                                    kepada pengguna masing-masing.
++                                </AlertDescription>
++                            </Alert>
++
++                            <div className="flex flex-wrap gap-2">
++                                <Button
++                                    type="button"
++                                    onClick={downloadCredentials}
++                                >
++                                    <Download />
++                                    Muat Turun CSV
++                                </Button>
++                                <Button
++                                    type="button"
++                                    variant="outline"
++                                    onClick={copyCredentials}
++                                >
++                                    <ClipboardCopy />
++                                    {credentialsCopied
++                                        ? 'Sudah Disalin'
++                                        : 'Salin Senarai'}
++                                </Button>
++                            </div>
++
++                            <div className="max-h-64 overflow-auto rounded-lg border bg-background">
++                                <Table>
++                                    <TableHeader className="bg-muted/60">
++                                        <TableRow>
++                                            <TableHead>Nama</TableHead>
++                                            <TableHead>E-mel</TableHead>
++                                            <TableHead>
++                                                Kata Laluan Sementara
++                                            </TableHead>
++                                        </TableRow>
++                                    </TableHeader>
++                                    <TableBody>
++                                        {resetResult.credentials.map(
++                                            (credential) => (
++                                                <TableRow
++                                                    key={credential.user_id}
++                                                >
++                                                    <TableCell className="font-medium">
++                                                        {credential.name}
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        {credential.email}
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        <code className="rounded bg-muted px-2 py-1 text-xs">
++                                                            {
++                                                                credential.temporary_password
++                                                            }
++                                                        </code>
++                                                    </TableCell>
++                                                </TableRow>
++                                            ),
++                                        )}
++                                    </TableBody>
++                                </Table>
++                            </div>
++                        </CardContent>
++                    </Card>
++                )}
++
++                <Alert>
++                    <KeyRound className="size-4" />
++                    <AlertTitle>Reset terkawal</AlertTitle>
++                    <AlertDescription>
++                        Hanya pengguna yang mempunyai role Employee dan pautan
++                        pekerja aktif disenaraikan. Akaun anda sendiri
++                        dikecualikan untuk mengelakkan kehilangan akses Super
++                        Admin. Maksimum 200 pengguna bagi setiap proses.
++                    </AlertDescription>
++                </Alert>
++
++                <form onSubmit={submit} className="space-y-4">
++                    <Card className="gap-0 overflow-hidden">
++                        <CardHeader className="border-b">
++                            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
++                                <div>
++                                    <CardTitle>
++                                        Pilih Pengguna Employee
++                                    </CardTitle>
++                                    <CardDescription>
++                                        {data.user_ids.length} daripada{' '}
++                                        {users.length} pengguna dipilih
++                                    </CardDescription>
++                                </div>
++                                <div className="relative w-full sm:max-w-sm">
++                                    <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
++                                    <Input
++                                        value={search}
++                                        onChange={(event) =>
++                                            setSearch(event.target.value)
++                                        }
++                                        placeholder="Cari nama, e-mel, role atau pejabat..."
++                                        className="pl-9"
++                                        aria-label="Cari pengguna untuk reset"
++                                    />
++                                </div>
++                            </div>
++                        </CardHeader>
++
++                        <div className="hidden overflow-x-auto md:block">
++                            <Table>
++                                <TableHeader className="bg-muted/60">
++                                    <TableRow>
++                                        <TableHead className="w-12">
++                                            <Checkbox
++                                                checked={allVisibleSelected}
++                                                onCheckedChange={(checked) =>
++                                                    toggleVisible(
++                                                        checked === true,
++                                                    )
++                                                }
++                                                aria-label="Pilih semua pengguna dipaparkan"
++                                            />
++                                        </TableHead>
++                                        <TableHead>Pengguna</TableHead>
++                                        <TableHead>Role</TableHead>
++                                        <TableHead>Lokasi Pejabat</TableHead>
++                                    </TableRow>
++                                </TableHeader>
++                                <TableBody>
++                                    {visibleUsers.length > 0 ? (
++                                        visibleUsers.map((user) => (
++                                            <TableRow key={user.id}>
++                                                <TableCell>
++                                                    <Checkbox
++                                                        checked={data.user_ids.includes(
++                                                            user.id,
++                                                        )}
++                                                        disabled={
++                                                            !data.user_ids.includes(
++                                                                user.id,
++                                                            ) &&
++                                                            data.user_ids
++                                                                .length >= 200
++                                                        }
++                                                        onCheckedChange={(
++                                                            checked,
++                                                        ) =>
++                                                            toggleUser(
++                                                                user.id,
++                                                                checked ===
++                                                                    true,
++                                                            )
++                                                        }
++                                                        aria-label={`Pilih ${user.name}`}
++                                                    />
++                                                </TableCell>
++                                                <TableCell>
++                                                    <p className="font-medium">
++                                                        {user.name}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {user.email}
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell>
++                                                    <RoleBadges user={user} />
++                                                </TableCell>
++                                                <TableCell>
++                                                    {user.office ??
++                                                        'Belum ditetapkan'}
++                                                </TableCell>
++                                            </TableRow>
++                                        ))
++                                    ) : (
++                                        <TableRow>
++                                            <TableCell
++                                                colSpan={4}
++                                                className="h-28 text-center text-muted-foreground"
++                                            >
++                                                Tiada pengguna ditemui.
++                                            </TableCell>
++                                        </TableRow>
++                                    )}
++                                </TableBody>
++                            </Table>
++                        </div>
++
++                        <CardContent className="space-y-3 py-4 md:hidden">
++                            <div className="flex items-center gap-2 rounded-lg border p-3">
++                                <Checkbox
++                                    checked={allVisibleSelected}
++                                    onCheckedChange={(checked) =>
++                                        toggleVisible(checked === true)
++                                    }
++                                    aria-label="Pilih semua pengguna dipaparkan"
++                                />
++                                <span className="text-sm font-medium">
++                                    Pilih semua yang dipaparkan
++                                </span>
++                            </div>
++
++                            {visibleUsers.length > 0 ? (
++                                visibleUsers.map((user) => (
++                                    <label
++                                        key={user.id}
++                                        className="flex gap-3 rounded-lg border p-4"
++                                    >
++                                        <Checkbox
++                                            checked={data.user_ids.includes(
++                                                user.id,
++                                            )}
++                                            disabled={
++                                                !data.user_ids.includes(
++                                                    user.id,
++                                                ) && data.user_ids.length >= 200
++                                            }
++                                            onCheckedChange={(checked) =>
++                                                toggleUser(
++                                                    user.id,
++                                                    checked === true,
++                                                )
++                                            }
++                                            aria-label={`Pilih ${user.name}`}
++                                        />
++                                        <span className="min-w-0 space-y-2">
++                                            <span className="block">
++                                                <span className="block font-medium">
++                                                    {user.name}
++                                                </span>
++                                                <span className="block text-sm break-all text-muted-foreground">
++                                                    {user.email}
++                                                </span>
++                                            </span>
++                                            <RoleBadges user={user} />
++                                            <span className="block text-xs text-muted-foreground">
++                                                {user.office ??
++                                                    'Lokasi belum ditetapkan'}
++                                            </span>
++                                        </span>
++                                    </label>
++                                ))
++                            ) : (
++                                <p className="py-8 text-center text-sm text-muted-foreground">
++                                    Tiada pengguna ditemui.
++                                </p>
++                            )}
++                        </CardContent>
++                    </Card>
++
++                    <InputError message={errors.user_ids} />
++
++                    <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
++                        <Button asChild type="button" variant="outline">
++                            <Link href="/pengguna">Batal</Link>
++                        </Button>
++                        <Button
++                            type="submit"
++                            disabled={processing || data.user_ids.length === 0}
++                        >
++                            <KeyRound />
++                            {processing
++                                ? 'Sedang Menetapkan Semula...'
++                                : `Reset ${data.user_ids.length} Kata Laluan`}
++                        </Button>
++                    </div>
++                </form>
++            </div>
++        </>
++    );
++}
++
++ResetPasswords.layout = {
++    breadcrumbs: [
++        {
++            title: 'Roles & Permissions',
++            href: '/pengguna',
++        },
++        {
++            title: 'Reset Kata Laluan Pukal',
++            href: '/pengguna/reset-kata-laluan',
++        },
++    ],
++};
+diff --git a/routes/web.php b/routes/web.php
+index f1e24dd..2513e8a 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -12,6 +12,7 @@
+ use App\Http\Controllers\MaklumatPekerjaController;
+ use App\Http\Controllers\ReportBulananController;
+ use App\Http\Controllers\UserManagementController;
++use App\Http\Controllers\UserPasswordBulkResetController;
+ use Illuminate\Support\Facades\Route;
+ 
+ Route::inertia('/', 'welcome')->name('home');
+@@ -116,6 +117,10 @@
+             ->name('users.import.create');
+         Route::post('pengguna/import-pekerja', [EmployeeUserImportController::class, 'store'])
+             ->name('users.import.store');
++        Route::get('pengguna/reset-kata-laluan', [UserPasswordBulkResetController::class, 'create'])
++            ->name('users.password-reset.create');
++        Route::post('pengguna/reset-kata-laluan', [UserPasswordBulkResetController::class, 'store'])
++            ->name('users.password-reset.store');
+         Route::get('pengguna/{user}/edit', [UserManagementController::class, 'edit'])
+             ->whereNumber('user')
+             ->name('users.edit');
+diff --git a/tests/Feature/BulkPasswordResetTest.php b/tests/Feature/BulkPasswordResetTest.php
+new file mode 100644
+index 0000000..e4d1f48
+--- /dev/null
++++ b/tests/Feature/BulkPasswordResetTest.php
+@@ -0,0 +1,201 @@
++<?php
++
++use App\Enums\UserRole;
++use App\Models\AuditLog;
++use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\Hash;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++function createPasswordResetOffice(): OfficeLocation
++{
++    return OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.1390000,
++        'longitude' => 101.6869000,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++}
++
++function linkPasswordResetEmployee(
++    User $user,
++    OfficeLocation $office,
++    int $employeeId,
++): EmployeeUserLink {
++    return EmployeeUserLink::query()->create([
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => true,
++    ]);
++}
++
++test('super admin can view resettable employee users', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $office = createPasswordResetOffice();
++    $employee = User::factory()->employee()->create([
++        'name' => 'Employee Layak',
++        'email' => 'layak@ibco.test',
++    ]);
++    linkPasswordResetEmployee($employee, $office, 1001);
++    User::factory()->employee()->create([
++        'name' => 'Employee Tanpa Pautan',
++        'email' => 'tanpa.pautan@ibco.test',
++    ]);
++    User::factory()->create([
++        'name' => 'Viewer Biasa',
++        'email' => 'viewer@ibco.test',
++    ]);
++
++    $this->actingAs($superAdmin)
++        ->get(route('users.password-reset.create'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('users/reset-passwords')
++            ->has('users', 1)
++            ->where('users.0.id', $employee->getKey())
++            ->where('users.0.email', 'layak@ibco.test')
++            ->where('users.0.roles.0', UserRole::Employee->value)
++            ->where('users.0.office', 'IBCO Solutions HQ')
++            ->where('resetResult', null));
++});
++
++test('bulk reset changes selected passwords without changing roles or employee links', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $office = createPasswordResetOffice();
++    $first = User::factory()->employee()->create([
++        'name' => 'Reset Pertama',
++        'email' => 'reset.pertama@ibco.test',
++        'password' => 'OldPasswordOne123!',
++    ]);
++    $first->syncRoles([
++        UserRole::HrAdmin,
++        UserRole::Employee,
++    ]);
++    $firstLink = linkPasswordResetEmployee($first, $office, 2001);
++    $second = User::factory()->employee()->create([
++        'name' => 'Reset Kedua',
++        'email' => 'reset.kedua@ibco.test',
++        'password' => 'OldPasswordTwo123!',
++    ]);
++    $secondLink = linkPasswordResetEmployee($second, $office, 2002);
++    $notSelected = User::factory()->employee()->create([
++        'name' => 'Tidak Dipilih',
++        'email' => 'tidak.dipilih@ibco.test',
++        'password' => 'UnchangedPassword123!',
++    ]);
++    linkPasswordResetEmployee($notSelected, $office, 2003);
++    $firstRoles = $first->roleValues();
++    $secondRoles = $second->roleValues();
++    $notSelectedPassword = $notSelected->password;
++
++    $this->actingAs($superAdmin)
++        ->post(route('users.password-reset.store'), [
++            'user_ids' => [$first->getKey(), $second->getKey()],
++        ])
++        ->assertRedirect(route('users.password-reset.create'))
++        ->assertSessionDoesntHaveErrors();
++
++    $result = session('bulk_password_reset_result');
++
++    expect($result['reset_count'])->toBe(2);
++    expect($result['credentials'])->toHaveCount(2);
++
++    foreach ($result['credentials'] as $credential) {
++        $user = User::query()->findOrFail($credential['user_id']);
++
++        expect(Hash::check(
++            $credential['temporary_password'],
++            $user->password,
++        ))->toBeTrue();
++        expect($credential['temporary_password'])->toHaveLength(16);
++    }
++
++    $first->refresh();
++    $second->refresh();
++    $notSelected->refresh();
++
++    expect($first->roleValues())->toBe($firstRoles);
++    expect($second->roleValues())->toBe($secondRoles);
++    expect($firstLink->fresh()->is_active)->toBeTrue();
++    expect($secondLink->fresh()->is_active)->toBeTrue();
++    expect($notSelected->password)->toBe($notSelectedPassword);
++    expect(AuditLog::query()
++        ->where('action', 'user.password.bulk_reset')
++        ->count())->toBe(2);
++
++    AuditLog::query()
++        ->where('action', 'user.password.bulk_reset')
++        ->get()
++        ->each(function (AuditLog $log) {
++            expect($log->old_values)->toBeNull();
++            expect($log->new_values)->toBe([
++                'method' => 'temporary_password',
++                'source' => 'bulk_password_reset',
++            ]);
++            expect(array_keys($log->new_values))
++                ->not->toContain('password', 'temporary_password');
++        });
++});
++
++test('current user and accounts without an active employee link cannot be reset in bulk', function () {
++    $superAdmin = User::factory()->superAdmin()->create([
++        'password' => 'SuperAdminPassword123!',
++    ]);
++    $superAdmin->syncRoles([
++        UserRole::SuperAdmin,
++        UserRole::Employee,
++    ]);
++    $office = createPasswordResetOffice();
++    linkPasswordResetEmployee($superAdmin, $office, 3001);
++    $unlinkedEmployee = User::factory()->employee()->create([
++        'password' => 'UnlinkedPassword123!',
++    ]);
++    $superAdminPassword = $superAdmin->password;
++    $unlinkedPassword = $unlinkedEmployee->password;
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.password-reset.create'))
++        ->post(route('users.password-reset.store'), [
++            'user_ids' => [
++                $superAdmin->getKey(),
++                $unlinkedEmployee->getKey(),
++            ],
++        ])
++        ->assertRedirect(route('users.password-reset.create'))
++        ->assertSessionHasErrors('user_ids');
++
++    expect($superAdmin->fresh()->password)->toBe($superAdminPassword);
++    expect($unlinkedEmployee->fresh()->password)->toBe($unlinkedPassword);
++    expect(AuditLog::query()
++        ->where('action', 'user.password.bulk_reset')
++        ->count())->toBe(0);
++});
++
++test('non super admin cannot access bulk password reset', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $office = createPasswordResetOffice();
++    $employee = User::factory()->employee()->create();
++    linkPasswordResetEmployee($employee, $office, 4001);
++
++    $this->actingAs($hrAdmin)
++        ->get(route('users.password-reset.create'))
++        ->assertForbidden();
++
++    $this->actingAs($hrAdmin)
++        ->post(route('users.password-reset.store'), [
++            'user_ids' => [$employee->getKey()],
++        ])
++        ->assertForbidden();
++
++    expect(AuditLog::query()
++        ->where('action', 'user.password.bulk_reset')
++        ->count())->toBe(0);
++});
