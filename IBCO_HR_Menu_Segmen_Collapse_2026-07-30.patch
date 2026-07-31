@@ -1,0 +1,193 @@
+--- a/resources/js/components/nav-main.tsx
++++ b/resources/js/components/nav-main.tsx
+@@ -1,4 +1,10 @@
+ import { Link } from '@inertiajs/react';
++import { ChevronRight } from 'lucide-react';
++import {
++    Collapsible,
++    CollapsibleContent,
++    CollapsibleTrigger,
++} from '@/components/ui/collapsible';
+ import {
+     SidebarGroup,
+     SidebarGroupLabel,
+@@ -8,68 +14,115 @@
+     SidebarMenuItem,
+ } from '@/components/ui/sidebar';
+ import { useCurrentUrl } from '@/hooks/use-current-url';
+-import { cn } from '@/lib/utils';
++import { cn, toUrl } from '@/lib/utils';
+ import type { NavItem } from '@/types';
+ 
+ export function NavMain({
+     items = [],
+     label = 'Platform',
++    defaultOpen = false,
+ }: {
+     items: NavItem[];
+     label?: string;
++    defaultOpen?: boolean;
+ }) {
+-    const { isCurrentUrl } = useCurrentUrl();
++    const { currentUrl, isCurrentUrl } = useCurrentUrl();
++    const containsActiveItem = items.some((item) => {
++        const itemPath =
++            new URL(toUrl(item.href), 'http://localhost').pathname.replace(
++                /\/+$/,
++                '',
++            ) || '/';
+ 
+-    return (
+-        <SidebarGroup className="px-2 py-0">
+-            <SidebarGroupLabel>{label}</SidebarGroupLabel>
+-            <SidebarMenu>
+-                {items.map((item) => {
+-                    const badge =
+-                        typeof item.badge === 'number' && item.badge > 0
+-                            ? item.badge
+-                            : 0;
+-                    const tooltip = badge
+-                        ? `${item.title} · ${badge} menunggu tindakan`
+-                        : item.title;
++        return (
++            currentUrl === itemPath ||
++            (itemPath !== '/' && currentUrl.startsWith(`${itemPath}/`))
++        );
++    });
++    const pendingActions = items.reduce(
++        (total, item) =>
++            total +
++            (typeof item.badge === 'number' && item.badge > 0 ? item.badge : 0),
++        0,
++    );
+ 
+-                    return (
+-                        <SidebarMenuItem key={item.title}>
+-                            <SidebarMenuButton
+-                                asChild
+-                                isActive={isCurrentUrl(item.href)}
+-                                tooltip={{ children: tooltip }}
+-                                className="h-10 gap-2.5 group-data-[collapsible=icon]:h-8!"
+-                            >
+-                                <Link
+-                                    href={item.href}
+-                                    prefetch
+-                                    aria-label={tooltip}
++    return (
++        <Collapsible
++            defaultOpen={defaultOpen || containsActiveItem}
++            className="group/nav-section"
++        >
++            <SidebarGroup className="px-2 py-0">
++                <SidebarGroupLabel asChild>
++                    <CollapsibleTrigger
++                        className="group/section-trigger w-full cursor-pointer justify-between hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
++                        aria-label={`Buka atau tutup menu ${label}`}
++                    >
++                        <span className="truncate">{label}</span>
++                        <span className="ml-auto flex shrink-0 items-center gap-1.5">
++                            {pendingActions > 0 && (
++                                <span
++                                    className="flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 text-[10px] font-semibold text-white shadow-sm shadow-red-600/30 group-data-[state=open]/nav-section:hidden"
++                                    aria-label={`${pendingActions} menunggu tindakan`}
+                                 >
+-                                    {item.icon && (
+-                                        <span
+-                                            aria-hidden="true"
+-                                            className={cn(
+-                                                'flex size-6 shrink-0 items-center justify-center rounded-md ring-1 transition-transform duration-200 ring-inset group-hover/menu-item:scale-105 group-data-[collapsible=icon]:size-4 group-data-[collapsible=icon]:rounded-sm group-data-[collapsible=icon]:[&>svg]:size-3',
+-                                                item.iconClassName ??
+-                                                    'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700',
+-                                            )}
++                                    {pendingActions > 99
++                                        ? '99+'
++                                        : pendingActions}
++                                </span>
++                            )}
++                            <ChevronRight className="size-3.5 transition-transform duration-200 group-data-[state=open]/section-trigger:rotate-90" />
++                        </span>
++                    </CollapsibleTrigger>
++                </SidebarGroupLabel>
++                <CollapsibleContent>
++                    <SidebarMenu>
++                        {items.map((item) => {
++                            const badge =
++                                typeof item.badge === 'number' && item.badge > 0
++                                    ? item.badge
++                                    : 0;
++                            const tooltip = badge
++                                ? `${item.title} · ${badge} menunggu tindakan`
++                                : item.title;
++
++                            return (
++                                <SidebarMenuItem key={item.title}>
++                                    <SidebarMenuButton
++                                        asChild
++                                        isActive={isCurrentUrl(item.href)}
++                                        tooltip={{ children: tooltip }}
++                                        className="h-10 gap-2.5 group-data-[collapsible=icon]:h-8!"
++                                    >
++                                        <Link
++                                            href={item.href}
++                                            prefetch
++                                            aria-label={tooltip}
+                                         >
+-                                            <item.icon className="size-4" />
+-                                        </span>
++                                            {item.icon && (
++                                                <span
++                                                    aria-hidden="true"
++                                                    className={cn(
++                                                        'flex size-6 shrink-0 items-center justify-center rounded-md ring-1 transition-transform duration-200 ring-inset group-hover/menu-item:scale-105 group-data-[collapsible=icon]:size-4 group-data-[collapsible=icon]:rounded-sm group-data-[collapsible=icon]:[&>svg]:size-3',
++                                                        item.iconClassName ??
++                                                            'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700',
++                                                    )}
++                                                >
++                                                    <item.icon className="size-4" />
++                                                </span>
++                                            )}
++                                            <span>{item.title}</span>
++                                        </Link>
++                                    </SidebarMenuButton>
++                                    {badge > 0 && (
++                                        <SidebarMenuBadge className="bg-red-600 font-semibold text-white shadow-sm shadow-red-600/30">
++                                            {badge > 99 ? '99+' : badge}
++                                        </SidebarMenuBadge>
+                                     )}
+-                                    <span>{item.title}</span>
+-                                </Link>
+-                            </SidebarMenuButton>
+-                            {badge > 0 && (
+-                                <SidebarMenuBadge className="bg-red-600 font-semibold text-white shadow-sm shadow-red-600/30">
+-                                    {badge > 99 ? '99+' : badge}
+-                                </SidebarMenuBadge>
+-                            )}
+-                        </SidebarMenuItem>
+-                    );
+-                })}
+-            </SidebarMenu>
+-        </SidebarGroup>
++                                </SidebarMenuItem>
++                            );
++                        })}
++                    </SidebarMenu>
++                </CollapsibleContent>
++            </SidebarGroup>
++        </Collapsible>
+     );
+ }
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -348,7 +348,11 @@
+ 
+             <SidebarContent>
+                 {visibleMainItems.length > 0 && (
+-                    <NavMain items={visibleMainItems} label="Utama" />
++                    <NavMain
++                        items={visibleMainItems}
++                        label="Utama"
++                        defaultOpen
++                    />
+                 )}
+                 {visibleEmployeeItems.length > 0 && (
+                     <NavMain items={visibleEmployeeItems} label="Pekerja" />

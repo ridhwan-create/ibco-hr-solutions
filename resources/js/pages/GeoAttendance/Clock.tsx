@@ -45,6 +45,11 @@ type Office = {
 type AttendanceRecord = {
     id: number;
     attendance_date: string;
+    scheduled_start_at: string | null;
+    scheduled_end_at: string | null;
+    late_minutes: number;
+    early_departure_minutes: number;
+    attendance_day_type: string | null;
     clock_in_at: string;
     clock_out_at: string | null;
     clock_in_accuracy_meters: string | null;
@@ -337,6 +342,41 @@ export default function GeoAttendanceClock({
                                     </p>
                                 </div>
                             </div>
+
+                            {todayRecord && (
+                                <div className="grid gap-3 rounded-xl border bg-muted/20 p-4 sm:grid-cols-3">
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">
+                                            Jadual Roster
+                                        </p>
+                                        <p className="mt-1 font-medium">
+                                            {todayRecord.scheduled_start_at
+                                                ? `${formatTime(todayRecord.scheduled_start_at)} – ${formatTime(todayRecord.scheduled_end_at)}`
+                                                : todayRecord.attendance_day_type ||
+                                                  'Tiada roster'}
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">
+                                            Lewat
+                                        </p>
+                                        <p className="mt-1 font-medium">
+                                            {todayRecord.late_minutes} minit
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-muted-foreground">
+                                            Pulang Awal
+                                        </p>
+                                        <p className="mt-1 font-medium">
+                                            {
+                                                todayRecord.early_departure_minutes
+                                            }{' '}
+                                            minit
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
 
                             {positionPreview && (
                                 <div className="flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm">

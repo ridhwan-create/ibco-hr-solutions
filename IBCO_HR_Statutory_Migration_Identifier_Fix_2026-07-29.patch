@@ -1,0 +1,92 @@
+diff --git a/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php b/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php
+index 56a1330..b6859cf 100644
+--- a/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php
++++ b/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php
+@@ -9,6 +9,8 @@ return new class extends Migration
+ {
+     public function up(): void
+     {
++        $this->cleanUpInterruptedMigration();
++
+         Schema::table('payroll_settings', function (Blueprint $table) {
+             $table->string('company_name')->default('IBCO Solutions');
+             $table->string('company_registration_no', 80)->nullable();
+@@ -119,8 +121,13 @@ return new class extends Migration
+             $table->id();
+             $table->foreignId('payroll_entry_id')->unique()->constrained()->cascadeOnDelete();
+             $table->foreignId('employee_statutory_profile_id')
+-                ->nullable()
+-                ->constrained()
++                ->nullable();
++            $table->foreign(
++                'employee_statutory_profile_id',
++                'payroll_stat_profile_fk',
++            )
++                ->references('id')
++                ->on('employee_statutory_profiles')
+                 ->nullOnDelete();
+             $table->string('kwsp_category', 32);
+             $table->string('socso_category', 16);
+@@ -194,4 +201,62 @@ return new class extends Migration
+             ]);
+         });
+     }
++
++    /**
++     * MySQL commits DDL statements individually. If this migration previously
++     * failed, remove only this migration's partial schema before retrying it.
++     */
++    private function cleanUpInterruptedMigration(): void
++    {
++        Schema::dropIfExists('payroll_statutory_snapshots');
++        Schema::dropIfExists('employee_statutory_profiles');
++        Schema::dropIfExists('statutory_settings');
++
++        $this->dropColumnsIfPresent('payroll_runs', [
++            'total_employee_statutory',
++            'total_employer_statutory',
++            'total_pcb',
++        ]);
++        $this->dropColumnsIfPresent('payroll_entry_items', [
++            'is_epf_wage',
++            'is_socso_wage',
++            'is_eis_wage',
++            'is_pcb_wage',
++        ]);
++        $this->dropColumnsIfPresent('payroll_components', [
++            'is_epf_wage',
++            'is_socso_wage',
++            'is_eis_wage',
++            'is_pcb_wage',
++        ]);
++        $this->dropColumnsIfPresent('payroll_settings', [
++            'company_name',
++            'company_registration_no',
++            'company_address',
++            'payslip_note',
++        ]);
++    }
++
++    /**
++     * @param  array<int, string>  $columns
++     */
++    private function dropColumnsIfPresent(string $table, array $columns): void
++    {
++        if (! Schema::hasTable($table)) {
++            return;
++        }
++
++        $existingColumns = array_values(array_filter(
++            $columns,
++            fn (string $column): bool => Schema::hasColumn($table, $column),
++        ));
++
++        if ($existingColumns === []) {
++            return;
++        }
++
++        Schema::table($table, function (Blueprint $table) use ($existingColumns) {
++            $table->dropColumn($existingColumns);
++        });
++    }
+ };

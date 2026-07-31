@@ -1,0 +1,32 @@
+diff --git a/app/Support/PayrollCalculator.php b/app/Support/PayrollCalculator.php
+index 1d06d43e189ea26c5fffc41496b82561ad285d0f..a656c23279c889cbc8f7f07656256eb6f30cb683 100644
+--- a/app/Support/PayrollCalculator.php
++++ b/app/Support/PayrollCalculator.php
+@@ -13,6 +13,7 @@ use App\Models\PayrollSetting;
+ use App\Models\PublicHoliday;
+ use App\Models\User;
+ use Carbon\Carbon;
++use Carbon\CarbonInterface;
+ use Carbon\CarbonPeriod;
+ use Illuminate\Support\Collection;
+ use Illuminate\Support\Facades\DB;
+@@ -377,8 +378,8 @@ class PayrollCalculator
+      */
+     private function unpaidDaysInPeriod(
+         EmployeeLeaveRequest $leave,
+-        Carbon $periodStart,
+-        Carbon $periodEnd,
++        CarbonInterface $periodStart,
++        CarbonInterface $periodEnd,
+         array $holidays,
+     ): float {
+         $start = $leave->start_date->copy()->max($periodStart);
+@@ -406,7 +407,7 @@ class PayrollCalculator
+     /**
+      * @param  array<int, string>  $holidays
+      */
+-    private function isWorkingDay(Carbon $date, array $holidays): bool
++    private function isWorkingDay(CarbonInterface $date, array $holidays): bool
+     {
+         return ! $date->isWeekend()
+             && ! in_array($date->toDateString(), $holidays, true);

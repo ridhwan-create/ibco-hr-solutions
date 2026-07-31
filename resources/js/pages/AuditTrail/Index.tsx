@@ -175,6 +175,8 @@ const fieldLabels: Record<string, string> = {
     is_active: 'Status Aktif',
     employee_id: 'Pekerja',
     office_location_id: 'Lokasi Pejabat',
+    department_id: 'Jabatan',
+    period: 'Bulan Laporan',
     clock_in_at: 'Waktu Masuk',
     clock_out_at: 'Waktu Keluar',
     distance_meters: 'Jarak (meter)',
@@ -196,6 +198,29 @@ const fieldLabels: Record<string, string> = {
     primary_role: 'Role Utama',
     roles: 'Role',
     email_verified_at: 'E-mel Disahkan',
+    kwsp_employee: 'KWSP Pekerja',
+    kwsp_employer: 'KWSP Majikan',
+    socso_employee: 'PERKESO/SKBBK Pekerja',
+    socso_employer: 'PERKESO/SKBBK Majikan',
+    eis_employee: 'EIS Pekerja',
+    eis_employer: 'EIS Majikan',
+    pcb: 'PCB',
+    kwsp_category: 'Kategori KWSP',
+    socso_category: 'Kategori PERKESO',
+    pcb_monthly_amount: 'PCB Bulanan',
+    effective_from: 'Tarikh Kuat Kuasa',
+    effective_to: 'Tarikh Tamat',
+    company_name: 'Nama Majikan',
+    shift_template_id: 'Template Syif',
+    scope_type: 'Jenis Skop',
+    period_start: 'Bulan Roster',
+    entry_count: 'Jumlah Rekod Jadual',
+    work_date: 'Tarikh Kerja',
+    day_type: 'Jenis Hari',
+    scheduled_start_at: 'Waktu Dijadualkan Masuk',
+    scheduled_end_at: 'Waktu Dijadualkan Keluar',
+    break_minutes: 'Rehat (Minit)',
+    row_count: 'Jumlah Baris',
 };
 
 const actionStyles: Record<string, string> = {
@@ -261,6 +286,40 @@ const actionStyles: Record<string, string> = {
         'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
     'public_holiday.deleted':
         'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+    'shift_template.created':
+        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    'shift_template.updated':
+        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+    'shift_template.activated':
+        'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    'shift_template.deactivated':
+        'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+    'schedule_assignment.created':
+        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    'schedule_assignment.activated':
+        'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    'schedule_assignment.deactivated':
+        'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+    'roster.generated':
+        'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
+    'roster.entry_updated':
+        'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+    'roster.published':
+        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    'roster.locked':
+        'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    'roster.swap_requested':
+        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+    'roster.swap_approved':
+        'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    'roster.swap_rejected':
+        'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
+    'roster.swap_cancelled':
+        'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
+    'roster.report_exported':
+        'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
+    'report.monthly_exported':
+        'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
 };
 
 function formatDate(value: string | null): string {

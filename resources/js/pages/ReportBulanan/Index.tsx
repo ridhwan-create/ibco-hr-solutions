@@ -5,9 +5,10 @@ import type {
 } from '@/components/records-index';
 
 const config: RecordPageConfig = {
-    title: 'Laporan Bulanan',
-    description: 'Laporan bulanan yang direkodkan oleh pekerja.',
-    routePath: '/laporan-bulanan',
+    title: 'Laporan Asal',
+    description:
+        'Rekod laporan bulanan lama daripada db_spp untuk rujukan sahaja.',
+    routePath: '/laporan-bulanan-asal',
     searchPlaceholder: 'Cari nama, ID atau kandungan laporan...',
     columns: [
         { key: 'employee_id', label: 'ID Pekerja' },
@@ -23,5 +24,5 @@ export default function LaporanBulananIndex(props: RecordsIndexPageProps) {
 }
 
 LaporanBulananIndex.layout = {
-    breadcrumbs: [{ title: 'Laporan Bulanan', href: '/laporan-bulanan' }],
+    breadcrumbs: [{ title: 'Laporan Asal', href: '/laporan-bulanan-asal' }],
 };

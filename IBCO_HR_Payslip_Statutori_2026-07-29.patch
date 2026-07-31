@@ -1,0 +1,4452 @@
+diff --git a/README.md b/README.md
+index bdd7d5a4e5f58f81b9a8607000993e13c9e206ff..82f285adc8e4bbcb3b8f8ab354bb2e94390854f8 100644
+--- a/README.md
++++ b/README.md
+@@ -165,6 +165,30 @@ ## Payroll Core
+ diluluskan. Formula serta semua transaksi Payroll Core hanya menjalankan
+ `SELECT` pada `db_spp`; tiada data payroll baharu ditulis ke database lama.
+ 
++## Statutori & Slip Gaji PDF
++
++Fasa kedua Payroll menambah profil dan snapshot statutori bagi setiap pekerja:
++
++- KWSP mengikut kategori pekerja, umur, kewarganegaraan dan jadual julat upah;
++- PERKESO Kategori Pertama/Kedua termasuk caruman SKBBK berkuat kuasa Jun 2026;
++- EIS dengan siling upah serta bahagian pekerja dan majikan;
++- PCB bulanan yang disahkan HR melalui kaedah atau kalkulator rasmi LHDN;
++- pelarasan statutori bersebab semasa payroll masih Draf;
++- caruman pekerja sebagai potongan gaji dan caruman majikan sebagai kos
++  berasingan;
++- laporan CSV dengan pecahan caruman; dan
++- slip gaji PDF yang memaparkan pendapatan, potongan, caruman serta gaji bersih.
++
++Nilai statutori disimpan pada `payroll_statutory_snapshots`. Perubahan kadar
++kemudian tidak mengubah payroll atau slip lama. Employee hanya boleh membuka
++**Slip Gaji Saya** bagi rekod sendiri selepas payroll dimuktamadkan. HR dan
++Super Admin boleh memuat turun PDF pekerja melalui perincian payroll.
++
++Kadar lalai merujuk versi yang berkuat kuasa pada tarikh pembangunan, tetapi HR
++perlu mengesahkannya terhadap jadual rasmi sebelum setiap perubahan kadar.
++PCB tidak dianggap sebagai peratus tetap kerana amaun sebenar bergantung pada
++data cukai individu, TP1, TP3 dan saraan tambahan.
++
+ ## Roles & Permissions
+ 
+ Kawalan akses disimpan dalam jadual `users` pada database sistem:
+@@ -228,5 +252,5 @@ ## Sambungan database
+ Jika fungsi CRUD pekerja dan jawatan lama tidak akan digunakan, connection
+ `ibco` boleh diberikan akses `SELECT` sahaja. Modul kehadiran geolocation tidak
+ memerlukan akses tulis kepada `db_spp` dalam apa-apa keadaan.
+-Modul ESS, cuti, OT dan Payroll Core juga hanya memerlukan akses `SELECT` kepada
+-`db_spp`.
++Modul ESS, cuti, OT, Payroll Core, statutori dan slip gaji juga hanya memerlukan
++akses `SELECT` kepada `db_spp`.
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index 5d140bb0c6d9c6f360f6ecab26dc45aebf22326d..dc65bd77dfcb94d3e5fd2a486d5a90ddeefefebc 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -88,6 +88,7 @@ public function permissions(): array
+                 'attendance.clock',
+                 'overtime.self',
+                 'overtime.apply',
++                'payslip.self',
+             ],
+         };
+     }
+@@ -115,7 +116,7 @@ public function description(): string
+             self::HrAdmin => 'Akses semua modul HR termasuk payroll dan laporan.',
+             self::Supervisor => 'Semak permohonan cuti dan OT pekerja bagi jabatan yang ditetapkan.',
+             self::Viewer => 'Akses paparan operasi tanpa payroll, laporan dan pengurusan pengguna.',
+-            self::Employee => 'Akses profil sendiri, permohonan cuti dan OT serta rakaman kehadiran.',
++            self::Employee => 'Akses profil, cuti, OT, kehadiran dan slip gaji sendiri.',
+         };
+     }
+ 
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index b70df2dde136270ccc50763c0e32825c008fed60..0c7641c454b8be667604684250f6157080736a7b 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -79,6 +79,7 @@ class AuditTrailController extends Controller
+         'payroll.recalculated' => 'Payroll Dikira Semula',
+         'payroll.manual_item_added' => 'Pelarasan Payroll Ditambah',
+         'payroll.manual_item_removed' => 'Pelarasan Payroll Dibuang',
++        'payroll.statutory_overridden' => 'Amaun Statutori Dilaras',
+         'payroll.hr_reviewed' => 'Payroll Disemak HR',
+         'payroll.approved' => 'Payroll Diluluskan',
+         'payroll.finalized' => 'Payroll Dimuktamadkan',
+@@ -94,6 +95,10 @@ class AuditTrailController extends Controller
+         'employee_payroll_component.updated' => 'Komponen Gaji Pekerja Dikemas Kini',
+         'employee_payroll_component.activated' => 'Komponen Gaji Pekerja Diaktifkan',
+         'employee_payroll_component.deactivated' => 'Komponen Gaji Pekerja Dinyahaktifkan',
++        'statutory_settings.updated' => 'Kadar Statutori Dikemas Kini',
++        'payslip_settings.updated' => 'Tetapan Slip Gaji Dikemas Kini',
++        'statutory_profile.created' => 'Profil Statutori Ditambah',
++        'statutory_profile.updated' => 'Profil Statutori Dikemas Kini',
+     ];
+ 
+     private const AUDITABLE_TYPES = [
+@@ -118,6 +123,9 @@ class AuditTrailController extends Controller
+         'payroll_components',
+         'employee_salary_profiles',
+         'employee_payroll_components',
++        'statutory_settings',
++        'employee_statutory_profiles',
++        'payroll_statutory_snapshots',
+     ];
+ 
+     public function index(Request $request): Response
+diff --git a/app/Http/Controllers/EmployeePayslipController.php b/app/Http/Controllers/EmployeePayslipController.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..48a6eba774345666c2eb68b7b69a3bac3b19cb2a
+--- /dev/null
++++ b/app/Http/Controllers/EmployeePayslipController.php
+@@ -0,0 +1,113 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\EmployeeUserLink;
++use App\Models\PayrollEntry;
++use App\Support\PayslipPdfRenderer;
++use Illuminate\Http\Request;
++use Inertia\Inertia;
++use Inertia\Response;
++use Symfony\Component\HttpFoundation\Response as HttpResponse;
++
++class EmployeePayslipController extends Controller
++{
++    public function __construct(
++        private readonly PayslipPdfRenderer $renderer,
++    ) {}
++
++    public function index(Request $request): Response
++    {
++        $link = $this->activeLink($request);
++        $entries = $link
++            ? PayrollEntry::query()
++                ->with(['payrollRun', 'statutorySnapshot'])
++                ->where('employee_id', $link->employee_id)
++                ->whereHas('statutorySnapshot')
++                ->whereHas(
++                    'payrollRun',
++                    fn ($query) => $query->where('status', 'finalized'),
++                )
++                ->orderByDesc(
++                    \App\Models\PayrollRun::query()
++                        ->select('period_start')
++                        ->whereColumn('payroll_runs.id', 'payroll_entries.payroll_run_id')
++                        ->limit(1),
++                )
++                ->paginate(12)
++                ->through(fn (PayrollEntry $entry) => $this->payload($entry))
++            : null;
++
++        return Inertia::render('EmployeeSelfService/Payslips', [
++            'hasEmployeeLink' => $link !== null,
++            'payslips' => $entries,
++        ]);
++    }
++
++    public function downloadOwn(
++        Request $request,
++        PayrollEntry $payrollEntry,
++    ): HttpResponse {
++        $link = $this->activeLink($request);
++        abort_unless(
++            $link
++            && $payrollEntry->employee_id === $link->employee_id
++            && $payrollEntry->statutorySnapshot()->exists()
++            && $payrollEntry->payrollRun()->where('status', 'finalized')->exists(),
++            404,
++        );
++
++        return $this->pdfResponse($payrollEntry);
++    }
++
++    public function downloadForHr(
++        PayrollEntry $payrollEntry,
++    ): HttpResponse {
++        return $this->pdfResponse($payrollEntry);
++    }
++
++    private function pdfResponse(PayrollEntry $entry): HttpResponse
++    {
++        $entry->loadMissing('payrollRun');
++        $filename = sprintf(
++            'slip-gaji-%s-%s.pdf',
++            $entry->employee_number ?: $entry->employee_id,
++            $entry->payrollRun->period_start->format('Y-m'),
++        );
++
++        return response($this->renderer->render($entry), 200, [
++            'Content-Type' => 'application/pdf',
++            'Content-Disposition' => 'attachment; filename="'.$filename.'"',
++            'Cache-Control' => 'private, no-store, max-age=0',
++            'X-Content-Type-Options' => 'nosniff',
++        ]);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function payload(PayrollEntry $entry): array
++    {
++        return [
++            'id' => $entry->getKey(),
++            'period' => $entry->payrollRun->period_start?->toDateString(),
++            'period_label' => $entry->payrollRun->period_start?->translatedFormat('F Y'),
++            'finalized_at' => $entry->payrollRun->finalized_at?->toIso8601String(),
++            'gross_pay' => (float) $entry->gross_pay,
++            'total_deductions' => (float) $entry->total_deductions,
++            'net_pay' => (float) $entry->net_pay,
++            'kwsp_employee' => (float) $entry->statutorySnapshot?->kwsp_employee,
++            'socso_employee' => (float) $entry->statutorySnapshot?->socso_employee,
++            'eis_employee' => (float) $entry->statutorySnapshot?->eis_employee,
++            'pcb' => (float) $entry->statutorySnapshot?->pcb,
++        ];
++    }
++
++    private function activeLink(Request $request): ?EmployeeUserLink
++    {
++        return EmployeeUserLink::query()
++            ->where('user_id', $request->user()->getAuthIdentifier())
++            ->where('is_active', true)
++            ->first();
++    }
++}
+diff --git a/app/Http/Controllers/PayrollRunController.php b/app/Http/Controllers/PayrollRunController.php
+index 6e2673b5d28db975accdff6b31bffadcb652c7e8..4a56b127190a6d56a6d25915c08a97b1324a2592 100644
+--- a/app/Http/Controllers/PayrollRunController.php
++++ b/app/Http/Controllers/PayrollRunController.php
+@@ -134,7 +134,10 @@ public function show(Request $request, PayrollRun $payrollRun): Response
+     {
+         $search = $request->string('search')->trim()->toString();
+         $entries = $payrollRun->entries()
+-            ->with(['items' => fn ($query) => $query->orderBy('type')->orderBy('id')])
++            ->with([
++                'items' => fn ($query) => $query->orderBy('type')->orderBy('id'),
++                'statutorySnapshot',
++            ])
+             ->when($search !== '', function ($query) use ($search) {
+                 $query->where(function ($query) use ($search) {
+                     $query->where('employee_name', 'like', "%{$search}%")
+@@ -172,7 +175,16 @@ public function show(Request $request, PayrollRun $payrollRun): Response
+                 ->where('is_active', true)
+                 ->orderBy('type')
+                 ->orderBy('name')
+-                ->get(['id', 'code', 'name', 'type']),
++                ->get([
++                    'id',
++                    'code',
++                    'name',
++                    'type',
++                    'is_epf_wage',
++                    'is_socso_wage',
++                    'is_eis_wage',
++                    'is_pcb_wage',
++                ]),
+             'permissions' => [
+                 'can_manage' => $request->user()->hasPermission('payroll.manage'),
+                 'can_approve' => $request->user()->hasPermission('payroll.approve'),
+@@ -231,6 +243,10 @@ public function storeManualItem(
+             'type' => ['required_without:payroll_component_id', 'nullable', Rule::in(['earning', 'deduction'])],
+             'amount' => ['required', 'numeric', 'min:0.01', 'max:9999999.99'],
+             'notes' => ['nullable', 'string', 'max:1000'],
++            'is_epf_wage' => ['nullable', 'boolean'],
++            'is_socso_wage' => ['nullable', 'boolean'],
++            'is_eis_wage' => ['nullable', 'boolean'],
++            'is_pcb_wage' => ['nullable', 'boolean'],
+         ]);
+         $component = isset($validated['payroll_component_id'])
+             ? PayrollComponent::query()
+@@ -263,11 +279,21 @@ public function storeManualItem(
+             'multiplier' => 1,
+             'amount' => round((float) $validated['amount'], 2),
+             'is_manual' => true,
++            'is_epf_wage' => $component?->is_epf_wage
++                ?? (bool) ($validated['is_epf_wage'] ?? false),
++            'is_socso_wage' => $component?->is_socso_wage
++                ?? (bool) ($validated['is_socso_wage'] ?? false),
++            'is_eis_wage' => $component?->is_eis_wage
++                ?? (bool) ($validated['is_eis_wage'] ?? false),
++            'is_pcb_wage' => $component?->is_pcb_wage
++                ?? (bool) ($validated['is_pcb_wage'] ?? false),
+             'notes' => $validated['notes'] ?? null,
+             'added_by' => $request->user()->getAuthIdentifier(),
+         ]);
+-        $entry = $this->calculator->refreshEntryTotals($entry);
+-        $this->calculator->refreshRunTotals($payrollRun);
++        $entry = $this->calculator->refreshStatutory(
++            $entry,
++            $request->user(),
++        );
+ 
+         AuditLogger::record(
+             $request,
+@@ -307,8 +333,7 @@ public function destroyManualItem(
+         ];
+         $itemId = $item->getKey();
+         $item->delete();
+-        $this->calculator->refreshEntryTotals($entry);
+-        $this->calculator->refreshRunTotals($payrollRun);
++        $this->calculator->refreshStatutory($entry, $request->user());
+ 
+         AuditLogger::record(
+             $request,
+@@ -347,6 +372,12 @@ public function review(
+                 ]);
+             }
+ 
++            if ($locked->entries()->whereDoesntHave('statutorySnapshot')->exists()) {
++                throw ValidationException::withMessages([
++                    'payroll' => 'Kira semula payroll untuk menjana snapshot KWSP, PERKESO, EIS dan PCB sebelum semakan HR.',
++                ]);
++            }
++
+             if ($locked->entries()->where('net_pay', '<', 0)->exists()) {
+                 throw ValidationException::withMessages([
+                     'payroll' => 'Semakan tidak boleh diselesaikan kerana terdapat gaji bersih negatif.',
+@@ -525,6 +556,7 @@ public function returnToDraft(
+     public function reportCsv(PayrollRun $payrollRun): StreamedResponse
+     {
+         $entries = $payrollRun->entries()
++            ->with('statutorySnapshot')
+             ->orderBy('employee_name')
+             ->get();
+         $filename = 'payroll-'.$payrollRun->period_start->format('Y-m').'.csv';
+@@ -541,6 +573,14 @@ public function reportCsv(PayrollRun $payrollRun): StreamedResponse
+                 'Hari Cuti Tanpa Gaji',
+                 'Potongan Cuti Tanpa Gaji',
+                 'Pendapatan Kasar',
++                'KWSP Pekerja',
++                'KWSP Majikan',
++                'PERKESO/SKBBK Pekerja',
++                'PERKESO/SKBBK Majikan',
++                'EIS Pekerja',
++                'EIS Majikan',
++                'PCB',
++                'Jumlah Caruman Majikan',
+                 'Jumlah Potongan',
+                 'Gaji Bersih',
+             ]);
+@@ -555,6 +595,14 @@ public function reportCsv(PayrollRun $payrollRun): StreamedResponse
+                     number_format((float) $entry->unpaid_leave_days, 1, '.', ''),
+                     number_format((float) $entry->unpaid_leave_amount, 2, '.', ''),
+                     number_format((float) $entry->gross_pay, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->kwsp_employee, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->kwsp_employer, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->socso_employee, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->socso_employer, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->eis_employee, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->eis_employer, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->pcb, 2, '.', ''),
++                    number_format((float) $entry->statutorySnapshot?->total_employer_contributions, 2, '.', ''),
+                     number_format((float) $entry->total_deductions, 2, '.', ''),
+                     number_format((float) $entry->net_pay, 2, '.', ''),
+                 ]);
+@@ -564,6 +612,64 @@ public function reportCsv(PayrollRun $payrollRun): StreamedResponse
+         }, $filename, ['Content-Type' => 'text/csv; charset=UTF-8']);
+     }
+ 
++    public function updateStatutory(
++        Request $request,
++        PayrollRun $payrollRun,
++        PayrollEntry $entry,
++    ): RedirectResponse {
++        $this->ensureDraftEntry($payrollRun, $entry);
++        $validated = $request->validate([
++            'kwsp_employee' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'kwsp_employer' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'socso_employee' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'socso_employer' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'eis_employee' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'eis_employer' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'pcb' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'notes' => ['required', 'string', 'min:5', 'max:1000'],
++        ]);
++        $oldValues = $entry->statutorySnapshot?->only([
++            'kwsp_employee',
++            'kwsp_employer',
++            'socso_employee',
++            'socso_employer',
++            'eis_employee',
++            'eis_employer',
++            'pcb',
++        ]) ?? [];
++        $entry = $this->calculator->refreshStatutory(
++            $entry,
++            $request->user(),
++            $validated,
++        );
++
++        AuditLogger::record(
++            $request,
++            'payroll.statutory_overridden',
++            'payroll_statutory_snapshots',
++            (int) $entry->statutorySnapshot?->getKey(),
++            oldValues: $oldValues,
++            newValues: [
++                ...($entry->statutorySnapshot?->only([
++                    'kwsp_employee',
++                    'kwsp_employer',
++                    'socso_employee',
++                    'socso_employer',
++                    'eis_employee',
++                    'eis_employer',
++                    'pcb',
++                ]) ?? []),
++                'employee_id' => $entry->employee_id,
++                'notes' => $validated['notes'],
++            ],
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Amaun statutori pekerja telah dilaras dan dikira semula.',
++        ]);
++    }
++
+     private function ensureDraftEntry(
+         PayrollRun $payrollRun,
+         PayrollEntry $entry,
+@@ -599,6 +705,9 @@ private function runPayload(PayrollRun $run): array
+             'total_earnings' => (float) $run->total_earnings,
+             'total_deductions' => (float) $run->total_deductions,
+             'total_net_pay' => (float) $run->total_net_pay,
++            'total_employee_statutory' => (float) $run->total_employee_statutory,
++            'total_employer_statutory' => (float) $run->total_employer_statutory,
++            'total_pcb' => (float) $run->total_pcb,
+             'generated_at' => $run->generated_at?->toIso8601String(),
+             'generated_by' => $run->generator?->name,
+             'reviewed_at' => $run->reviewed_at?->toIso8601String(),
+@@ -638,6 +747,29 @@ private function entryPayload(PayrollEntry $entry): array
+             'total_deductions' => (float) $entry->total_deductions,
+             'net_pay' => (float) $entry->net_pay,
+             'calculated_at' => $entry->calculated_at?->toIso8601String(),
++            'statutory' => $entry->statutorySnapshot
++                ? [
++                    'id' => $entry->statutorySnapshot->getKey(),
++                    'kwsp_category' => $entry->statutorySnapshot->kwsp_category,
++                    'socso_category' => $entry->statutorySnapshot->socso_category,
++                    'epf_wages' => (float) $entry->statutorySnapshot->epf_wages,
++                    'socso_wages' => (float) $entry->statutorySnapshot->socso_wages,
++                    'eis_wages' => (float) $entry->statutorySnapshot->eis_wages,
++                    'pcb_wages' => (float) $entry->statutorySnapshot->pcb_wages,
++                    'kwsp_employee' => (float) $entry->statutorySnapshot->kwsp_employee,
++                    'kwsp_employer' => (float) $entry->statutorySnapshot->kwsp_employer,
++                    'socso_employee' => (float) $entry->statutorySnapshot->socso_employee,
++                    'socso_employer' => (float) $entry->statutorySnapshot->socso_employer,
++                    'eis_employee' => (float) $entry->statutorySnapshot->eis_employee,
++                    'eis_employer' => (float) $entry->statutorySnapshot->eis_employer,
++                    'pcb' => (float) $entry->statutorySnapshot->pcb,
++                    'total_employee_deductions' => (float) $entry->statutorySnapshot->total_employee_deductions,
++                    'total_employer_contributions' => (float) $entry->statutorySnapshot->total_employer_contributions,
++                    'rate_version' => $entry->statutorySnapshot->rate_version,
++                    'is_overridden' => $entry->statutorySnapshot->is_overridden,
++                    'override_notes' => $entry->statutorySnapshot->override_notes,
++                ]
++                : null,
+             'items' => $entry->items->map(fn (PayrollEntryItem $item) => [
+                 'id' => $item->getKey(),
+                 'code' => $item->code,
+diff --git a/app/Http/Controllers/PayrollSettingsController.php b/app/Http/Controllers/PayrollSettingsController.php
+index 973b2bff26b039139098adb20f7bbd694262fa99..4e6ab57df24905c6ece435f8e30f4fd23a59739e 100644
+--- a/app/Http/Controllers/PayrollSettingsController.php
++++ b/app/Http/Controllers/PayrollSettingsController.php
+@@ -124,9 +124,13 @@ public function index(Request $request): Response
+                 ->map(fn (PayrollComponent $component) => [
+                     'id' => $component->getKey(),
+                     'code' => $component->code,
+-                    'name' => $component->name,
+-                    'type' => $component->type,
+-                    'is_active' => $component->is_active,
++                        'name' => $component->name,
++                        'type' => $component->type,
++                        'is_active' => $component->is_active,
++                        'is_epf_wage' => $component->is_epf_wage,
++                        'is_socso_wage' => $component->is_socso_wage,
++                        'is_eis_wage' => $component->is_eis_wage,
++                        'is_pcb_wage' => $component->is_pcb_wage,
+                 ]),
+             'employees' => $employees,
+             'filters' => ['search' => $search],
+@@ -191,7 +195,16 @@ public function storeComponent(Request $request): RedirectResponse
+             'payroll_component.created',
+             'payroll_components',
+             $component->getKey(),
+-            newValues: $component->only(['code', 'name', 'type', 'is_active']),
++            newValues: $component->only([
++                'code',
++                'name',
++                'type',
++                'is_active',
++                'is_epf_wage',
++                'is_socso_wage',
++                'is_eis_wage',
++                'is_pcb_wage',
++            ]),
+         );
+ 
+         return back()->with('toast', [
+@@ -463,6 +476,10 @@ private function validatedComponent(
+             'name' => ['required', 'string', 'max:150'],
+             'type' => ['required', Rule::in(['earning', 'deduction'])],
+             'is_active' => ['required', 'boolean'],
++            'is_epf_wage' => ['required', 'boolean'],
++            'is_socso_wage' => ['required', 'boolean'],
++            'is_eis_wage' => ['required', 'boolean'],
++            'is_pcb_wage' => ['required', 'boolean'],
+         ]);
+         $validated['code'] = strtoupper($validated['code']);
+ 
+diff --git a/app/Http/Controllers/StatutorySettingsController.php b/app/Http/Controllers/StatutorySettingsController.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..62e4fca8e8bfe3939dafdeb6da62d0deb0ac0a4a
+--- /dev/null
++++ b/app/Http/Controllers/StatutorySettingsController.php
+@@ -0,0 +1,326 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use App\Models\EmployeeStatutoryProfile;
++use App\Models\PayrollSetting;
++use App\Models\StatutorySetting;
++use App\Support\AuditLogger;
++use Carbon\Carbon;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\Rule;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class StatutorySettingsController extends Controller
++{
++    public function index(Request $request): Response
++    {
++        $search = $request->string('search')->trim()->toString();
++        $activeJobs = DB::connection('ibco')
++            ->table('maklumatjawatan')
++            ->where('rcd_enable', 1)
++            ->selectRaw('id_pekerja, MAX(id) as job_id')
++            ->groupBy('id_pekerja');
++        $employees = DB::connection('ibco')
++            ->table('maklumatpekerja as employee')
++            ->leftJoinSub($activeJobs, 'active_job', function ($join) {
++                $join->on('active_job.id_pekerja', '=', 'employee.id');
++            })
++            ->leftJoin('maklumatjawatan as job', 'job.id', '=', 'active_job.job_id')
++            ->where('employee.rcd_enable', 1)
++            ->when($search !== '', function ($query) use ($search) {
++                $query->where(function ($query) use ($search) {
++                    $query->where('employee.nama', 'like', "%{$search}%")
++                        ->orWhere('employee.employeeID', 'like', "%{$search}%")
++                        ->orWhere('job.jawatan', 'like', "%{$search}%");
++                });
++            })
++            ->select([
++                'employee.id',
++                'employee.employeeID as employee_number',
++                'employee.nama as employee_name',
++                'employee.tarikhlahir as birth_date',
++                'employee.kewarganegaraan as nationality',
++                'job.jawatan as position',
++                'job.noepf as legacy_epf_number',
++                'job.nosocso as legacy_socso_number',
++            ])
++            ->orderBy('employee.nama')
++            ->paginate(20)
++            ->withQueryString();
++        $profiles = EmployeeStatutoryProfile::query()
++            ->whereIn(
++                'employee_id',
++                collect($employees->items())->pluck('id')->all(),
++            )
++            ->get()
++            ->keyBy('employee_id');
++        $employees->through(function ($employee) use ($profiles) {
++            $profile = $profiles[$employee->id] ?? null;
++            $age = $employee->birth_date
++                ? (int) Carbon::parse($employee->birth_date)->diffInYears(now())
++                : null;
++
++            return [
++                'id' => (int) $employee->id,
++                'employee_number' => $employee->employee_number,
++                'employee_name' => $employee->employee_name,
++                'position' => $employee->position,
++                'birth_date' => $employee->birth_date,
++                'age' => $age,
++                'nationality' => $employee->nationality,
++                'legacy_epf_number' => $employee->legacy_epf_number,
++                'legacy_socso_number' => $employee->legacy_socso_number,
++                'statutory_profile' => $profile
++                    ? [
++                        'id' => $profile->getKey(),
++                        'kwsp_category' => $profile->kwsp_category,
++                        'socso_category' => $profile->socso_category,
++                        'eis_enabled' => $profile->eis_enabled,
++                        'pcb_method' => $profile->pcb_method,
++                        'pcb_monthly_amount' => (float) $profile->pcb_monthly_amount,
++                        'epf_number' => $profile->epf_number,
++                        'socso_number' => $profile->socso_number,
++                        'tax_number' => $profile->tax_number,
++                        'effective_from' => $profile->effective_from?->toDateString(),
++                        'is_active' => $profile->is_active,
++                        'notes' => $profile->notes,
++                    ]
++                    : null,
++            ];
++        });
++        $statutory = StatutorySetting::query()->firstOrCreate(['id' => 1]);
++        $payroll = PayrollSetting::query()->firstOrCreate(['id' => 1]);
++
++        return Inertia::render('StatutorySettings/Index', [
++            'statutorySettings' => $this->settingsPayload($statutory),
++            'payslipSettings' => [
++                'company_name' => $payroll->company_name,
++                'company_registration_no' => $payroll->company_registration_no,
++                'company_address' => $payroll->company_address,
++                'payslip_note' => $payroll->payslip_note,
++            ],
++            'employees' => $employees,
++            'filters' => ['search' => $search],
++            'statistics' => [
++                'active_employees' => DB::connection('ibco')
++                    ->table('maklumatpekerja')
++                    ->where('rcd_enable', 1)
++                    ->count(),
++                'configured_profiles' => EmployeeStatutoryProfile::query()
++                    ->where('is_active', true)
++                    ->count(),
++                'pcb_profiles' => EmployeeStatutoryProfile::query()
++                    ->where('is_active', true)
++                    ->where('pcb_monthly_amount', '>', 0)
++                    ->count(),
++            ],
++            'kwspCategories' => [
++                ['value' => 'citizen_below_60', 'label' => 'Warganegara / PR bawah 60'],
++                ['value' => 'citizen_60_plus', 'label' => 'Warganegara 60 tahun ke atas'],
++                ['value' => 'pr_below_60', 'label' => 'PR bawah 60 tahun'],
++                ['value' => 'pr_60_plus', 'label' => 'PR 60 tahun ke atas'],
++                ['value' => 'non_malaysian', 'label' => 'Bukan warganegara (2% + 2%)'],
++                ['value' => 'exempt', 'label' => 'Dikecualikan'],
++            ],
++            'socsoCategories' => [
++                ['value' => 'first', 'label' => 'Kategori Pertama'],
++                ['value' => 'second', 'label' => 'Kategori Kedua'],
++                ['value' => 'exempt', 'label' => 'Dikecualikan'],
++            ],
++        ]);
++    }
++
++    public function updateRates(Request $request): RedirectResponse
++    {
++        $validated = $request->validate([
++            'kwsp_effective_from' => ['required', 'date'],
++            'kwsp_table_limit' => ['required', 'numeric', 'min:1', 'max:99999999'],
++            'kwsp_employer_threshold' => ['required', 'numeric', 'min:1', 'max:99999999'],
++            'kwsp_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_employer_rate_low' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_employer_rate_high' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_age60_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_age60_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_pr_age60_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_pr_age60_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_foreign_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'kwsp_foreign_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'socso_effective_from' => ['required', 'date'],
++            'socso_wage_ceiling' => ['required', 'numeric', 'min:1', 'max:99999999'],
++            'socso_first_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'socso_first_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'socso_skbbk_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'socso_second_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'eis_effective_from' => ['required', 'date'],
++            'eis_wage_ceiling' => ['required', 'numeric', 'min:1', 'max:99999999'],
++            'eis_employee_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'eis_employer_rate' => ['required', 'numeric', 'min:0', 'max:100'],
++            'pcb_tax_year' => ['required', 'integer', 'min:2020', 'max:2100'],
++        ]);
++        $settings = StatutorySetting::query()->firstOrCreate(['id' => 1]);
++        $oldValues = $settings->only(array_keys($validated));
++        $settings->update([
++            ...$validated,
++            'updated_by' => $request->user()->getAuthIdentifier(),
++        ]);
++
++        AuditLogger::record(
++            $request,
++            'statutory_settings.updated',
++            'statutory_settings',
++            $settings->getKey(),
++            oldValues: $oldValues,
++            newValues: $settings->fresh()->only(array_keys($validated)),
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Kadar statutori telah dikemas kini. Kira semula payroll Draf untuk menggunakannya.',
++        ]);
++    }
++
++    public function updatePayslip(Request $request): RedirectResponse
++    {
++        $validated = $request->validate([
++            'company_name' => ['required', 'string', 'max:150'],
++            'company_registration_no' => ['nullable', 'string', 'max:80'],
++            'company_address' => ['nullable', 'string', 'max:500'],
++            'payslip_note' => ['nullable', 'string', 'max:255'],
++        ]);
++        $settings = PayrollSetting::query()->firstOrCreate(['id' => 1]);
++        $oldValues = $settings->only(array_keys($validated));
++        $settings->update([
++            ...$validated,
++            'updated_by' => $request->user()->getAuthIdentifier(),
++        ]);
++
++        AuditLogger::record(
++            $request,
++            'payslip_settings.updated',
++            'payroll_settings',
++            $settings->getKey(),
++            oldValues: $oldValues,
++            newValues: $settings->fresh()->only(array_keys($validated)),
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Maklumat kepala slip gaji telah dikemas kini.',
++        ]);
++    }
++
++    public function saveProfile(Request $request): RedirectResponse
++    {
++        $validated = $request->validate([
++            'employee_id' => ['required', 'integer', 'min:1'],
++            'kwsp_category' => [
++                'required',
++                Rule::in(EmployeeStatutoryProfile::KWSP_CATEGORIES),
++            ],
++            'socso_category' => [
++                'required',
++                Rule::in(EmployeeStatutoryProfile::SOCSO_CATEGORIES),
++            ],
++            'eis_enabled' => ['required', 'boolean'],
++            'pcb_method' => ['required', Rule::in(['fixed', 'none'])],
++            'pcb_monthly_amount' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
++            'epf_number' => ['nullable', 'string', 'max:80'],
++            'socso_number' => ['nullable', 'string', 'max:80'],
++            'tax_number' => ['nullable', 'string', 'max:80'],
++            'effective_from' => ['required', 'date'],
++            'is_active' => ['required', 'boolean'],
++            'notes' => ['nullable', 'string', 'max:1000'],
++        ]);
++        $this->ensureEmployeeExists((int) $validated['employee_id']);
++        $validated['effective_from'] = Carbon::parse(
++            $validated['effective_from'],
++        )->startOfMonth()->toDateString();
++        $profile = EmployeeStatutoryProfile::query()
++            ->where('employee_id', $validated['employee_id'])
++            ->first();
++        $oldValues = $profile?->only(array_keys($validated)) ?? [];
++        $profile = EmployeeStatutoryProfile::query()->updateOrCreate(
++            ['employee_id' => $validated['employee_id']],
++            [
++                ...$validated,
++                'updated_by' => $request->user()->getAuthIdentifier(),
++            ],
++        );
++
++        AuditLogger::record(
++            $request,
++            $profile->wasRecentlyCreated
++                ? 'statutory_profile.created'
++                : 'statutory_profile.updated',
++            'employee_statutory_profiles',
++            $profile->getKey(),
++            oldValues: $oldValues,
++            newValues: $profile->only(array_keys($validated)),
++        );
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Profil statutori pekerja telah disimpan.',
++        ]);
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function settingsPayload(StatutorySetting $settings): array
++    {
++        $payload = $settings->toArray();
++
++        foreach ([
++            'kwsp_table_limit',
++            'kwsp_employer_threshold',
++            'kwsp_employee_rate',
++            'kwsp_employer_rate_low',
++            'kwsp_employer_rate_high',
++            'kwsp_age60_employee_rate',
++            'kwsp_age60_employer_rate',
++            'kwsp_pr_age60_employee_rate',
++            'kwsp_pr_age60_employer_rate',
++            'kwsp_foreign_employee_rate',
++            'kwsp_foreign_employer_rate',
++            'socso_wage_ceiling',
++            'socso_first_employer_rate',
++            'socso_first_employee_rate',
++            'socso_skbbk_employee_rate',
++            'socso_second_employer_rate',
++            'eis_wage_ceiling',
++            'eis_employee_rate',
++            'eis_employer_rate',
++        ] as $field) {
++            $payload[$field] = (float) $settings->{$field};
++        }
++        $payload['kwsp_effective_from'] = $settings
++            ->kwsp_effective_from?->toDateString();
++        $payload['socso_effective_from'] = $settings
++            ->socso_effective_from?->toDateString();
++        $payload['eis_effective_from'] = $settings
++            ->eis_effective_from?->toDateString();
++
++        return $payload;
++    }
++
++    private function ensureEmployeeExists(int $employeeId): void
++    {
++        $exists = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $employeeId)
++            ->where('rcd_enable', 1)
++            ->exists();
++
++        if (! $exists) {
++            throw ValidationException::withMessages([
++                'employee_id' => 'Rekod pekerja asal tidak aktif atau tidak dijumpai.',
++            ]);
++        }
++    }
++}
+diff --git a/app/Models/EmployeeStatutoryProfile.php b/app/Models/EmployeeStatutoryProfile.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b4c88759f8d262ba86708a239b3c9bc32263cfd
+--- /dev/null
++++ b/app/Models/EmployeeStatutoryProfile.php
+@@ -0,0 +1,38 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\HasMany;
++
++class EmployeeStatutoryProfile extends Model
++{
++    public const KWSP_CATEGORIES = [
++        'citizen_below_60',
++        'citizen_60_plus',
++        'pr_below_60',
++        'pr_60_plus',
++        'non_malaysian',
++        'exempt',
++    ];
++
++    public const SOCSO_CATEGORIES = ['first', 'second', 'exempt'];
++
++    protected $guarded = [];
++
++    protected function casts(): array
++    {
++        return [
++            'employee_id' => 'integer',
++            'eis_enabled' => 'boolean',
++            'pcb_monthly_amount' => 'decimal:2',
++            'effective_from' => 'date',
++            'is_active' => 'boolean',
++        ];
++    }
++
++    public function snapshots(): HasMany
++    {
++        return $this->hasMany(PayrollStatutorySnapshot::class);
++    }
++}
+diff --git a/app/Models/PayrollComponent.php b/app/Models/PayrollComponent.php
+index a0e5a2329284d239a1d33b32c3e9e7ff28ed021c..113375a1d9d1a2fcfda8d3234f9947c269412d1f 100644
+--- a/app/Models/PayrollComponent.php
++++ b/app/Models/PayrollComponent.php
+@@ -12,6 +12,10 @@ class PayrollComponent extends Model
+         'name',
+         'type',
+         'is_active',
++        'is_epf_wage',
++        'is_socso_wage',
++        'is_eis_wage',
++        'is_pcb_wage',
+         'created_by',
+         'updated_by',
+     ];
+@@ -20,6 +24,10 @@ protected function casts(): array
+     {
+         return [
+             'is_active' => 'boolean',
++            'is_epf_wage' => 'boolean',
++            'is_socso_wage' => 'boolean',
++            'is_eis_wage' => 'boolean',
++            'is_pcb_wage' => 'boolean',
+         ];
+     }
+ 
+diff --git a/app/Models/PayrollEntry.php b/app/Models/PayrollEntry.php
+index df997dcb6e61eb2db21a85721c3efe8e5e67c46e..c2bd2de1c86ea85589699d862aedacedbd1397fd 100644
+--- a/app/Models/PayrollEntry.php
++++ b/app/Models/PayrollEntry.php
+@@ -5,6 +5,7 @@
+ use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ use Illuminate\Database\Eloquent\Relations\HasMany;
++use Illuminate\Database\Eloquent\Relations\HasOne;
+ 
+ class PayrollEntry extends Model
+ {
+@@ -57,4 +58,9 @@ public function items(): HasMany
+     {
+         return $this->hasMany(PayrollEntryItem::class);
+     }
++
++    public function statutorySnapshot(): HasOne
++    {
++        return $this->hasOne(PayrollStatutorySnapshot::class);
++    }
+ }
+diff --git a/app/Models/PayrollEntryItem.php b/app/Models/PayrollEntryItem.php
+index d451650903998e896b8e0a988e46dae9431e80a3..6c8d75bcc9f5e3da0a451bc5f4393cb2d1adb7a7 100644
+--- a/app/Models/PayrollEntryItem.php
++++ b/app/Models/PayrollEntryItem.php
+@@ -21,6 +21,10 @@ class PayrollEntryItem extends Model
+         'source_type',
+         'source_id',
+         'is_manual',
++        'is_epf_wage',
++        'is_socso_wage',
++        'is_eis_wage',
++        'is_pcb_wage',
+         'notes',
+         'added_by',
+     ];
+@@ -34,6 +38,10 @@ protected function casts(): array
+             'amount' => 'decimal:2',
+             'source_id' => 'integer',
+             'is_manual' => 'boolean',
++            'is_epf_wage' => 'boolean',
++            'is_socso_wage' => 'boolean',
++            'is_eis_wage' => 'boolean',
++            'is_pcb_wage' => 'boolean',
+         ];
+     }
+ 
+diff --git a/app/Models/PayrollRun.php b/app/Models/PayrollRun.php
+index 8919f65eb8060f71a3cea12b4635c69cb92799b7..37c7ce6a1f450af970cf9c1361ee11db645ce85f 100644
+--- a/app/Models/PayrollRun.php
++++ b/app/Models/PayrollRun.php
+@@ -24,6 +24,9 @@ class PayrollRun extends Model
+         'total_earnings',
+         'total_deductions',
+         'total_net_pay',
++        'total_employee_statutory',
++        'total_employer_statutory',
++        'total_pcb',
+         'generated_at',
+         'generated_by',
+         'reviewed_at',
+@@ -48,6 +51,9 @@ protected function casts(): array
+             'total_earnings' => 'decimal:2',
+             'total_deductions' => 'decimal:2',
+             'total_net_pay' => 'decimal:2',
++            'total_employee_statutory' => 'decimal:2',
++            'total_employer_statutory' => 'decimal:2',
++            'total_pcb' => 'decimal:2',
+             'generated_at' => 'datetime',
+             'reviewed_at' => 'datetime',
+             'approved_at' => 'datetime',
+diff --git a/app/Models/PayrollSetting.php b/app/Models/PayrollSetting.php
+index 8dc983efa1113ab50a84a8515848dfdf5d2b8144..33241c5ca487cb6d585c9f04b0b8f042f0eef7a1 100644
+--- a/app/Models/PayrollSetting.php
++++ b/app/Models/PayrollSetting.php
+@@ -12,6 +12,10 @@ class PayrollSetting extends Model
+         'daily_hours',
+         'include_approved_overtime',
+         'deduct_unpaid_leave',
++        'company_name',
++        'company_registration_no',
++        'company_address',
++        'payslip_note',
+         'updated_by',
+     ];
+ 
+diff --git a/app/Models/PayrollStatutorySnapshot.php b/app/Models/PayrollStatutorySnapshot.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..50a471400ed6efd7db4a2ed41ddb1c9d17f34a05
+--- /dev/null
++++ b/app/Models/PayrollStatutorySnapshot.php
+@@ -0,0 +1,44 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++class PayrollStatutorySnapshot extends Model
++{
++    protected $guarded = [];
++
++    protected function casts(): array
++    {
++        return [
++            'eis_enabled' => 'boolean',
++            'epf_wages' => 'decimal:2',
++            'socso_wages' => 'decimal:2',
++            'eis_wages' => 'decimal:2',
++            'pcb_wages' => 'decimal:2',
++            'kwsp_employee' => 'decimal:2',
++            'kwsp_employer' => 'decimal:2',
++            'socso_employee' => 'decimal:2',
++            'socso_employer' => 'decimal:2',
++            'eis_employee' => 'decimal:2',
++            'eis_employer' => 'decimal:2',
++            'pcb' => 'decimal:2',
++            'total_employee_deductions' => 'decimal:2',
++            'total_employer_contributions' => 'decimal:2',
++            'calculation_details' => 'array',
++            'is_overridden' => 'boolean',
++            'calculated_at' => 'datetime',
++        ];
++    }
++
++    public function payrollEntry(): BelongsTo
++    {
++        return $this->belongsTo(PayrollEntry::class);
++    }
++
++    public function employeeStatutoryProfile(): BelongsTo
++    {
++        return $this->belongsTo(EmployeeStatutoryProfile::class);
++    }
++}
+diff --git a/app/Models/StatutorySetting.php b/app/Models/StatutorySetting.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..3806277de33701009ed3f4dc08b9eec457b3bfdb
+--- /dev/null
++++ b/app/Models/StatutorySetting.php
+@@ -0,0 +1,39 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++
++class StatutorySetting extends Model
++{
++    protected $guarded = [];
++
++    protected function casts(): array
++    {
++        return [
++            'kwsp_effective_from' => 'date',
++            'socso_effective_from' => 'date',
++            'eis_effective_from' => 'date',
++            'kwsp_table_limit' => 'decimal:2',
++            'kwsp_employer_threshold' => 'decimal:2',
++            'kwsp_employee_rate' => 'decimal:3',
++            'kwsp_employer_rate_low' => 'decimal:3',
++            'kwsp_employer_rate_high' => 'decimal:3',
++            'kwsp_age60_employee_rate' => 'decimal:3',
++            'kwsp_age60_employer_rate' => 'decimal:3',
++            'kwsp_pr_age60_employee_rate' => 'decimal:3',
++            'kwsp_pr_age60_employer_rate' => 'decimal:3',
++            'kwsp_foreign_employee_rate' => 'decimal:3',
++            'kwsp_foreign_employer_rate' => 'decimal:3',
++            'socso_wage_ceiling' => 'decimal:2',
++            'socso_first_employer_rate' => 'decimal:3',
++            'socso_first_employee_rate' => 'decimal:3',
++            'socso_skbbk_employee_rate' => 'decimal:3',
++            'socso_second_employer_rate' => 'decimal:3',
++            'eis_wage_ceiling' => 'decimal:2',
++            'eis_employee_rate' => 'decimal:3',
++            'eis_employer_rate' => 'decimal:3',
++            'pcb_tax_year' => 'integer',
++        ];
++    }
++}
+diff --git a/app/Support/PayrollCalculator.php b/app/Support/PayrollCalculator.php
+index a656c23279c889cbc8f7f07656256eb6f30cb683..51e2f587a62bd2312c6b90658cdf5147b7f3eddd 100644
+--- a/app/Support/PayrollCalculator.php
++++ b/app/Support/PayrollCalculator.php
+@@ -21,6 +21,10 @@
+ 
+ class PayrollCalculator
+ {
++    public function __construct(
++        private readonly StatutoryCalculator $statutoryCalculator,
++    ) {}
++
+     public function recalculate(PayrollRun $run, ?User $actor = null): PayrollRun
+     {
+         if ($run->status !== 'draft') {
+@@ -137,6 +141,10 @@ public function recalculate(PayrollRun $run, ?User $actor = null): PayrollRun
+                     'amount' => $profile->basic_salary,
+                     'source_type' => EmployeeSalaryProfile::class,
+                     'source_id' => $profile->getKey(),
++                    'is_epf_wage' => true,
++                    'is_socso_wage' => true,
++                    'is_eis_wage' => true,
++                    'is_pcb_wage' => true,
+                 ]);
+ 
+                 foreach ($profile->recurringComponents as $assignment) {
+@@ -167,6 +175,10 @@ public function recalculate(PayrollRun $run, ?User $actor = null): PayrollRun
+                         'amount' => $assignment->amount,
+                         'source_type' => EmployeePayrollComponent::class,
+                         'source_id' => $assignment->getKey(),
++                        'is_epf_wage' => $component->is_epf_wage,
++                        'is_socso_wage' => $component->is_socso_wage,
++                        'is_eis_wage' => $component->is_eis_wage,
++                        'is_pcb_wage' => $component->is_pcb_wage,
+                     ]);
+                 }
+ 
+@@ -201,6 +213,10 @@ public function recalculate(PayrollRun $run, ?User $actor = null): PayrollRun
+                         'source_type' => OvertimeRequest::class,
+                         'source_id' => $overtime->getKey(),
+                         'notes' => $overtime->work_date?->format('d/m/Y'),
++                        'is_epf_wage' => false,
++                        'is_socso_wage' => true,
++                        'is_eis_wage' => true,
++                        'is_pcb_wage' => true,
+                     ]);
+                 }
+ 
+@@ -239,10 +255,20 @@ public function recalculate(PayrollRun $run, ?User $actor = null): PayrollRun
+                             $leave->start_date->format('d/m/Y'),
+                             $leave->end_date->format('d/m/Y'),
+                         ),
++                        'is_epf_wage' => true,
++                        'is_socso_wage' => true,
++                        'is_eis_wage' => true,
++                        'is_pcb_wage' => true,
+                     ]);
+                 }
+ 
+                 $this->refreshEntryTotals($entry);
++                $this->statutoryCalculator->apply(
++                    $entry,
++                    $periodStart,
++                    $actor,
++                );
++                $this->refreshEntryTotals($entry);
+             }
+ 
+             $lockedRun->update([
+@@ -343,11 +369,59 @@ public function refreshRunTotals(PayrollRun $run): PayrollRun
+             'total_earnings' => round((float) $totals->total_earnings, 2),
+             'total_deductions' => round((float) $totals->total_deductions, 2),
+             'total_net_pay' => round((float) $totals->total_net_pay, 2),
++            'total_employee_statutory' => round((float) $run
++                ->entries()
++                ->join(
++                    'payroll_statutory_snapshots as statutory',
++                    'statutory.payroll_entry_id',
++                    '=',
++                    'payroll_entries.id',
++                )
++                ->sum('statutory.total_employee_deductions'), 2),
++            'total_employer_statutory' => round((float) $run
++                ->entries()
++                ->join(
++                    'payroll_statutory_snapshots as statutory',
++                    'statutory.payroll_entry_id',
++                    '=',
++                    'payroll_entries.id',
++                )
++                ->sum('statutory.total_employer_contributions'), 2),
++            'total_pcb' => round((float) $run
++                ->entries()
++                ->join(
++                    'payroll_statutory_snapshots as statutory',
++                    'statutory.payroll_entry_id',
++                    '=',
++                    'payroll_entries.id',
++                )
++                ->sum('statutory.pcb'), 2),
+         ]);
+ 
+         return $run->fresh();
+     }
+ 
++    /**
++     * @param  array<string, float|string|null>|null  $override
++     */
++    public function refreshStatutory(
++        PayrollEntry $entry,
++        ?User $actor = null,
++        ?array $override = null,
++    ): PayrollEntry {
++        $run = $entry->payrollRun()->firstOrFail();
++        $this->statutoryCalculator->apply(
++            $entry,
++            $run->period_start,
++            $actor,
++            $override,
++        );
++        $entry = $this->refreshEntryTotals($entry);
++        $this->refreshRunTotals($run);
++
++        return $entry->fresh(['statutorySnapshot', 'items']);
++    }
++
+     /**
+      * @param  Collection<int, int|string>  $employeeIds
+      * @return array<string, array{employee_number: string|null, employee_name: string}>
+@@ -420,6 +494,10 @@ private function createItem(PayrollEntry $entry, array $attributes): PayrollEntr
+     {
+         return $entry->items()->create([
+             'is_manual' => false,
++            'is_epf_wage' => false,
++            'is_socso_wage' => false,
++            'is_eis_wage' => false,
++            'is_pcb_wage' => false,
+             ...$attributes,
+         ]);
+     }
+diff --git a/app/Support/PayslipPdfRenderer.php b/app/Support/PayslipPdfRenderer.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef71932134ab80656bbda47207f945448bc4f9b9
+--- /dev/null
++++ b/app/Support/PayslipPdfRenderer.php
+@@ -0,0 +1,192 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\PayrollEntry;
++use App\Models\PayrollEntryItem;
++use App\Models\PayrollSetting;
++
++class PayslipPdfRenderer
++{
++    public function render(PayrollEntry $entry): string
++    {
++        $entry->loadMissing([
++            'payrollRun',
++            'statutorySnapshot',
++            'items' => fn ($query) => $query->orderBy('id'),
++        ]);
++        $settings = PayrollSetting::query()->firstOrCreate(['id' => 1]);
++        $run = $entry->payrollRun;
++        $statutory = $entry->statutorySnapshot;
++        $earnings = $entry->items
++            ->where('type', 'earning')
++            ->values();
++        $deductions = $entry->items
++            ->where('type', 'deduction')
++            ->values();
++        $pdf = new SimplePdfDocument;
++
++        $pdf->rectangle(36, 742, 523, 64, true, .95)
++            ->text(52, 784, $settings->company_name ?: config('app.name'), 16, true)
++            ->text(52, 766, $this->oneLine($settings->company_address), 8)
++            ->text(
++                420,
++                784,
++                'SLIP GAJI',
++                16,
++                true,
++            )
++            ->text(
++                420,
++                766,
++                $run->period_start?->translatedFormat('F Y') ?? '-',
++                10,
++                true,
++            );
++
++        if ($settings->company_registration_no) {
++            $pdf->text(
++                52,
++                752,
++                'No. Pendaftaran: '.$settings->company_registration_no,
++                8,
++            );
++        }
++
++        $pdf->text(40, 718, 'MAKLUMAT PEKERJA', 10, true)
++            ->line(40, 712, 555, 712)
++            ->text(45, 696, 'Nama', 9)
++            ->text(145, 696, $entry->employee_name, 9, true)
++            ->text(360, 696, 'ID Pekerja', 9)
++            ->text(455, 696, $entry->employee_number ?: '-', 9, true)
++            ->text(45, 678, 'No. KWSP', 9)
++            ->text(145, 678, $statutory?->epf_number ?: '-', 9)
++            ->text(360, 678, 'No. PERKESO', 9)
++            ->text(455, 678, $statutory?->socso_number ?: '-', 9)
++            ->text(45, 660, 'No. Cukai', 9)
++            ->text(145, 660, $statutory?->tax_number ?: '-', 9)
++            ->text(360, 660, 'Status', 9)
++            ->text(455, 660, $this->statusLabel($run->status), 9, true);
++
++        $top = 628;
++        $pdf->rectangle(40, $top, 515, 22, true, .92)
++            ->text(48, $top + 7, 'PENDAPATAN', 9, true)
++            ->text(455, $top + 7, 'AMAUN (RM)', 9, true);
++        $y = $top - 17;
++
++        foreach ($earnings->take(14) as $item) {
++            $this->itemRow($pdf, $item, $y);
++            $y -= 15;
++        }
++
++        $pdf->line(40, $y + 5, 555, $y + 5)
++            ->text(360, $y - 8, 'Jumlah Pendapatan', 9, true)
++            ->text(485, $y - 8, $this->money($entry->gross_pay), 9, true);
++        $y -= 42;
++        $pdf->rectangle(40, $y, 515, 22, true, .92)
++            ->text(48, $y + 7, 'POTONGAN', 9, true)
++            ->text(455, $y + 7, 'AMAUN (RM)', 9, true);
++        $y -= 17;
++
++        foreach ($deductions->take(14) as $item) {
++            $this->itemRow($pdf, $item, $y);
++            $y -= 15;
++        }
++
++        $pdf->line(40, $y + 5, 555, $y + 5)
++            ->text(360, $y - 8, 'Jumlah Potongan', 9, true)
++            ->text(485, $y - 8, $this->money($entry->total_deductions), 9, true);
++        $summaryY = max(100, $y - 66);
++        $pdf->rectangle(40, $summaryY, 515, 46, true, .88)
++            ->text(52, $summaryY + 28, 'GAJI BERSIH', 12, true)
++            ->text(430, $summaryY + 25, 'RM '.$this->money($entry->net_pay), 14, true);
++
++        if ($statutory) {
++            $pdf->text(
++                45,
++                $summaryY - 18,
++                sprintf(
++                    'Caruman majikan: KWSP RM %s · PERKESO/SKBBK RM %s · EIS RM %s · Jumlah RM %s',
++                    $this->money($statutory->kwsp_employer),
++                    $this->money($statutory->socso_employer),
++                    $this->money($statutory->eis_employer),
++                    $this->money($statutory->total_employer_contributions),
++                ),
++                8,
++            )->text(
++                45,
++                $summaryY - 31,
++                'Rujukan kadar: '.$statutory->rate_version,
++                7,
++            );
++        }
++
++        $pdf->line(40, 61, 555, 61)
++            ->text(
++                40,
++                45,
++                $this->oneLine($settings->payslip_note),
++                7,
++            )
++            ->text(
++                445,
++                45,
++                'Dijana: '.now()->format('d/m/Y H:i'),
++                7,
++            );
++
++        return $pdf->output(
++            'Slip Gaji '.$entry->employee_name.' '.$run->period_start?->format('Y-m'),
++        );
++    }
++
++    private function itemRow(
++        SimplePdfDocument $pdf,
++        PayrollEntryItem $item,
++        float $y,
++    ): void {
++        $description = $item->name;
++
++        if ($item->quantity && (float) $item->quantity !== 1.0) {
++            $description .= ' ('.$this->quantity($item).')';
++        }
++
++        $pdf->text(48, $y, $this->oneLine($description, 62), 8)
++            ->text(485, $y, $this->money($item->amount), 8);
++    }
++
++    private function quantity(PayrollEntryItem $item): string
++    {
++        if ($item->category === 'overtime') {
++            return number_format((float) $item->quantity / 60, 2).' jam';
++        }
++
++        return rtrim(rtrim(number_format((float) $item->quantity, 3), '0'), '.');
++    }
++
++    private function money(mixed $amount): string
++    {
++        return number_format((float) $amount, 2, '.', ',');
++    }
++
++    private function oneLine(?string $value, int $limit = 80): string
++    {
++        $value = preg_replace('/\s+/', ' ', trim((string) $value)) ?? '';
++
++        if (mb_strlen($value) <= $limit) {
++            return $value;
++        }
++
++        return mb_substr($value, 0, $limit - 3).'...';
++    }
++
++    private function statusLabel(string $status): string
++    {
++        return match ($status) {
++            'finalized' => 'Dimuktamadkan',
++            'approved' => 'Diluluskan',
++            'hr_reviewed' => 'Disemak HR',
++            default => 'Draf',
++        };
++    }
++}
+diff --git a/app/Support/SimplePdfDocument.php b/app/Support/SimplePdfDocument.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..284f48f653af3526fa647c5c512fd013a63d21ab
+--- /dev/null
++++ b/app/Support/SimplePdfDocument.php
+@@ -0,0 +1,128 @@
++<?php
++
++namespace App\Support;
++
++class SimplePdfDocument
++{
++    /** @var array<int, string> */
++    private array $commands = [];
++
++    public function text(
++        float $x,
++        float $y,
++        string $text,
++        float $size = 10,
++        bool $bold = false,
++    ): self {
++        $font = $bold ? 'F2' : 'F1';
++        $this->commands[] = sprintf(
++            "BT /%s %.2F Tf %.2F %.2F Td (%s) Tj ET",
++            $font,
++            $size,
++            $x,
++            $y,
++            $this->escape($text),
++        );
++
++        return $this;
++    }
++
++    public function line(
++        float $x1,
++        float $y1,
++        float $x2,
++        float $y2,
++        float $width = .5,
++    ): self {
++        $this->commands[] = sprintf(
++            "%.2F w %.2F %.2F m %.2F %.2F l S",
++            $width,
++            $x1,
++            $y1,
++            $x2,
++            $y2,
++        );
++
++        return $this;
++    }
++
++    public function rectangle(
++        float $x,
++        float $y,
++        float $width,
++        float $height,
++        bool $fill = false,
++        float $gray = .94,
++    ): self {
++        $operator = $fill ? 'f' : 'S';
++        $prefix = $fill ? sprintf('%.2F g ', $gray) : '';
++        $suffix = $fill ? ' 0 g' : '';
++        $this->commands[] = sprintf(
++            '%s%.2F %.2F %.2F %.2F re %s%s',
++            $prefix,
++            $x,
++            $y,
++            $width,
++            $height,
++            $operator,
++            $suffix,
++        );
++
++        return $this;
++    }
++
++    public function output(string $title = 'Payslip'): string
++    {
++        $stream = implode("\n", $this->commands)."\n";
++        $objects = [
++            1 => '<< /Type /Catalog /Pages 2 0 R >>',
++            2 => '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
++            3 => '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] '
++                .'/Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> '
++                .'/Contents 6 0 R >>',
++            4 => '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica '
++                .'/Encoding /WinAnsiEncoding >>',
++            5 => '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold '
++                .'/Encoding /WinAnsiEncoding >>',
++            6 => '<< /Length '.strlen($stream)." >>\nstream\n{$stream}endstream",
++            7 => '<< /Title ('.$this->escape($title).') '
++                .'/Creator (IBCO HR Solutions) >>',
++        ];
++        $pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
++        $offsets = [0];
++
++        foreach ($objects as $number => $body) {
++            $offsets[$number] = strlen($pdf);
++            $pdf .= "{$number} 0 obj\n{$body}\nendobj\n";
++        }
++
++        $xref = strlen($pdf);
++        $pdf .= "xref\n0 ".(count($objects) + 1)."\n";
++        $pdf .= "0000000000 65535 f \n";
++
++        for ($number = 1; $number <= count($objects); $number++) {
++            $pdf .= sprintf("%010d 00000 n \n", $offsets[$number]);
++        }
++
++        $pdf .= 'trailer << /Size '.(count($objects) + 1)
++            ." /Root 1 0 R /Info 7 0 R >>\n"
++            ."startxref\n{$xref}\n%%EOF";
++
++        return $pdf;
++    }
++
++    private function escape(string $text): string
++    {
++        $encoded = iconv('UTF-8', 'Windows-1252//TRANSLIT', $text);
++
++        if ($encoded === false) {
++            $encoded = preg_replace('/[^\x20-\x7E]/', '?', $text) ?? $text;
++        }
++
++        return str_replace(
++            ['\\', '(', ')', "\r", "\n"],
++            ['\\\\', '\\(', '\\)', '', ' '],
++            $encoded,
++        );
++    }
++}
+diff --git a/app/Support/StatutoryCalculator.php b/app/Support/StatutoryCalculator.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9f20e815040458abd1177979a3c88915e5a8d9d
+--- /dev/null
++++ b/app/Support/StatutoryCalculator.php
+@@ -0,0 +1,442 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\EmployeeStatutoryProfile;
++use App\Models\PayrollEntry;
++use App\Models\PayrollEntryItem;
++use App\Models\PayrollStatutorySnapshot;
++use App\Models\StatutorySetting;
++use App\Models\User;
++use Carbon\Carbon;
++use Carbon\CarbonInterface;
++use Illuminate\Support\Facades\DB;
++
++class StatutoryCalculator
++{
++    /**
++     * @param  array<string, float|string|null>|null  $override
++     */
++    public function apply(
++        PayrollEntry $entry,
++        CarbonInterface $periodStart,
++        ?User $actor = null,
++        ?array $override = null,
++    ): PayrollStatutorySnapshot {
++        $settings = StatutorySetting::query()->firstOrCreate(['id' => 1]);
++        $legacy = $this->legacyEmployee($entry->employee_id);
++        $profile = EmployeeStatutoryProfile::query()
++            ->where('employee_id', $entry->employee_id)
++            ->where('is_active', true)
++            ->whereDate('effective_from', '<=', $periodStart)
++            ->first();
++        $resolved = $this->resolvedProfile($profile, $legacy, $periodStart);
++        $wages = $this->wageBases($entry);
++
++        [$kwspEmployee, $kwspEmployer] = $periodStart->gte(
++            $settings->kwsp_effective_from,
++        )
++            ? $this->kwsp(
++                $wages['epf'],
++                $resolved['kwsp_category'],
++                $settings,
++            )
++            : [0.0, 0.0];
++        [$socsoEmployee, $socsoEmployer] = $periodStart->gte(
++            $settings->socso_effective_from,
++        )
++            ? $this->socso(
++                $wages['socso'],
++                $resolved['socso_category'],
++                $settings,
++            )
++            : [0.0, 0.0];
++        [$eisEmployee, $eisEmployer] = (
++            $resolved['eis_enabled']
++            && $periodStart->gte($settings->eis_effective_from)
++        )
++            ? $this->eis($wages['eis'], $settings)
++            : [0.0, 0.0];
++        $pcb = $resolved['pcb_method'] === 'fixed'
++            ? round((float) $resolved['pcb_monthly_amount'], 2)
++            : 0.0;
++
++        $values = [
++            'kwsp_employee' => $kwspEmployee,
++            'kwsp_employer' => $kwspEmployer,
++            'socso_employee' => $socsoEmployee,
++            'socso_employer' => $socsoEmployer,
++            'eis_employee' => $eisEmployee,
++            'eis_employer' => $eisEmployer,
++            'pcb' => $pcb,
++        ];
++
++        if ($override !== null) {
++            foreach (array_keys($values) as $key) {
++                if (array_key_exists($key, $override)) {
++                    $values[$key] = round(max(0, (float) $override[$key]), 2);
++                }
++            }
++        }
++
++        $totalEmployee = round(
++            $values['kwsp_employee']
++            + $values['socso_employee']
++            + $values['eis_employee']
++            + $values['pcb'],
++            2,
++        );
++        $totalEmployer = round(
++            $values['kwsp_employer']
++            + $values['socso_employer']
++            + $values['eis_employer'],
++            2,
++        );
++        $snapshot = PayrollStatutorySnapshot::query()->updateOrCreate(
++            ['payroll_entry_id' => $entry->getKey()],
++            [
++                'employee_statutory_profile_id' => $profile?->getKey(),
++                'kwsp_category' => $resolved['kwsp_category'],
++                'socso_category' => $resolved['socso_category'],
++                'eis_enabled' => $resolved['eis_enabled'],
++                'epf_wages' => $wages['epf'],
++                'socso_wages' => $wages['socso'],
++                'eis_wages' => $wages['eis'],
++                'pcb_wages' => $wages['pcb'],
++                ...$values,
++                'total_employee_deductions' => $totalEmployee,
++                'total_employer_contributions' => $totalEmployer,
++                'epf_number' => $resolved['epf_number'],
++                'socso_number' => $resolved['socso_number'],
++                'tax_number' => $resolved['tax_number'],
++                'rate_version' => sprintf(
++                    'KWSP %s · PERKESO/SKBBK %s · EIS %s · PCB %d',
++                    $settings->kwsp_effective_from->format('Y-m'),
++                    $settings->socso_effective_from->format('Y-m'),
++                    $settings->eis_effective_from->format('Y-m'),
++                    $settings->pcb_tax_year,
++                ),
++                'calculation_details' => [
++                    'kwsp_effective_from' => $settings->kwsp_effective_from->toDateString(),
++                    'socso_effective_from' => $settings->socso_effective_from->toDateString(),
++                    'eis_effective_from' => $settings->eis_effective_from->toDateString(),
++                    'pcb_method' => $resolved['pcb_method'],
++                    'profile_source' => $profile ? 'configured' : 'inferred',
++                ],
++                'is_overridden' => $override !== null,
++                'override_notes' => $override['notes'] ?? null,
++                'overridden_by' => $override !== null
++                    ? $actor?->getAuthIdentifier()
++                    : null,
++                'calculated_at' => now(),
++            ],
++        );
++
++        $entry->items()->where('category', 'statutory')->delete();
++        $this->deductionItem($entry, $snapshot, 'KWSP', 'KWSP (Pekerja)', $values['kwsp_employee']);
++        $this->deductionItem($entry, $snapshot, 'PERKESO', 'PERKESO / SKBBK (Pekerja)', $values['socso_employee']);
++        $this->deductionItem($entry, $snapshot, 'EIS', 'EIS (Pekerja)', $values['eis_employee']);
++        $this->deductionItem($entry, $snapshot, 'PCB', 'Potongan Cukai Bulanan (PCB)', $values['pcb']);
++
++        return $snapshot->fresh();
++    }
++
++    /**
++     * @return array{epf: float, socso: float, eis: float, pcb: float}
++     */
++    private function wageBases(PayrollEntry $entry): array
++    {
++        $items = $entry->items()
++            ->where('category', '!=', 'statutory')
++            ->get();
++        $sum = function (string $flag) use ($items): float {
++            return round(max(0, (float) $items
++                ->filter(fn (PayrollEntryItem $item) => $item->{$flag})
++                ->sum(fn (PayrollEntryItem $item) => (
++                    $item->type === 'deduction' ? -1 : 1
++                ) * (float) $item->amount)), 2);
++        };
++
++        return [
++            'epf' => $sum('is_epf_wage'),
++            'socso' => $sum('is_socso_wage'),
++            'eis' => $sum('is_eis_wage'),
++            'pcb' => $sum('is_pcb_wage'),
++        ];
++    }
++
++    /**
++     * @return array{0: float, 1: float}
++     */
++    private function kwsp(
++        float $wages,
++        string $category,
++        StatutorySetting $settings,
++    ): array {
++        if ($wages <= 0 || $category === 'exempt') {
++            return [0.0, 0.0];
++        }
++
++        [$employeeRate, $employerRate] = match ($category) {
++            'citizen_60_plus' => [
++                (float) $settings->kwsp_age60_employee_rate,
++                (float) $settings->kwsp_age60_employer_rate,
++            ],
++            'pr_60_plus' => [
++                (float) $settings->kwsp_pr_age60_employee_rate,
++                (float) $settings->kwsp_pr_age60_employer_rate,
++            ],
++            'non_malaysian' => [
++                (float) $settings->kwsp_foreign_employee_rate,
++                (float) $settings->kwsp_foreign_employer_rate,
++            ],
++            default => [
++                (float) $settings->kwsp_employee_rate,
++                $wages <= (float) $settings->kwsp_employer_threshold
++                    ? (float) $settings->kwsp_employer_rate_low
++                    : (float) $settings->kwsp_employer_rate_high,
++            ],
++        };
++
++        if ($category === 'non_malaysian') {
++            return [
++                (float) ceil($wages * $employeeRate / 100),
++                (float) ceil($wages * $employerRate / 100),
++            ];
++        }
++
++        if ($wages <= (float) $settings->kwsp_table_limit) {
++            $band = $wages <= (float) $settings->kwsp_employer_threshold
++                ? 20
++                : 100;
++            $referenceWages = ceil($wages / $band) * $band;
++
++            return [
++                (float) ceil($referenceWages * $employeeRate / 100),
++                (float) ceil($referenceWages * $employerRate / 100),
++            ];
++        }
++
++        return [
++            round($wages * $employeeRate / 100, 2),
++            round($wages * $employerRate / 100, 2),
++        ];
++    }
++
++    /**
++     * Current First/Second Category table including SKBBK from June 2026.
++     *
++     * @return array{0: float, 1: float}
++     */
++    private function socso(
++        float $wages,
++        string $category,
++        StatutorySetting $settings,
++    ): array {
++        if ($wages <= 0 || $category === 'exempt') {
++            return [0.0, 0.0];
++        }
++        $wages = min($wages, (float) $settings->socso_wage_ceiling);
++
++        if (! $this->usesOfficialSocsoRates($settings)) {
++            $employerRate = $category === 'second'
++                ? (float) $settings->socso_second_employer_rate
++                : (float) $settings->socso_first_employer_rate;
++            $employeeRate = (float) $settings->socso_skbbk_employee_rate
++                + ($category === 'first'
++                    ? (float) $settings->socso_first_employee_rate
++                    : 0);
++
++            return [
++                $this->nearestFiveSen($wages * $employeeRate / 100),
++                $this->nearestFiveSen($wages * $employerRate / 100),
++            ];
++        }
++
++        $lowerBands = [
++            [30, .40, .10, .20, .30],
++            [50, .70, .20, .30, .50],
++            [70, 1.10, .30, .50, .80],
++            [100, 1.50, .40, .65, 1.10],
++            [140, 2.10, .60, .90, 1.50],
++            [200, 2.95, .85, 1.25, 2.10],
++        ];
++
++        foreach ($lowerBands as [$upper, $firstEmployer, $invalidity, $skbbk, $secondEmployer]) {
++            if ($wages <= $upper) {
++                return $category === 'second'
++                    ? [$skbbk, $secondEmployer]
++                    : [$invalidity + $skbbk, $firstEmployer];
++            }
++        }
++
++        $index = min(57, (int) floor(($wages - 200.000001) / 100));
++        $oddAdjustment = $index % 2 === 1 ? 5 : 0;
++        $firstEmployer = (435 + ($index * 175) + $oddAdjustment) / 100;
++        $invalidity = (125 + ($index * 50)) / 100;
++        $skbbk = (185 + ($index * 75) + $oddAdjustment) / 100;
++        $secondEmployer = (310 + ($index * 125) + $oddAdjustment) / 100;
++
++        return $category === 'second'
++            ? [$skbbk, $secondEmployer]
++            : [$invalidity + $skbbk, $firstEmployer];
++    }
++
++    /**
++     * @return array{0: float, 1: float}
++     */
++    private function eis(float $wages, StatutorySetting $settings): array
++    {
++        if ($wages <= 0) {
++            return [0.0, 0.0];
++        }
++        $wages = min($wages, (float) $settings->eis_wage_ceiling);
++
++        if (
++            (float) $settings->eis_employee_rate !== .2
++            || (float) $settings->eis_employer_rate !== .2
++        ) {
++            return [
++                $this->nearestFiveSen(
++                    $wages * (float) $settings->eis_employee_rate / 100,
++                ),
++                $this->nearestFiveSen(
++                    $wages * (float) $settings->eis_employer_rate / 100,
++                ),
++            ];
++        }
++
++        $lowerBands = [
++            [30, .05],
++            [50, .10],
++            [70, .10],
++            [100, .20],
++            [140, .20],
++            [200, .30],
++        ];
++
++        foreach ($lowerBands as [$upper, $amount]) {
++            if ($wages <= $upper) {
++                return [$amount, $amount];
++            }
++        }
++
++        $index = min(57, (int) floor(($wages - 200.000001) / 100));
++        $amount = round(.50 + ($index * .20), 2);
++
++        return [$amount, $amount];
++    }
++
++    private function usesOfficialSocsoRates(StatutorySetting $settings): bool
++    {
++        return (float) $settings->socso_wage_ceiling === 6000.0
++            && (float) $settings->socso_first_employer_rate === 1.75
++            && (float) $settings->socso_first_employee_rate === .5
++            && (float) $settings->socso_skbbk_employee_rate === .75
++            && (float) $settings->socso_second_employer_rate === 1.25;
++    }
++
++    private function nearestFiveSen(float $amount): float
++    {
++        return round(round($amount * 20) / 20, 2);
++    }
++
++    /**
++     * @param  array<string, mixed>  $legacy
++     * @return array<string, mixed>
++     */
++    private function resolvedProfile(
++        ?EmployeeStatutoryProfile $profile,
++        array $legacy,
++        CarbonInterface $periodStart,
++    ): array {
++        if ($profile) {
++            return [
++                'kwsp_category' => $profile->kwsp_category,
++                'socso_category' => $profile->socso_category,
++                'eis_enabled' => $profile->eis_enabled,
++                'pcb_method' => $profile->pcb_method,
++                'pcb_monthly_amount' => $profile->pcb_monthly_amount,
++                'epf_number' => $profile->epf_number ?: $legacy['epf_number'],
++                'socso_number' => $profile->socso_number ?: $legacy['socso_number'],
++                'tax_number' => $profile->tax_number,
++            ];
++        }
++
++        $nationality = strtolower(trim((string) ($legacy['nationality'] ?? '')));
++        $isMalaysian = $nationality === ''
++            || str_contains($nationality, 'malaysia');
++        $age = $legacy['birth_date']
++            ? (int) Carbon::parse($legacy['birth_date'])
++                ->diffInYears($periodStart->copy()->endOfMonth())
++            : 30;
++        $is60Plus = $age >= 60;
++
++        return [
++            'kwsp_category' => $isMalaysian
++                ? ($is60Plus ? 'citizen_60_plus' : 'citizen_below_60')
++                : 'non_malaysian',
++            'socso_category' => $is60Plus ? 'second' : 'first',
++            'eis_enabled' => $isMalaysian && ! $is60Plus,
++            'pcb_method' => 'fixed',
++            'pcb_monthly_amount' => 0,
++            'epf_number' => $legacy['epf_number'],
++            'socso_number' => $legacy['socso_number'],
++            'tax_number' => null,
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function legacyEmployee(int $employeeId): array
++    {
++        $activeJob = DB::connection('ibco')
++            ->table('maklumatjawatan')
++            ->where('id_pekerja', $employeeId)
++            ->where('rcd_enable', 1)
++            ->orderByDesc('id')
++            ->first(['noepf', 'nosocso']);
++        $employee = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('id', $employeeId)
++            ->first(['tarikhlahir', 'kewarganegaraan']);
++
++        return [
++            'birth_date' => $employee?->tarikhlahir,
++            'nationality' => $employee?->kewarganegaraan,
++            'epf_number' => $activeJob?->noepf,
++            'socso_number' => $activeJob?->nosocso,
++        ];
++    }
++
++    private function deductionItem(
++        PayrollEntry $entry,
++        PayrollStatutorySnapshot $snapshot,
++        string $code,
++        string $name,
++        float $amount,
++    ): void {
++        if ($amount <= 0) {
++            return;
++        }
++
++        $entry->items()->create([
++            'code' => $code,
++            'name' => $name,
++            'type' => 'deduction',
++            'category' => 'statutory',
++            'quantity' => 1,
++            'rate' => $amount,
++            'multiplier' => 1,
++            'amount' => $amount,
++            'source_type' => PayrollStatutorySnapshot::class,
++            'source_id' => $snapshot->getKey(),
++            'is_manual' => false,
++            'is_epf_wage' => false,
++            'is_socso_wage' => false,
++            'is_eis_wage' => false,
++            'is_pcb_wage' => false,
++        ]);
++    }
++}
+diff --git a/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php b/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..56a1330d3441e2ecf1fbc3c93b7a30576e3ce2e5
+--- /dev/null
++++ b/database/migrations/2026_07_29_060000_create_statutory_and_payslip_tables.php
+@@ -0,0 +1,197 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('payroll_settings', function (Blueprint $table) {
++            $table->string('company_name')->default('IBCO Solutions');
++            $table->string('company_registration_no', 80)->nullable();
++            $table->text('company_address')->nullable();
++            $table->string('payslip_note', 255)
++                ->default('Dokumen ini dijana oleh sistem dan tidak memerlukan tandatangan.');
++        });
++
++        Schema::create('statutory_settings', function (Blueprint $table) {
++            $table->id();
++            $table->date('kwsp_effective_from')->default('2025-10-01');
++            $table->decimal('kwsp_table_limit', 12, 2)->default(20000);
++            $table->decimal('kwsp_employer_threshold', 12, 2)->default(5000);
++            $table->decimal('kwsp_employee_rate', 6, 3)->default(11);
++            $table->decimal('kwsp_employer_rate_low', 6, 3)->default(13);
++            $table->decimal('kwsp_employer_rate_high', 6, 3)->default(12);
++            $table->decimal('kwsp_age60_employee_rate', 6, 3)->default(0);
++            $table->decimal('kwsp_age60_employer_rate', 6, 3)->default(4);
++            $table->decimal('kwsp_pr_age60_employee_rate', 6, 3)->default(5.5);
++            $table->decimal('kwsp_pr_age60_employer_rate', 6, 3)->default(6.5);
++            $table->decimal('kwsp_foreign_employee_rate', 6, 3)->default(2);
++            $table->decimal('kwsp_foreign_employer_rate', 6, 3)->default(2);
++            $table->date('socso_effective_from')->default('2026-06-01');
++            $table->decimal('socso_wage_ceiling', 12, 2)->default(6000);
++            $table->decimal('socso_first_employer_rate', 6, 3)->default(1.75);
++            $table->decimal('socso_first_employee_rate', 6, 3)->default(0.5);
++            $table->decimal('socso_skbbk_employee_rate', 6, 3)->default(0.75);
++            $table->decimal('socso_second_employer_rate', 6, 3)->default(1.25);
++            $table->date('eis_effective_from')->default('2024-10-01');
++            $table->decimal('eis_wage_ceiling', 12, 2)->default(6000);
++            $table->decimal('eis_employee_rate', 6, 3)->default(0.2);
++            $table->decimal('eis_employer_rate', 6, 3)->default(0.2);
++            $table->unsignedSmallInteger('pcb_tax_year')->default(2026);
++            $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->timestamps();
++        });
++
++        DB::table('statutory_settings')->insert([
++            'kwsp_effective_from' => '2025-10-01',
++            'kwsp_table_limit' => 20000,
++            'kwsp_employer_threshold' => 5000,
++            'kwsp_employee_rate' => 11,
++            'kwsp_employer_rate_low' => 13,
++            'kwsp_employer_rate_high' => 12,
++            'kwsp_age60_employee_rate' => 0,
++            'kwsp_age60_employer_rate' => 4,
++            'kwsp_pr_age60_employee_rate' => 5.5,
++            'kwsp_pr_age60_employer_rate' => 6.5,
++            'kwsp_foreign_employee_rate' => 2,
++            'kwsp_foreign_employer_rate' => 2,
++            'socso_effective_from' => '2026-06-01',
++            'socso_wage_ceiling' => 6000,
++            'socso_first_employer_rate' => 1.75,
++            'socso_first_employee_rate' => 0.5,
++            'socso_skbbk_employee_rate' => 0.75,
++            'socso_second_employer_rate' => 1.25,
++            'eis_effective_from' => '2024-10-01',
++            'eis_wage_ceiling' => 6000,
++            'eis_employee_rate' => 0.2,
++            'eis_employer_rate' => 0.2,
++            'pcb_tax_year' => 2026,
++            'created_at' => now(),
++            'updated_at' => now(),
++        ]);
++
++        Schema::create('employee_statutory_profiles', function (Blueprint $table) {
++            $table->id();
++            $table->unsignedBigInteger('employee_id')->unique();
++            $table->string('kwsp_category', 32)->default('citizen_below_60');
++            $table->string('socso_category', 16)->default('first');
++            $table->boolean('eis_enabled')->default(true);
++            $table->string('pcb_method', 16)->default('fixed');
++            $table->decimal('pcb_monthly_amount', 12, 2)->default(0);
++            $table->string('epf_number', 80)->nullable();
++            $table->string('socso_number', 80)->nullable();
++            $table->string('tax_number', 80)->nullable();
++            $table->date('effective_from');
++            $table->boolean('is_active')->default(true)->index();
++            $table->text('notes')->nullable();
++            $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->timestamps();
++        });
++
++        Schema::table('payroll_components', function (Blueprint $table) {
++            $table->boolean('is_epf_wage')->default(false);
++            $table->boolean('is_socso_wage')->default(false);
++            $table->boolean('is_eis_wage')->default(false);
++            $table->boolean('is_pcb_wage')->default(false);
++        });
++
++        DB::table('payroll_components')
++            ->where('type', 'earning')
++            ->update([
++                'is_epf_wage' => true,
++                'is_socso_wage' => true,
++                'is_eis_wage' => true,
++                'is_pcb_wage' => true,
++            ]);
++
++        Schema::table('payroll_entry_items', function (Blueprint $table) {
++            $table->boolean('is_epf_wage')->default(false)->index();
++            $table->boolean('is_socso_wage')->default(false)->index();
++            $table->boolean('is_eis_wage')->default(false)->index();
++            $table->boolean('is_pcb_wage')->default(false)->index();
++        });
++
++        Schema::create('payroll_statutory_snapshots', function (Blueprint $table) {
++            $table->id();
++            $table->foreignId('payroll_entry_id')->unique()->constrained()->cascadeOnDelete();
++            $table->foreignId('employee_statutory_profile_id')
++                ->nullable()
++                ->constrained()
++                ->nullOnDelete();
++            $table->string('kwsp_category', 32);
++            $table->string('socso_category', 16);
++            $table->boolean('eis_enabled');
++            $table->decimal('epf_wages', 12, 2)->default(0);
++            $table->decimal('socso_wages', 12, 2)->default(0);
++            $table->decimal('eis_wages', 12, 2)->default(0);
++            $table->decimal('pcb_wages', 12, 2)->default(0);
++            $table->decimal('kwsp_employee', 12, 2)->default(0);
++            $table->decimal('kwsp_employer', 12, 2)->default(0);
++            $table->decimal('socso_employee', 12, 2)->default(0);
++            $table->decimal('socso_employer', 12, 2)->default(0);
++            $table->decimal('eis_employee', 12, 2)->default(0);
++            $table->decimal('eis_employer', 12, 2)->default(0);
++            $table->decimal('pcb', 12, 2)->default(0);
++            $table->decimal('total_employee_deductions', 12, 2)->default(0);
++            $table->decimal('total_employer_contributions', 12, 2)->default(0);
++            $table->string('epf_number', 80)->nullable();
++            $table->string('socso_number', 80)->nullable();
++            $table->string('tax_number', 80)->nullable();
++            $table->string('rate_version', 120);
++            $table->json('calculation_details')->nullable();
++            $table->boolean('is_overridden')->default(false)->index();
++            $table->text('override_notes')->nullable();
++            $table->foreignId('overridden_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->timestamp('calculated_at');
++            $table->timestamps();
++        });
++
++        Schema::table('payroll_runs', function (Blueprint $table) {
++            $table->decimal('total_employee_statutory', 14, 2)->default(0);
++            $table->decimal('total_employer_statutory', 14, 2)->default(0);
++            $table->decimal('total_pcb', 14, 2)->default(0);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('payroll_runs', function (Blueprint $table) {
++            $table->dropColumn([
++                'total_employee_statutory',
++                'total_employer_statutory',
++                'total_pcb',
++            ]);
++        });
++        Schema::dropIfExists('payroll_statutory_snapshots');
++        Schema::table('payroll_entry_items', function (Blueprint $table) {
++            $table->dropColumn([
++                'is_epf_wage',
++                'is_socso_wage',
++                'is_eis_wage',
++                'is_pcb_wage',
++            ]);
++        });
++        Schema::table('payroll_components', function (Blueprint $table) {
++            $table->dropColumn([
++                'is_epf_wage',
++                'is_socso_wage',
++                'is_eis_wage',
++                'is_pcb_wage',
++            ]);
++        });
++        Schema::dropIfExists('employee_statutory_profiles');
++        Schema::dropIfExists('statutory_settings');
++        Schema::table('payroll_settings', function (Blueprint $table) {
++            $table->dropColumn([
++                'company_name',
++                'company_registration_no',
++                'company_address',
++                'payslip_note',
++            ]);
++        });
++    }
++};
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index 36397ba68b6085e630a991bc958bb7ed207b4478..fdaf7e85a003c1466c17981f604dc5340d3a5623 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -13,6 +13,7 @@ import {
+     LayoutGrid,
+     MapPinned,
+     Navigation,
++    ReceiptText,
+     ShieldCheck,
+     SlidersHorizontal,
+     TimerReset,
+@@ -89,6 +90,12 @@ const selfServiceNavItems: AuthorizedNavItem[] = [
+         icon: Navigation,
+         permission: 'attendance.clock',
+     },
++    {
++        title: 'Slip Gaji Saya',
++        href: '/slip-gaji-saya',
++        icon: ReceiptText,
++        permission: 'payslip.self',
++    },
+ ];
+ 
+ const attendanceNavItems: AuthorizedNavItem[] = [
+@@ -176,6 +183,12 @@ const administrationNavItems: AuthorizedNavItem[] = [
+         icon: Banknote,
+         permission: 'payroll.settings',
+     },
++    {
++        title: 'Tetapan Statutori',
++        href: '/tetapan-statutori',
++        icon: ReceiptText,
++        permission: 'payroll.settings',
++    },
+     {
+         title: 'Audit Trail',
+         href: '/audit-trail',
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index 49df55b81e1e5c86ade520dcb7f2314a59129545..bb18ca4fb1afad4a550ed90c65e0adaf911eade9 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -196,6 +196,18 @@ const fieldLabels: Record<string, string> = {
+     primary_role: 'Role Utama',
+     roles: 'Role',
+     email_verified_at: 'E-mel Disahkan',
++    kwsp_employee: 'KWSP Pekerja',
++    kwsp_employer: 'KWSP Majikan',
++    socso_employee: 'PERKESO/SKBBK Pekerja',
++    socso_employer: 'PERKESO/SKBBK Majikan',
++    eis_employee: 'EIS Pekerja',
++    eis_employer: 'EIS Majikan',
++    pcb: 'PCB',
++    kwsp_category: 'Kategori KWSP',
++    socso_category: 'Kategori PERKESO',
++    pcb_monthly_amount: 'PCB Bulanan',
++    effective_from: 'Tarikh Kuat Kuasa',
++    company_name: 'Nama Majikan',
+ };
+ 
+ const actionStyles: Record<string, string> = {
+diff --git a/resources/js/pages/EmployeeSelfService/Payslips.tsx b/resources/js/pages/EmployeeSelfService/Payslips.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..d78e3c2bf6dbd6f525f909e40fd64613c3a3d070
+--- /dev/null
++++ b/resources/js/pages/EmployeeSelfService/Payslips.tsx
+@@ -0,0 +1,286 @@
++import { Head, Link } from '@inertiajs/react';
++import { Download, FileText, Landmark, ReceiptText } from 'lucide-react';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type Payslip = {
++    id: number;
++    period: string;
++    period_label: string;
++    finalized_at: string | null;
++    gross_pay: number;
++    total_deductions: number;
++    net_pay: number;
++    kwsp_employee: number;
++    socso_employee: number;
++    eis_employee: number;
++    pcb: number;
++};
++
++type Props = {
++    hasEmployeeLink: boolean;
++    payslips: {
++        data: Payslip[];
++        links: { url: string | null; label: string; active: boolean }[];
++    } | null;
++};
++
++function money(value: number): string {
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++    }).format(value);
++}
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++export default function Payslips({ hasEmployeeLink, payslips }: Props) {
++    const records = payslips?.data ?? [];
++
++    return (
++        <>
++            <Head title="Slip Gaji Saya" />
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div>
++                    <h1 className="flex items-center gap-2 text-2xl font-semibold">
++                        <ReceiptText className="size-6 text-primary" />
++                        Slip Gaji Saya
++                    </h1>
++                    <p className="text-sm text-muted-foreground">
++                        Slip hanya diterbitkan selepas payroll diluluskan,
++                        dimuktamadkan dan dikunci.
++                    </p>
++                </div>
++
++                {!hasEmployeeLink ? (
++                    <Card className="border-amber-500/30">
++                        <CardHeader>
++                            <CardTitle>Pautan pekerja belum tersedia</CardTitle>
++                            <CardDescription>
++                                Hubungi HR untuk memautkan akaun ini kepada
++                                rekod pekerja sebelum slip gaji boleh dilihat.
++                            </CardDescription>
++                        </CardHeader>
++                    </Card>
++                ) : records.length === 0 ? (
++                    <Card>
++                        <CardHeader>
++                            <CardTitle>Belum ada slip gaji</CardTitle>
++                            <CardDescription>
++                                Slip pertama akan muncul di sini selepas payroll
++                                bulan berkenaan dimuktamadkan.
++                            </CardDescription>
++                        </CardHeader>
++                    </Card>
++                ) : (
++                    <>
++                        <div className="grid gap-4 sm:grid-cols-3">
++                            <Card>
++                                <CardHeader className="pb-2">
++                                    <CardDescription>
++                                        Slip Terkini
++                                    </CardDescription>
++                                    <CardTitle>
++                                        {records[0].period_label}
++                                    </CardTitle>
++                                </CardHeader>
++                            </Card>
++                            <Card>
++                                <CardHeader className="pb-2">
++                                    <CardDescription>
++                                        Gaji Bersih Terkini
++                                    </CardDescription>
++                                    <CardTitle className="text-emerald-700">
++                                        {money(records[0].net_pay)}
++                                    </CardTitle>
++                                </CardHeader>
++                            </Card>
++                            <Card>
++                                <CardHeader className="pb-2">
++                                    <CardDescription>
++                                        Jumlah Slip Dipaparkan
++                                    </CardDescription>
++                                    <CardTitle>{records.length}</CardTitle>
++                                </CardHeader>
++                            </Card>
++                        </div>
++
++                        <Card>
++                            <CardHeader>
++                                <CardTitle className="flex items-center gap-2">
++                                    <FileText className="size-5 text-primary" />
++                                    Sejarah Slip Gaji
++                                </CardTitle>
++                                <CardDescription>
++                                    PDF mengandungi pecahan pendapatan, potongan
++                                    dan caruman statutori.
++                                </CardDescription>
++                            </CardHeader>
++                            <CardContent className="space-y-4">
++                                <div className="overflow-x-auto rounded-lg border">
++                                    <Table>
++                                        <TableHeader>
++                                            <TableRow>
++                                                <TableHead>Bulan</TableHead>
++                                                <TableHead className="text-right">
++                                                    Pendapatan
++                                                </TableHead>
++                                                <TableHead className="text-right">
++                                                    Potongan
++                                                </TableHead>
++                                                <TableHead>Statutori</TableHead>
++                                                <TableHead className="text-right">
++                                                    Gaji Bersih
++                                                </TableHead>
++                                                <TableHead>Tindakan</TableHead>
++                                            </TableRow>
++                                        </TableHeader>
++                                        <TableBody>
++                                            {records.map((payslip) => (
++                                                <TableRow key={payslip.id}>
++                                                    <TableCell>
++                                                        <p className="font-medium">
++                                                            {
++                                                                payslip.period_label
++                                                            }
++                                                        </p>
++                                                        <Badge
++                                                            variant="outline"
++                                                            className="mt-1 border-emerald-500/30 text-emerald-700"
++                                                        >
++                                                            Dimuktamadkan
++                                                        </Badge>
++                                                    </TableCell>
++                                                    <TableCell className="text-right tabular-nums">
++                                                        {money(
++                                                            payslip.gross_pay,
++                                                        )}
++                                                    </TableCell>
++                                                    <TableCell className="text-right tabular-nums">
++                                                        {money(
++                                                            payslip.total_deductions,
++                                                        )}
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        <div className="flex flex-wrap gap-1 text-xs">
++                                                            <Badge variant="secondary">
++                                                                KWSP{' '}
++                                                                {money(
++                                                                    payslip.kwsp_employee,
++                                                                )}
++                                                            </Badge>
++                                                            <Badge variant="secondary">
++                                                                PERKESO{' '}
++                                                                {money(
++                                                                    payslip.socso_employee,
++                                                                )}
++                                                            </Badge>
++                                                            <Badge variant="secondary">
++                                                                EIS{' '}
++                                                                {money(
++                                                                    payslip.eis_employee,
++                                                                )}
++                                                            </Badge>
++                                                            <Badge variant="secondary">
++                                                                PCB{' '}
++                                                                {money(
++                                                                    payslip.pcb,
++                                                                )}
++                                                            </Badge>
++                                                        </div>
++                                                    </TableCell>
++                                                    <TableCell className="text-right font-semibold text-emerald-700 tabular-nums">
++                                                        {money(payslip.net_pay)}
++                                                    </TableCell>
++                                                    <TableCell>
++                                                        <Button
++                                                            asChild
++                                                            size="sm"
++                                                        >
++                                                            <a
++                                                                href={`/slip-gaji-saya/${payslip.id}/pdf`}
++                                                            >
++                                                                <Download />
++                                                                Muat Turun PDF
++                                                            </a>
++                                                        </Button>
++                                                    </TableCell>
++                                                </TableRow>
++                                            ))}
++                                        </TableBody>
++                                    </Table>
++                                </div>
++                                {payslips && payslips.links.length > 3 && (
++                                    <div className="flex flex-wrap gap-2">
++                                        {payslips.links.map((link, index) => (
++                                            <Button
++                                                key={`${link.label}-${index}`}
++                                                asChild={Boolean(link.url)}
++                                                size="sm"
++                                                variant={
++                                                    link.active
++                                                        ? 'default'
++                                                        : 'outline'
++                                                }
++                                                disabled={!link.url}
++                                            >
++                                                {link.url ? (
++                                                    <Link href={link.url}>
++                                                        {paginationLabel(
++                                                            link.label,
++                                                        )}
++                                                    </Link>
++                                                ) : (
++                                                    <span>
++                                                        {paginationLabel(
++                                                            link.label,
++                                                        )}
++                                                    </span>
++                                                )}
++                                            </Button>
++                                        ))}
++                                    </div>
++                                )}
++                            </CardContent>
++                        </Card>
++
++                        <Card className="border-primary/20 bg-primary/5">
++                            <CardHeader className="flex-row items-center gap-3">
++                                <Landmark className="size-5 text-primary" />
++                                <div>
++                                    <CardTitle className="text-base">
++                                        Caruman Majikan
++                                    </CardTitle>
++                                    <CardDescription>
++                                        Caruman majikan dipaparkan dalam PDF
++                                        sebagai maklumat dan tidak ditolak
++                                        daripada gaji bersih.
++                                    </CardDescription>
++                                </div>
++                            </CardHeader>
++                        </Card>
++                    </>
++                )}
++            </div>
++        </>
++    );
++}
+diff --git a/resources/js/pages/PayrollCore/Show.tsx b/resources/js/pages/PayrollCore/Show.tsx
+index f44f19e4bad4b866383f8b40d728782e9f03190d..94ff26a2b9a02176c7b86ed1f98598330e5becc7 100644
+--- a/resources/js/pages/PayrollCore/Show.tsx
++++ b/resources/js/pages/PayrollCore/Show.tsx
+@@ -7,7 +7,9 @@ import {
+     Download,
+     Eye,
+     LockKeyhole,
++    Landmark,
+     Plus,
++    ReceiptText,
+     RotateCcw,
+     Search,
+     Trash2,
+@@ -64,6 +66,9 @@ type PayrollRun = {
+     total_earnings: number;
+     total_deductions: number;
+     total_net_pay: number;
++    total_employee_statutory: number;
++    total_employer_statutory: number;
++    total_pcb: number;
+     generated_at: string | null;
+     generated_by: string | null;
+     reviewed_at: string | null;
+@@ -105,6 +110,27 @@ type PayrollEntry = {
+     gross_pay: number;
+     total_deductions: number;
+     net_pay: number;
++    statutory: {
++        id: number;
++        kwsp_category: string;
++        socso_category: string;
++        epf_wages: number;
++        socso_wages: number;
++        eis_wages: number;
++        pcb_wages: number;
++        kwsp_employee: number;
++        kwsp_employer: number;
++        socso_employee: number;
++        socso_employer: number;
++        eis_employee: number;
++        eis_employer: number;
++        pcb: number;
++        total_employee_deductions: number;
++        total_employer_contributions: number;
++        rate_version: string;
++        is_overridden: boolean;
++        override_notes: string | null;
++    } | null;
+     items: PayrollItem[];
+ };
+ 
+@@ -128,6 +154,10 @@ type Props = {
+         code: string;
+         name: string;
+         type: 'earning' | 'deduction';
++        is_epf_wage: boolean;
++        is_socso_wage: boolean;
++        is_eis_wage: boolean;
++        is_pcb_wage: boolean;
+     }[];
+     permissions: {
+         can_manage: boolean;
+@@ -148,6 +178,7 @@ const itemLabels: Record<string, string> = {
+     overtime: 'OT',
+     unpaid_leave: 'Cuti Tanpa Gaji',
+     manual: 'Pelarasan Manual',
++    statutory: 'Statutori',
+ };
+ 
+ function money(value: number, currency = 'MYR'): string {
+@@ -388,6 +419,53 @@ function BreakdownDialog({
+                         {money(entry.net_pay, payrollRun.currency)}
+                     </strong>
+                 </div>
++                {entry.statutory && (
++                    <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm">
++                        <div className="mb-2 flex items-center justify-between">
++                            <strong>Caruman Majikan</strong>
++                            <Badge variant="outline">
++                                {entry.statutory.rate_version}
++                            </Badge>
++                        </div>
++                        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
++                            <span>
++                                KWSP{' '}
++                                {money(
++                                    entry.statutory.kwsp_employer,
++                                    payrollRun.currency,
++                                )}
++                            </span>
++                            <span>
++                                PERKESO{' '}
++                                {money(
++                                    entry.statutory.socso_employer,
++                                    payrollRun.currency,
++                                )}
++                            </span>
++                            <span>
++                                EIS{' '}
++                                {money(
++                                    entry.statutory.eis_employer,
++                                    payrollRun.currency,
++                                )}
++                            </span>
++                            <strong>
++                                Jumlah{' '}
++                                {money(
++                                    entry.statutory
++                                        .total_employer_contributions,
++                                    payrollRun.currency,
++                                )}
++                            </strong>
++                        </div>
++                        {entry.statutory.is_overridden && (
++                            <p className="mt-2 text-xs text-amber-700">
++                                Amaun dilaras HR ·{' '}
++                                {entry.statutory.override_notes}
++                            </p>
++                        )}
++                    </div>
++                )}
+             </DialogContent>
+         </Dialog>
+     );
+@@ -409,6 +487,10 @@ function AdjustmentDialog({
+             name: '',
+             type: 'earning' as 'earning' | 'deduction',
+             amount: '',
++            is_epf_wage: false,
++            is_socso_wage: false,
++            is_eis_wage: false,
++            is_pcb_wage: false,
+             notes: '',
+         });
+     const selected =
+@@ -466,6 +548,22 @@ function AdjustmentDialog({
+ 
+                                 if (component) {
+                                     setData('type', component.type);
++                                    setData(
++                                        'is_epf_wage',
++                                        component.is_epf_wage,
++                                    );
++                                    setData(
++                                        'is_socso_wage',
++                                        component.is_socso_wage,
++                                    );
++                                    setData(
++                                        'is_eis_wage',
++                                        component.is_eis_wage,
++                                    );
++                                    setData(
++                                        'is_pcb_wage',
++                                        component.is_pcb_wage,
++                                    );
+                                 }
+                             }}
+                         >
+@@ -553,6 +651,48 @@ function AdjustmentDialog({
+                         />
+                         <InputError message={errors.notes} />
+                     </div>
++                    {!selected && data.type === 'earning' && (
++                        <div className="space-y-2">
++                            <Label>Asas Upah Statutori</Label>
++                            <div className="grid grid-cols-2 gap-2 text-sm">
++                                {[
++                                    ['is_epf_wage', 'KWSP'],
++                                    ['is_socso_wage', 'PERKESO'],
++                                    ['is_eis_wage', 'EIS'],
++                                    ['is_pcb_wage', 'PCB'],
++                                ].map(([field, label]) => (
++                                    <label
++                                        key={field}
++                                        className="flex items-center gap-2 rounded-md border p-2"
++                                    >
++                                        <input
++                                            type="checkbox"
++                                            checked={
++                                                data[
++                                                    field as
++                                                        | 'is_epf_wage'
++                                                        | 'is_socso_wage'
++                                                        | 'is_eis_wage'
++                                                        | 'is_pcb_wage'
++                                                ]
++                                            }
++                                            onChange={(event) =>
++                                                setData(
++                                                    field as
++                                                        | 'is_epf_wage'
++                                                        | 'is_socso_wage'
++                                                        | 'is_eis_wage'
++                                                        | 'is_pcb_wage',
++                                                    event.target.checked,
++                                                )
++                                            }
++                                        />
++                                        {label}
++                                    </label>
++                                ))}
++                            </div>
++                        </div>
++                    )}
+                     <DialogFooter>
+                         <DialogClose asChild>
+                             <Button type="button" variant="outline">
+@@ -569,6 +709,136 @@ function AdjustmentDialog({
+     );
+ }
+ 
++function StatutoryDialog({
++    entry,
++    payrollRun,
++}: {
++    entry: PayrollEntry;
++    payrollRun: PayrollRun;
++}) {
++    const [open, setOpen] = useState(false);
++    const statutory = entry.statutory;
++    const { data, setData, put, processing, errors } = useForm({
++        kwsp_employee: String(statutory?.kwsp_employee ?? 0),
++        kwsp_employer: String(statutory?.kwsp_employer ?? 0),
++        socso_employee: String(statutory?.socso_employee ?? 0),
++        socso_employer: String(statutory?.socso_employer ?? 0),
++        eis_employee: String(statutory?.eis_employee ?? 0),
++        eis_employer: String(statutory?.eis_employer ?? 0),
++        pcb: String(statutory?.pcb ?? 0),
++        notes: statutory?.override_notes ?? '',
++    });
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        put(`/payroll/${payrollRun.id}/pekerja/${entry.id}/statutori`, {
++            preserveScroll: true,
++            onSuccess: () => setOpen(false),
++        });
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button size="sm" variant="outline">
++                    <Landmark />
++                    Statutori
++                </Button>
++            </DialogTrigger>
++            <DialogContent className="sm:max-w-2xl">
++                <DialogHeader>
++                    <DialogTitle>Pelarasan Statutori</DialogTitle>
++                    <DialogDescription>
++                        {entry.employee_name} · gunakan hanya selepas nilai
++                        disahkan dengan jadual atau kalkulator rasmi.
++                    </DialogDescription>
++                </DialogHeader>
++                <form onSubmit={submit} className="space-y-4">
++                    <div className="grid gap-4 md:grid-cols-2">
++                        {[
++                            ['kwsp_employee', 'KWSP Pekerja'],
++                            ['kwsp_employer', 'KWSP Majikan'],
++                            ['socso_employee', 'PERKESO/SKBBK Pekerja'],
++                            ['socso_employer', 'PERKESO/SKBBK Majikan'],
++                            ['eis_employee', 'EIS Pekerja'],
++                            ['eis_employer', 'EIS Majikan'],
++                            ['pcb', 'PCB'],
++                        ].map(([field, label]) => (
++                            <div key={field} className="space-y-2">
++                                <Label>{label} (RM)</Label>
++                                <Input
++                                    type="number"
++                                    min="0"
++                                    step="0.01"
++                                    value={
++                                        data[
++                                            field as
++                                                | 'kwsp_employee'
++                                                | 'kwsp_employer'
++                                                | 'socso_employee'
++                                                | 'socso_employer'
++                                                | 'eis_employee'
++                                                | 'eis_employer'
++                                                | 'pcb'
++                                        ]
++                                    }
++                                    onChange={(event) =>
++                                        setData(
++                                            field as
++                                                | 'kwsp_employee'
++                                                | 'kwsp_employer'
++                                                | 'socso_employee'
++                                                | 'socso_employer'
++                                                | 'eis_employee'
++                                                | 'eis_employer'
++                                                | 'pcb',
++                                            event.target.value,
++                                        )
++                                    }
++                                />
++                                <InputError
++                                    message={
++                                        errors[
++                                            field as
++                                                | 'kwsp_employee'
++                                                | 'kwsp_employer'
++                                                | 'socso_employee'
++                                                | 'socso_employer'
++                                                | 'eis_employee'
++                                                | 'eis_employer'
++                                                | 'pcb'
++                                        ]
++                                    }
++                                />
++                            </div>
++                        ))}
++                    </div>
++                    <div className="space-y-2">
++                        <Label>Sebab Pelarasan (Wajib)</Label>
++                        <textarea
++                            value={data.notes}
++                            onChange={(event) =>
++                                setData('notes', event.target.value)
++                            }
++                            className="min-h-20 w-full rounded-md border bg-background px-3 py-2 text-sm"
++                        />
++                        <InputError message={errors.notes} />
++                    </div>
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button type="button" variant="outline">
++                                Batal
++                            </Button>
++                        </DialogClose>
++                        <Button type="submit" disabled={processing}>
++                            Simpan dan Kira Semula
++                        </Button>
++                    </DialogFooter>
++                </form>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
+ export default function PayrollShow({
+     payrollRun,
+     entries,
+@@ -692,7 +962,7 @@ export default function PayrollShow({
+                     </div>
+                 </div>
+ 
+-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                     {[
+                         {
+                             label: 'Gaji Asas',
+@@ -722,6 +992,20 @@ export default function PayrollShow({
+                                 payrollRun.currency,
+                             ),
+                         },
++                        {
++                            label: 'Statutori Pekerja',
++                            value: money(
++                                payrollRun.total_employee_statutory,
++                                payrollRun.currency,
++                            ),
++                        },
++                        {
++                            label: 'Caruman Majikan',
++                            value: money(
++                                payrollRun.total_employer_statutory,
++                                payrollRun.currency,
++                            ),
++                        },
+                     ].map((item) => (
+                         <Card key={item.label}>
+                             <CardHeader className="pb-2">
+@@ -858,6 +1142,9 @@ export default function PayrollShow({
+                                         <TableHead className="text-right">
+                                             Potongan
+                                         </TableHead>
++                                        <TableHead className="text-right">
++                                            Statutori
++                                        </TableHead>
+                                         <TableHead className="text-right">
+                                             Bersih
+                                         </TableHead>
+@@ -921,6 +1208,25 @@ export default function PayrollShow({
+                                                     payrollRun.currency,
+                                                 )}
+                                             </TableCell>
++                                            <TableCell className="text-right tabular-nums">
++                                                <p>
++                                                    {money(
++                                                        entry.statutory
++                                                            ?.total_employee_deductions ??
++                                                            0,
++                                                        payrollRun.currency,
++                                                    )}
++                                                </p>
++                                                <p className="text-xs text-muted-foreground">
++                                                    Majikan{' '}
++                                                    {money(
++                                                        entry.statutory
++                                                            ?.total_employer_contributions ??
++                                                            0,
++                                                        payrollRun.currency,
++                                                    )}
++                                                </p>
++                                            </TableCell>
+                                             <TableCell
+                                                 className={`text-right font-semibold tabular-nums ${
+                                                     entry.net_pay < 0
+@@ -934,23 +1240,43 @@ export default function PayrollShow({
+                                                 )}
+                                             </TableCell>
+                                             <TableCell>
+-                                                <div className="flex gap-2">
++                                                <div className="flex flex-wrap gap-2">
+                                                     <BreakdownDialog
+                                                         entry={entry}
+                                                         payrollRun={payrollRun}
+                                                         canEdit={canEdit}
+                                                     />
+                                                     {canEdit && (
+-                                                        <AdjustmentDialog
+-                                                            entry={entry}
+-                                                            payrollRun={
+-                                                                payrollRun
+-                                                            }
+-                                                            components={
+-                                                                manualComponents
+-                                                            }
+-                                                        />
++                                                        <>
++                                                            <AdjustmentDialog
++                                                                entry={entry}
++                                                                payrollRun={
++                                                                    payrollRun
++                                                                }
++                                                                components={
++                                                                    manualComponents
++                                                                }
++                                                            />
++                                                            <StatutoryDialog
++                                                                entry={entry}
++                                                                payrollRun={
++                                                                    payrollRun
++                                                                }
++                                                            />
++                                                        </>
+                                                     )}
++                                                    <Button
++                                                        asChild
++                                                        size="sm"
++                                                        variant="outline"
++                                                    >
++                                                        <a
++                                                            href={`/payroll/pekerja/${entry.id}/slip-gaji.pdf`}
++                                                        >
++                                                            <ReceiptText />
++                                                            PDF
++                                                        </a>
++                                                    </Button>
+                                                 </div>
+                                             </TableCell>
+                                         </TableRow>
+@@ -958,7 +1284,7 @@ export default function PayrollShow({
+                                     {entries.data.length === 0 && (
+                                         <TableRow>
+                                             <TableCell
+-                                                colSpan={8}
++                                                colSpan={9}
+                                                 className="h-28 text-center text-muted-foreground"
+                                             >
+                                                 Tiada rekod pekerja dijumpai.
+diff --git a/resources/js/pages/PayrollSettings/Index.tsx b/resources/js/pages/PayrollSettings/Index.tsx
+index b76c1bd7fc263bba1381a38da52dfa9ea615e5a8..2a50415f00ba669ec2a799c257021c2e36a92018 100644
+--- a/resources/js/pages/PayrollSettings/Index.tsx
++++ b/resources/js/pages/PayrollSettings/Index.tsx
+@@ -56,6 +56,10 @@ type PayrollComponent = {
+     name: string;
+     type: 'earning' | 'deduction';
+     is_active: boolean;
++    is_epf_wage: boolean;
++    is_socso_wage: boolean;
++    is_eis_wage: boolean;
++    is_pcb_wage: boolean;
+ };
+ 
+ type EmployeeComponent = {
+@@ -225,6 +229,10 @@ function ComponentDialog({ component }: { component?: PayrollComponent }) {
+         name: component?.name ?? '',
+         type: component?.type ?? ('earning' as 'earning' | 'deduction'),
+         is_active: component?.is_active ?? true,
++        is_epf_wage: component?.is_epf_wage ?? true,
++        is_socso_wage: component?.is_socso_wage ?? true,
++        is_eis_wage: component?.is_eis_wage ?? true,
++        is_pcb_wage: component?.is_pcb_wage ?? true,
+     });
+     const submit = (event: FormEvent<HTMLFormElement>) => {
+         event.preventDefault();
+@@ -300,9 +308,16 @@ function ComponentDialog({ component }: { component?: PayrollComponent }) {
+                         <Label>Jenis</Label>
+                         <Select
+                             value={data.type}
+-                            onValueChange={(value: 'earning' | 'deduction') =>
+-                                setData('type', value)
+-                            }
++                            onValueChange={(value: 'earning' | 'deduction') => {
++                                setData('type', value);
++
++                                if (value === 'deduction') {
++                                    setData('is_epf_wage', false);
++                                    setData('is_socso_wage', false);
++                                    setData('is_eis_wage', false);
++                                    setData('is_pcb_wage', false);
++                                }
++                            }}
+                         >
+                             <SelectTrigger>
+                                 <SelectValue />
+@@ -318,6 +333,46 @@ function ComponentDialog({ component }: { component?: PayrollComponent }) {
+                         </Select>
+                         <InputError message={errors.type} />
+                     </div>
++                    <div className="space-y-2">
++                        <Label>Diambil Kira Sebagai Upah</Label>
++                        <div className="grid grid-cols-2 gap-2 text-sm">
++                            {[
++                                ['is_epf_wage', 'KWSP'],
++                                ['is_socso_wage', 'PERKESO'],
++                                ['is_eis_wage', 'EIS'],
++                                ['is_pcb_wage', 'PCB'],
++                            ].map(([field, label]) => (
++                                <label
++                                    key={field}
++                                    className="flex items-center gap-2 rounded-md border p-2"
++                                >
++                                    <input
++                                        type="checkbox"
++                                        checked={
++                                            data[
++                                                field as
++                                                    | 'is_epf_wage'
++                                                    | 'is_socso_wage'
++                                                    | 'is_eis_wage'
++                                                    | 'is_pcb_wage'
++                                            ]
++                                        }
++                                        onChange={(event) =>
++                                            setData(
++                                                field as
++                                                    | 'is_epf_wage'
++                                                    | 'is_socso_wage'
++                                                    | 'is_eis_wage'
++                                                    | 'is_pcb_wage',
++                                                event.target.checked,
++                                            )
++                                        }
++                                    />
++                                    {label}
++                                </label>
++                            ))}
++                        </div>
++                    </div>
+                     <label className="flex items-center gap-3 rounded-lg border p-3 text-sm">
+                         <input
+                             type="checkbox"
+@@ -705,6 +760,7 @@ export default function PayrollSettings({
+                                         <TableHead>Kod</TableHead>
+                                         <TableHead>Nama</TableHead>
+                                         <TableHead>Jenis</TableHead>
++                                        <TableHead>Asas Upah</TableHead>
+                                         <TableHead>Status</TableHead>
+                                         <TableHead>Tindakan</TableHead>
+                                     </TableRow>
+@@ -718,6 +774,47 @@ export default function PayrollSettings({
+                                             <TableCell className="font-medium">
+                                                 {component.name}
+                                             </TableCell>
++                                            <TableCell>
++                                                <div className="flex flex-wrap gap-1">
++                                                    {[
++                                                        [
++                                                            component.is_epf_wage,
++                                                            'KWSP',
++                                                        ],
++                                                        [
++                                                            component.is_socso_wage,
++                                                            'PERKESO',
++                                                        ],
++                                                        [
++                                                            component.is_eis_wage,
++                                                            'EIS',
++                                                        ],
++                                                        [
++                                                            component.is_pcb_wage,
++                                                            'PCB',
++                                                        ],
++                                                    ]
++                                                        .filter(
++                                                            ([enabled]) =>
++                                                                enabled,
++                                                        )
++                                                        .map(([, label]) => (
++                                                            <Badge
++                                                                key={String(
++                                                                    label,
++                                                                )}
++                                                                variant="secondary"
++                                                            >
++                                                                {String(label)}
++                                                            </Badge>
++                                                        ))}
++                                                    {!component.is_epf_wage &&
++                                                        !component.is_socso_wage &&
++                                                        !component.is_eis_wage &&
++                                                        !component.is_pcb_wage &&
++                                                        '-'}
++                                                </div>
++                                            </TableCell>
+                                             <TableCell>
+                                                 <Badge
+                                                     variant="outline"
+diff --git a/resources/js/pages/StatutorySettings/Index.tsx b/resources/js/pages/StatutorySettings/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..404a6b454d6ab359fafa5327f2f98818115837fd
+--- /dev/null
++++ b/resources/js/pages/StatutorySettings/Index.tsx
+@@ -0,0 +1,912 @@
++import { Head, Link, router, useForm } from '@inertiajs/react';
++import {
++    ArrowLeft,
++    BadgePercent,
++    Building2,
++    Calculator,
++    Landmark,
++    Pencil,
++    ReceiptText,
++    Search,
++    ShieldCheck,
++    UserRoundCog,
++} from 'lucide-react';
++import { useState } from 'react';
++import type { FormEvent } from 'react';
++import InputError from '@/components/input-error';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import {
++    Dialog,
++    DialogClose,
++    DialogContent,
++    DialogDescription,
++    DialogFooter,
++    DialogHeader,
++    DialogTitle,
++    DialogTrigger,
++} from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import {
++    Select,
++    SelectContent,
++    SelectItem,
++    SelectTrigger,
++    SelectValue,
++} from '@/components/ui/select';
++import {
++    Table,
++    TableBody,
++    TableCell,
++    TableHead,
++    TableHeader,
++    TableRow,
++} from '@/components/ui/table';
++
++type StatutorySettings = {
++    kwsp_effective_from: string;
++    kwsp_table_limit: number;
++    kwsp_employer_threshold: number;
++    kwsp_employee_rate: number;
++    kwsp_employer_rate_low: number;
++    kwsp_employer_rate_high: number;
++    kwsp_age60_employee_rate: number;
++    kwsp_age60_employer_rate: number;
++    kwsp_pr_age60_employee_rate: number;
++    kwsp_pr_age60_employer_rate: number;
++    kwsp_foreign_employee_rate: number;
++    kwsp_foreign_employer_rate: number;
++    socso_effective_from: string;
++    socso_wage_ceiling: number;
++    socso_first_employer_rate: number;
++    socso_first_employee_rate: number;
++    socso_skbbk_employee_rate: number;
++    socso_second_employer_rate: number;
++    eis_effective_from: string;
++    eis_wage_ceiling: number;
++    eis_employee_rate: number;
++    eis_employer_rate: number;
++    pcb_tax_year: number;
++};
++
++type StatutoryProfile = {
++    id: number;
++    kwsp_category: string;
++    socso_category: string;
++    eis_enabled: boolean;
++    pcb_method: 'fixed' | 'none';
++    pcb_monthly_amount: number;
++    epf_number: string | null;
++    socso_number: string | null;
++    tax_number: string | null;
++    effective_from: string;
++    is_active: boolean;
++    notes: string | null;
++};
++
++type Employee = {
++    id: number;
++    employee_number: string | null;
++    employee_name: string;
++    position: string | null;
++    birth_date: string | null;
++    age: number | null;
++    nationality: string | null;
++    legacy_epf_number: string | null;
++    legacy_socso_number: string | null;
++    statutory_profile: StatutoryProfile | null;
++};
++
++type Option = { value: string; label: string };
++
++type Props = {
++    statutorySettings: StatutorySettings;
++    payslipSettings: {
++        company_name: string;
++        company_registration_no: string | null;
++        company_address: string | null;
++        payslip_note: string | null;
++    };
++    employees: {
++        data: Employee[];
++        links: { url: string | null; label: string; active: boolean }[];
++    };
++    filters: { search: string };
++    statistics: {
++        active_employees: number;
++        configured_profiles: number;
++        pcb_profiles: number;
++    };
++    kwspCategories: Option[];
++    socsoCategories: Option[];
++};
++
++function paginationLabel(label: string): string {
++    return label
++        .replace('&laquo; Previous', 'Sebelum')
++        .replace('Next &raquo;', 'Seterusnya');
++}
++
++function NumberField({
++    label,
++    value,
++    onChange,
++    error,
++    suffix = '%',
++}: {
++    label: string;
++    value: string;
++    onChange: (value: string) => void;
++    error?: string;
++    suffix?: string;
++}) {
++    return (
++        <div className="space-y-2">
++            <Label>{label}</Label>
++            <div className="relative">
++                <Input
++                    type="number"
++                    min="0"
++                    step="0.001"
++                    value={value}
++                    onChange={(event) => onChange(event.target.value)}
++                    className="pr-12"
++                />
++                <span className="absolute top-2.5 right-3 text-xs text-muted-foreground">
++                    {suffix}
++                </span>
++            </div>
++            <InputError message={error} />
++        </div>
++    );
++}
++
++function RatesForm({ settings }: { settings: StatutorySettings }) {
++    const { data, setData, put, processing, errors } = useForm(
++        Object.fromEntries(
++            Object.entries(settings).map(([key, value]) => [
++                key,
++                String(value),
++            ]),
++        ) as Record<keyof StatutorySettings, string>,
++    );
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        put('/tetapan-statutori/kadar', { preserveScroll: true });
++    };
++    const field = (
++        key: keyof StatutorySettings,
++        label: string,
++        suffix = '%',
++    ) => (
++        <NumberField
++            label={label}
++            value={data[key]}
++            onChange={(value) => setData(key, value)}
++            error={errors[key]}
++            suffix={suffix}
++        />
++    );
++
++    return (
++        <form onSubmit={submit} className="space-y-6">
++            <div className="space-y-3">
++                <div className="flex flex-wrap items-center justify-between gap-3">
++                    <div>
++                        <h3 className="font-semibold">KWSP</h3>
++                        <p className="text-xs text-muted-foreground">
++                            Jadual julat upah sehingga had jadual; upah lebih
++                            tinggi menggunakan kadar peratus.
++                        </p>
++                    </div>
++                    <div className="space-y-1">
++                        <Label>Berkuat Kuasa</Label>
++                        <Input
++                            type="date"
++                            value={data.kwsp_effective_from}
++                            onChange={(event) =>
++                                setData(
++                                    'kwsp_effective_from',
++                                    event.target.value,
++                                )
++                            }
++                        />
++                    </div>
++                </div>
++                <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
++                    {field('kwsp_table_limit', 'Had Jadual', 'RM')}
++                    {field('kwsp_employer_threshold', 'Ambang Majikan', 'RM')}
++                    {field('kwsp_employee_rate', 'Pekerja Bawah 60')}
++                    {field('kwsp_employer_rate_low', 'Majikan ≤ Ambang')}
++                    {field('kwsp_employer_rate_high', 'Majikan > Ambang')}
++                    {field('kwsp_age60_employer_rate', 'Majikan 60+')}
++                    {field(
++                        'kwsp_age60_employee_rate',
++                        'Pekerja Warganegara 60+',
++                    )}
++                    {field('kwsp_pr_age60_employee_rate', 'Pekerja PR 60+')}
++                    {field('kwsp_pr_age60_employer_rate', 'Majikan PR 60+')}
++                    {field(
++                        'kwsp_foreign_employee_rate',
++                        'Pekerja Bukan Warganegara',
++                    )}
++                    {field(
++                        'kwsp_foreign_employer_rate',
++                        'Majikan Bukan Warganegara',
++                    )}
++                </div>
++            </div>
++
++            <div className="border-t pt-5">
++                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
++                    <div>
++                        <h3 className="font-semibold">PERKESO / SKBBK</h3>
++                        <p className="text-xs text-muted-foreground">
++                            Jadual kategori pertama/kedua termasuk perlindungan
++                            24 jam.
++                        </p>
++                    </div>
++                    <div className="space-y-1">
++                        <Label>Berkuat Kuasa</Label>
++                        <Input
++                            type="date"
++                            value={data.socso_effective_from}
++                            onChange={(event) =>
++                                setData(
++                                    'socso_effective_from',
++                                    event.target.value,
++                                )
++                            }
++                        />
++                    </div>
++                </div>
++                <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-5">
++                    {field('socso_wage_ceiling', 'Siling Upah', 'RM')}
++                    {field(
++                        'socso_first_employer_rate',
++                        'Majikan Kategori Pertama',
++                    )}
++                    {field('socso_first_employee_rate', 'Pekerja Keilatan')}
++                    {field('socso_skbbk_employee_rate', 'Pekerja SKBBK')}
++                    {field(
++                        'socso_second_employer_rate',
++                        'Majikan Kategori Kedua',
++                    )}
++                </div>
++            </div>
++
++            <div className="border-t pt-5">
++                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
++                    <div>
++                        <h3 className="font-semibold">EIS & PCB</h3>
++                        <p className="text-xs text-muted-foreground">
++                            PCB pekerja disimpan sebagai amaun disahkan HR,
++                            bukan kadar peratus tetap.
++                        </p>
++                    </div>
++                    <div className="space-y-1">
++                        <Label>EIS Berkuat Kuasa</Label>
++                        <Input
++                            type="date"
++                            value={data.eis_effective_from}
++                            onChange={(event) =>
++                                setData(
++                                    'eis_effective_from',
++                                    event.target.value,
++                                )
++                            }
++                        />
++                    </div>
++                </div>
++                <div className="grid gap-4 md:grid-cols-4">
++                    {field('eis_wage_ceiling', 'Siling Upah EIS', 'RM')}
++                    {field('eis_employee_rate', 'EIS Pekerja')}
++                    {field('eis_employer_rate', 'EIS Majikan')}
++                    {field('pcb_tax_year', 'Tahun Taksiran PCB', 'Tahun')}
++                </div>
++            </div>
++
++            <Button type="submit" disabled={processing}>
++                <Calculator />
++                Simpan Kadar Statutori
++            </Button>
++        </form>
++    );
++}
++
++function PayslipSettingsForm({
++    settings,
++}: {
++    settings: Props['payslipSettings'];
++}) {
++    const { data, setData, put, processing, errors } = useForm({
++        company_name: settings.company_name ?? '',
++        company_registration_no: settings.company_registration_no ?? '',
++        company_address: settings.company_address ?? '',
++        payslip_note: settings.payslip_note ?? '',
++    });
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        put('/tetapan-statutori/slip-gaji', { preserveScroll: true });
++    };
++
++    return (
++        <form onSubmit={submit} className="grid gap-4 md:grid-cols-2">
++            <div className="space-y-2">
++                <Label>Nama Majikan</Label>
++                <Input
++                    value={data.company_name}
++                    onChange={(event) =>
++                        setData('company_name', event.target.value)
++                    }
++                />
++                <InputError message={errors.company_name} />
++            </div>
++            <div className="space-y-2">
++                <Label>No. Pendaftaran</Label>
++                <Input
++                    value={data.company_registration_no}
++                    onChange={(event) =>
++                        setData('company_registration_no', event.target.value)
++                    }
++                />
++                <InputError message={errors.company_registration_no} />
++            </div>
++            <div className="space-y-2 md:col-span-2">
++                <Label>Alamat Majikan</Label>
++                <textarea
++                    value={data.company_address}
++                    onChange={(event) =>
++                        setData('company_address', event.target.value)
++                    }
++                    className="min-h-20 w-full rounded-md border bg-background px-3 py-2 text-sm"
++                />
++                <InputError message={errors.company_address} />
++            </div>
++            <div className="space-y-2 md:col-span-2">
++                <Label>Catatan Kaki Slip</Label>
++                <Input
++                    value={data.payslip_note}
++                    onChange={(event) =>
++                        setData('payslip_note', event.target.value)
++                    }
++                />
++                <InputError message={errors.payslip_note} />
++            </div>
++            <div className="md:col-span-2">
++                <Button type="submit" disabled={processing}>
++                    <ReceiptText />
++                    Simpan Tetapan Slip
++                </Button>
++            </div>
++        </form>
++    );
++}
++
++function ProfileDialog({
++    employee,
++    kwspCategories,
++    socsoCategories,
++}: {
++    employee: Employee;
++    kwspCategories: Option[];
++    socsoCategories: Option[];
++}) {
++    const [open, setOpen] = useState(false);
++    const profile = employee.statutory_profile;
++    const nationality = (employee.nationality ?? '').trim().toLowerCase();
++    const isMalaysian = nationality === '' || nationality.includes('malaysia');
++    const inferredKwsp = isMalaysian
++        ? (employee.age ?? 0) >= 60
++            ? 'citizen_60_plus'
++            : 'citizen_below_60'
++        : 'non_malaysian';
++    const { data, setData, post, processing, errors } = useForm({
++        employee_id: employee.id,
++        kwsp_category: profile?.kwsp_category ?? inferredKwsp,
++        socso_category:
++            profile?.socso_category ??
++            ((employee.age ?? 0) >= 60 ? 'second' : 'first'),
++        eis_enabled:
++            profile?.eis_enabled ?? (isMalaysian && (employee.age ?? 0) < 60),
++        pcb_method: profile?.pcb_method ?? ('fixed' as 'fixed' | 'none'),
++        pcb_monthly_amount: String(profile?.pcb_monthly_amount ?? 0),
++        epf_number: profile?.epf_number ?? employee.legacy_epf_number ?? '',
++        socso_number:
++            profile?.socso_number ?? employee.legacy_socso_number ?? '',
++        tax_number: profile?.tax_number ?? '',
++        effective_from:
++            profile?.effective_from?.slice(0, 7) ??
++            new Date().toISOString().slice(0, 7),
++        is_active: profile?.is_active ?? true,
++        notes: profile?.notes ?? '',
++    });
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        post('/tetapan-statutori/profil-pekerja', {
++            preserveScroll: true,
++            onSuccess: () => setOpen(false),
++        });
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button size="sm" variant="outline">
++                    <Pencil />
++                    {profile ? 'Edit' : 'Tetapkan'}
++                </Button>
++            </DialogTrigger>
++            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
++                <DialogHeader>
++                    <DialogTitle>Profil Statutori Pekerja</DialogTitle>
++                    <DialogDescription>
++                        {employee.employee_name} ·{' '}
++                        {employee.employee_number ?? 'Tiada ID'}
++                    </DialogDescription>
++                </DialogHeader>
++                <form onSubmit={submit} className="space-y-4">
++                    <div className="grid gap-4 md:grid-cols-2">
++                        <div className="space-y-2">
++                            <Label>Kategori KWSP</Label>
++                            <Select
++                                value={data.kwsp_category}
++                                onValueChange={(value) =>
++                                    setData('kwsp_category', value)
++                                }
++                            >
++                                <SelectTrigger>
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    {kwspCategories.map((option) => (
++                                        <SelectItem
++                                            key={option.value}
++                                            value={option.value}
++                                        >
++                                            {option.label}
++                                        </SelectItem>
++                                    ))}
++                                </SelectContent>
++                            </Select>
++                            <InputError message={errors.kwsp_category} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Kategori PERKESO</Label>
++                            <Select
++                                value={data.socso_category}
++                                onValueChange={(value) =>
++                                    setData('socso_category', value)
++                                }
++                            >
++                                <SelectTrigger>
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    {socsoCategories.map((option) => (
++                                        <SelectItem
++                                            key={option.value}
++                                            value={option.value}
++                                        >
++                                            {option.label}
++                                        </SelectItem>
++                                    ))}
++                                </SelectContent>
++                            </Select>
++                            <InputError message={errors.socso_category} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>No. KWSP</Label>
++                            <Input
++                                value={data.epf_number}
++                                onChange={(event) =>
++                                    setData('epf_number', event.target.value)
++                                }
++                            />
++                            <InputError message={errors.epf_number} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>No. PERKESO</Label>
++                            <Input
++                                value={data.socso_number}
++                                onChange={(event) =>
++                                    setData('socso_number', event.target.value)
++                                }
++                            />
++                            <InputError message={errors.socso_number} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>No. Cukai</Label>
++                            <Input
++                                value={data.tax_number}
++                                onChange={(event) =>
++                                    setData('tax_number', event.target.value)
++                                }
++                            />
++                            <InputError message={errors.tax_number} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>PCB Bulanan Disahkan (RM)</Label>
++                            <Input
++                                type="number"
++                                min="0"
++                                step="0.01"
++                                value={data.pcb_monthly_amount}
++                                onChange={(event) =>
++                                    setData(
++                                        'pcb_monthly_amount',
++                                        event.target.value,
++                                    )
++                                }
++                                disabled={data.pcb_method === 'none'}
++                            />
++                            <InputError message={errors.pcb_monthly_amount} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Kaedah PCB</Label>
++                            <Select
++                                value={data.pcb_method}
++                                onValueChange={(value: 'fixed' | 'none') =>
++                                    setData('pcb_method', value)
++                                }
++                            >
++                                <SelectTrigger>
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    <SelectItem value="fixed">
++                                        Amaun Disahkan HR/LHDN
++                                    </SelectItem>
++                                    <SelectItem value="none">
++                                        Tiada Potongan
++                                    </SelectItem>
++                                </SelectContent>
++                            </Select>
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Berkuat Kuasa</Label>
++                            <Input
++                                type="month"
++                                value={data.effective_from}
++                                onChange={(event) =>
++                                    setData(
++                                        'effective_from',
++                                        event.target.value,
++                                    )
++                                }
++                            />
++                            <InputError message={errors.effective_from} />
++                        </div>
++                    </div>
++                    <div className="grid gap-3 md:grid-cols-2">
++                        <label className="flex items-center gap-3 rounded-lg border p-3 text-sm">
++                            <input
++                                type="checkbox"
++                                checked={data.eis_enabled}
++                                onChange={(event) =>
++                                    setData('eis_enabled', event.target.checked)
++                                }
++                                className="size-4"
++                            />
++                            Caruman EIS diaktifkan
++                        </label>
++                        <label className="flex items-center gap-3 rounded-lg border p-3 text-sm">
++                            <input
++                                type="checkbox"
++                                checked={data.is_active}
++                                onChange={(event) =>
++                                    setData('is_active', event.target.checked)
++                                }
++                                className="size-4"
++                            />
++                            Profil statutori aktif
++                        </label>
++                    </div>
++                    <div className="space-y-2">
++                        <Label>Catatan HR</Label>
++                        <textarea
++                            value={data.notes}
++                            onChange={(event) =>
++                                setData('notes', event.target.value)
++                            }
++                            className="min-h-20 w-full rounded-md border bg-background px-3 py-2 text-sm"
++                        />
++                    </div>
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button type="button" variant="outline">
++                                Batal
++                            </Button>
++                        </DialogClose>
++                        <Button type="submit" disabled={processing}>
++                            Simpan Profil
++                        </Button>
++                    </DialogFooter>
++                </form>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
++export default function StatutorySettingsPage({
++    statutorySettings,
++    payslipSettings,
++    employees,
++    filters,
++    statistics,
++    kwspCategories,
++    socsoCategories,
++}: Props) {
++    const [search, setSearch] = useState(filters.search);
++    const applySearch = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        router.get(
++            '/tetapan-statutori',
++            { search },
++            { preserveState: true, replace: true },
++        );
++    };
++
++    return (
++        <>
++            <Head title="Tetapan Statutori & Slip Gaji" />
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div>
++                    <Button asChild variant="ghost" size="sm" className="-ml-3">
++                        <Link href="/payroll">
++                            <ArrowLeft />
++                            Kembali ke Payroll
++                        </Link>
++                    </Button>
++                    <h1 className="mt-2 flex items-center gap-2 text-2xl font-semibold">
++                        <Landmark className="size-6 text-primary" />
++                        Tetapan Statutori & Slip Gaji
++                    </h1>
++                    <p className="text-sm text-muted-foreground">
++                        Urus kadar KWSP, PERKESO/SKBBK, EIS, PCB dan profil
++                        pekerja tanpa menulis ke `db_spp`.
++                    </p>
++                </div>
++
++                <div className="grid gap-4 sm:grid-cols-3">
++                    {[
++                        {
++                            label: 'Pekerja Aktif',
++                            value: statistics.active_employees,
++                            icon: UserRoundCog,
++                        },
++                        {
++                            label: 'Profil Statutori',
++                            value: statistics.configured_profiles,
++                            icon: ShieldCheck,
++                        },
++                        {
++                            label: 'PCB Ditetapkan',
++                            value: statistics.pcb_profiles,
++                            icon: BadgePercent,
++                        },
++                    ].map((item) => (
++                        <Card key={item.label}>
++                            <CardHeader className="pb-2">
++                                <CardDescription className="flex items-center gap-2">
++                                    <item.icon className="size-4" />
++                                    {item.label}
++                                </CardDescription>
++                                <CardTitle className="text-2xl">
++                                    {item.value}
++                                </CardTitle>
++                            </CardHeader>
++                        </Card>
++                    ))}
++                </div>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <Calculator className="size-5 text-primary" />
++                            Kadar & Tarikh Kuat Kuasa
++                        </CardTitle>
++                        <CardDescription>
++                            Nilai ini digunakan pada payroll Draf dan disimpan
++                            sebagai snapshot. Semak terhadap jadual rasmi
++                            sebelum membuat perubahan.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent>
++                        <RatesForm settings={statutorySettings} />
++                    </CardContent>
++                </Card>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <Building2 className="size-5 text-primary" />
++                            Kepala Slip Gaji
++                        </CardTitle>
++                        <CardDescription>
++                            Maklumat majikan yang akan dipaparkan pada PDF.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent>
++                        <PayslipSettingsForm settings={payslipSettings} />
++                    </CardContent>
++                </Card>
++
++                <Card>
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2">
++                            <UserRoundCog className="size-5 text-primary" />
++                            Profil Statutori Pekerja
++                        </CardTitle>
++                        <CardDescription>
++                            Tarikh lahir, kewarganegaraan dan nombor lama
++                            dipaparkan daripada `db_spp` sebagai rujukan
++                            baca-sahaja.
++                        </CardDescription>
++                        <form
++                            onSubmit={applySearch}
++                            className="flex max-w-xl gap-2 pt-2"
++                        >
++                            <Input
++                                value={search}
++                                onChange={(event) =>
++                                    setSearch(event.target.value)
++                                }
++                                placeholder="Cari nama, ID atau jawatan"
++                            />
++                            <Button type="submit" variant="secondary">
++                                <Search />
++                                Cari
++                            </Button>
++                        </form>
++                    </CardHeader>
++                    <CardContent className="space-y-4">
++                        <div className="overflow-x-auto rounded-lg border">
++                            <Table>
++                                <TableHeader>
++                                    <TableRow>
++                                        <TableHead>Pekerja</TableHead>
++                                        <TableHead>Umur / Negara</TableHead>
++                                        <TableHead>KWSP</TableHead>
++                                        <TableHead>PERKESO / EIS</TableHead>
++                                        <TableHead>PCB Bulanan</TableHead>
++                                        <TableHead>Status</TableHead>
++                                        <TableHead>Tindakan</TableHead>
++                                    </TableRow>
++                                </TableHeader>
++                                <TableBody>
++                                    {employees.data.map((employee) => {
++                                        const profile =
++                                            employee.statutory_profile;
++
++                                        return (
++                                            <TableRow key={employee.id}>
++                                                <TableCell>
++                                                    <p className="font-medium">
++                                                        {employee.employee_name}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {employee.employee_number ??
++                                                            'Tiada ID'}{' '}
++                                                        ·{' '}
++                                                        {employee.position ??
++                                                            '-'}
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell>
++                                                    <p>
++                                                        {employee.age !== null
++                                                            ? `${employee.age} tahun`
++                                                            : 'Umur tiada'}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {employee.nationality ??
++                                                            '-'}
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell>
++                                                    <p className="text-sm">
++                                                        {profile?.kwsp_category ??
++                                                            'Automatik'}
++                                                    </p>
++                                                    <p className="text-xs text-muted-foreground">
++                                                        {profile?.epf_number ??
++                                                            employee.legacy_epf_number ??
++                                                            'No. belum ada'}
++                                                    </p>
++                                                </TableCell>
++                                                <TableCell>
++                                                    <p className="text-sm">
++                                                        {profile?.socso_category ??
++                                                            'Automatik'}
++                                                    </p>
++                                                    <Badge
++                                                        variant="outline"
++                                                        className="mt-1"
++                                                    >
++                                                        EIS{' '}
++                                                        {profile
++                                                            ? profile.eis_enabled
++                                                                ? 'Aktif'
++                                                                : 'Tidak Aktif'
++                                                            : 'Automatik'}
++                                                    </Badge>
++                                                </TableCell>
++                                                <TableCell className="tabular-nums">
++                                                    RM{' '}
++                                                    {(
++                                                        profile?.pcb_monthly_amount ??
++                                                        0
++                                                    ).toFixed(2)}
++                                                </TableCell>
++                                                <TableCell>
++                                                    <Badge
++                                                        variant={
++                                                            profile?.is_active
++                                                                ? 'default'
++                                                                : 'secondary'
++                                                        }
++                                                    >
++                                                        {profile
++                                                            ? profile.is_active
++                                                                ? 'Ditetapkan'
++                                                                : 'Tidak Aktif'
++                                                            : 'Inferens Sistem'}
++                                                    </Badge>
++                                                </TableCell>
++                                                <TableCell>
++                                                    <ProfileDialog
++                                                        employee={employee}
++                                                        kwspCategories={
++                                                            kwspCategories
++                                                        }
++                                                        socsoCategories={
++                                                            socsoCategories
++                                                        }
++                                                    />
++                                                </TableCell>
++                                            </TableRow>
++                                        );
++                                    })}
++                                </TableBody>
++                            </Table>
++                        </div>
++                        {employees.links.length > 3 && (
++                            <div className="flex flex-wrap gap-2">
++                                {employees.links.map((link, index) => (
++                                    <Button
++                                        key={`${link.label}-${index}`}
++                                        asChild={Boolean(link.url)}
++                                        size="sm"
++                                        variant={
++                                            link.active ? 'default' : 'outline'
++                                        }
++                                        disabled={!link.url}
++                                    >
++                                        {link.url ? (
++                                            <Link href={link.url}>
++                                                {paginationLabel(link.label)}
++                                            </Link>
++                                        ) : (
++                                            <span>
++                                                {paginationLabel(link.label)}
++                                            </span>
++                                        )}
++                                    </Button>
++                                ))}
++                            </div>
++                        )}
++                    </CardContent>
++                </Card>
++            </div>
++        </>
++    );
++}
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index f06cd7138c74c08db551fe6828af856823434ac5..abf38ca33bf327446608cb50b30a9c58d53ac321 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -106,6 +106,7 @@ const permissionLabels: Record<Permission, string> = {
+     'payroll.manage': 'Urus Payroll',
+     'payroll.approve': 'Lulus & Muktamad Payroll',
+     'payroll.settings': 'Tetapan Payroll',
++    'payslip.self': 'Slip Gaji Sendiri',
+     'reports.view': 'Laporan Bulanan',
+     'audit.view': 'Audit Trail',
+     'users.manage': 'Pengurusan Pengguna',
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index 062eb5d9a993e4995400ef92a1eff071302a8d25..ffb341f4394c3b8be6d045673fac32ec47a11b58 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -29,6 +29,7 @@ export type Permission =
+     | 'payroll.manage'
+     | 'payroll.approve'
+     | 'payroll.settings'
++    | 'payslip.self'
+     | 'reports.view'
+     | 'audit.view'
+     | 'users.manage';
+diff --git a/routes/web.php b/routes/web.php
+index 218e1e17c3a92cb97762f1975b6d4f14dcb9900d..5b89942c653b13ed219549d569082f1d091191b8 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -5,6 +5,7 @@
+ use App\Http\Controllers\DashboardController;
+ use App\Http\Controllers\EmployeeLeaveController;
+ use App\Http\Controllers\EmployeeOvertimeController;
++use App\Http\Controllers\EmployeePayslipController;
+ use App\Http\Controllers\EmployeeProfileController;
+ use App\Http\Controllers\EmployeeUserImportController;
+ use App\Http\Controllers\GeoAttendanceController;
+@@ -21,6 +22,7 @@
+ use App\Http\Controllers\PayrollSettingsController;
+ use App\Http\Controllers\MaklumatPekerjaController;
+ use App\Http\Controllers\ReportBulananController;
++use App\Http\Controllers\StatutorySettingsController;
+ use App\Http\Controllers\UserManagementController;
+ use App\Http\Controllers\UserPasswordBulkResetController;
+ use Illuminate\Support\Facades\Route;
+@@ -181,6 +183,13 @@
+     Route::get('payroll-asal', [MaklumatPayrollController::class, 'index'])
+         ->middleware('permission:payroll.view')
+         ->name('payroll.legacy');
++    Route::get('slip-gaji-saya', [EmployeePayslipController::class, 'index'])
++        ->middleware('permission:payslip.self')
++        ->name('payslips.index');
++    Route::get('slip-gaji-saya/{payrollEntry}/pdf', [EmployeePayslipController::class, 'downloadOwn'])
++        ->middleware('permission:payslip.self')
++        ->whereNumber('payrollEntry')
++        ->name('payslips.download');
+     Route::get('payroll', [PayrollRunController::class, 'index'])
+         ->middleware('permission:payroll.view')
+         ->name('payroll.index');
+@@ -207,6 +216,14 @@
+         ->middleware('permission:payroll.manage')
+         ->whereNumber(['payrollRun', 'entry', 'item'])
+         ->name('payroll.items.destroy');
++    Route::put('payroll/{payrollRun}/pekerja/{entry}/statutori', [PayrollRunController::class, 'updateStatutory'])
++        ->middleware('permission:payroll.manage')
++        ->whereNumber(['payrollRun', 'entry'])
++        ->name('payroll.statutory.update');
++    Route::get('payroll/pekerja/{payrollEntry}/slip-gaji.pdf', [EmployeePayslipController::class, 'downloadForHr'])
++        ->middleware('permission:payroll.view')
++        ->whereNumber('payrollEntry')
++        ->name('payroll.payslip');
+     Route::patch('payroll/{payrollRun}/semakan-hr', [PayrollRunController::class, 'review'])
+         ->middleware('permission:payroll.manage')
+         ->whereNumber('payrollRun')
+@@ -332,6 +349,14 @@
+         Route::patch('tetapan-payroll/komponen-pekerja/{employeePayrollComponent}/status', [PayrollSettingsController::class, 'toggleEmployeeComponent'])
+             ->whereNumber('employeePayrollComponent')
+             ->name('payroll-settings.employee-components.toggle');
++        Route::get('tetapan-statutori', [StatutorySettingsController::class, 'index'])
++            ->name('statutory-settings.index');
++        Route::put('tetapan-statutori/kadar', [StatutorySettingsController::class, 'updateRates'])
++            ->name('statutory-settings.rates.update');
++        Route::put('tetapan-statutori/slip-gaji', [StatutorySettingsController::class, 'updatePayslip'])
++            ->name('statutory-settings.payslip.update');
++        Route::post('tetapan-statutori/profil-pekerja', [StatutorySettingsController::class, 'saveProfile'])
++            ->name('statutory-settings.profiles.save');
+     });
+ });
+ 
+diff --git a/tests/Feature/PayrollCoreTest.php b/tests/Feature/PayrollCoreTest.php
+index cf3ca13fcc10cb5469b47189048c9264850fc4a6..62d2f4697f84720ecaab4b8a15a2ea3dbedb614a 100644
+--- a/tests/Feature/PayrollCoreTest.php
++++ b/tests/Feature/PayrollCoreTest.php
+@@ -36,6 +36,8 @@
+         $table->increments('id');
+         $table->string('employeeID', 30)->nullable();
+         $table->string('nama')->nullable();
++        $table->date('tarikhlahir')->nullable();
++        $table->string('kewarganegaraan')->nullable();
+         $table->boolean('rcd_enable')->default(true);
+     });
+     Schema::connection('ibco')->create('maklumatjawatan', function (Blueprint $table) {
+@@ -44,6 +46,8 @@
+         $table->integer('id_department')->nullable();
+         $table->string('jawatan')->nullable();
+         $table->decimal('salary', 12, 2)->nullable();
++        $table->string('noepf')->nullable();
++        $table->string('nosocso')->nullable();
+         $table->boolean('rcd_enable')->default(true);
+     });
+ });
+@@ -60,6 +64,8 @@ function createPayrollEmployee(
+     $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
+         'employeeID' => $number,
+         'nama' => $name,
++        'tarikhlahir' => '1990-01-01',
++        'kewarganegaraan' => 'Malaysia',
+         'rcd_enable' => 1,
+     ]);
+     DB::connection('ibco')->table('maklumatjawatan')->insert([
+@@ -170,8 +176,13 @@ function configurePayrollEmployee(int $employeeId, User $actor): void
+     expect((float) $entry->unpaid_leave_days)->toBe(1.0);
+     expect((float) $entry->unpaid_leave_amount)->toBe(100.0);
+     expect((float) $entry->gross_pay)->toBe(2837.49);
+-    expect((float) $entry->total_deductions)->toBe(150.0);
+-    expect((float) $entry->net_pay)->toBe(2687.49);
++    expect((float) $entry->total_deductions)->toBe(486.9);
++    expect((float) $entry->net_pay)->toBe(2350.59);
++    expect((float) $entry->statutorySnapshot->kwsp_employee)->toBe(297.0);
++    expect((float) $entry->statutorySnapshot->socso_employee)->toBe(34.4);
++    expect((float) $entry->statutorySnapshot->eis_employee)->toBe(5.5);
++    expect((float) $entry->statutorySnapshot->total_employer_contributions)
++        ->toBe(404.65);
+ 
+     $this->actingAs($hrAdmin)
+         ->patch(route('payroll.review', $run), [
+diff --git a/tests/Feature/RolePermissionsTest.php b/tests/Feature/RolePermissionsTest.php
+index f439d0db4675b312b6d45cb9890f8304f9110e39..a054f34cda57013f74fb5a570d796972ab221c74 100644
+--- a/tests/Feature/RolePermissionsTest.php
++++ b/tests/Feature/RolePermissionsTest.php
+@@ -104,6 +104,7 @@
+     expect($supervisor->hasPermission('leave.apply'))->toBeTrue();
+     expect($supervisor->hasPermission('overtime.apply'))->toBeTrue();
+     expect($supervisor->hasPermission('attendance.clock'))->toBeTrue();
++    expect($supervisor->hasPermission('payslip.self'))->toBeTrue();
+ });
+ 
+ test('payroll permissions separate hr preparation from final approval', function () {
+diff --git a/tests/Feature/StatutoryPayslipTest.php b/tests/Feature/StatutoryPayslipTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3991e6b4ac693d86e69a6c034de515264564742
+--- /dev/null
++++ b/tests/Feature/StatutoryPayslipTest.php
+@@ -0,0 +1,197 @@
++<?php
++
++use App\Models\EmployeeSalaryProfile;
++use App\Models\EmployeeStatutoryProfile;
++use App\Models\EmployeeUserLink;
++use App\Models\PayrollEntry;
++use App\Models\PayrollRun;
++use App\Models\User;
++use Illuminate\Database\Events\QueryExecuted;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Event;
++use Illuminate\Support\Facades\Schema;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    Carbon::setTestNow('2026-07-29 12:00:00');
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (Blueprint $table) {
++        $table->increments('id');
++        $table->string('employeeID', 30)->nullable();
++        $table->string('nama')->nullable();
++        $table->date('tarikhlahir')->nullable();
++        $table->string('kewarganegaraan')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('maklumatjawatan', function (Blueprint $table) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->integer('id_department')->nullable();
++        $table->string('jawatan')->nullable();
++        $table->decimal('salary', 12, 2)->nullable();
++        $table->string('noepf')->nullable();
++        $table->string('nosocso')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++});
++
++afterEach(function () {
++    Carbon::setTestNow();
++    DB::disconnect('ibco');
++});
++
++function createStatutoryEmployee(string $number = 'EMP-STAT-001'): int
++{
++    $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => $number,
++        'nama' => 'Pekerja Statutori',
++        'tarikhlahir' => '1990-01-01',
++        'kewarganegaraan' => 'Malaysia',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('maklumatjawatan')->insert([
++        'id_pekerja' => $employeeId,
++        'id_department' => 1,
++        'jawatan' => 'Eksekutif',
++        'salary' => 3000,
++        'noepf' => 'EPF-STAT-001',
++        'nosocso' => 'SOCSO-STAT-001',
++        'rcd_enable' => 1,
++    ]);
++
++    return $employeeId;
++}
++
++test('statutory contributions are snapshotted and employee can download only own finalized payslip', function () {
++    $hr = User::factory()->hrAdmin()->create();
++    $approver = User::factory()->superAdmin()->create();
++    $employeeUser = User::factory()->employee()->create();
++    $otherEmployee = User::factory()->employee()->create();
++    $employeeId = createStatutoryEmployee();
++    EmployeeUserLink::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'is_active' => true,
++        'created_by' => $hr->getKey(),
++        'updated_by' => $hr->getKey(),
++    ]);
++    EmployeeSalaryProfile::query()->create([
++        'employee_id' => $employeeId,
++        'basic_salary' => 3000,
++        'effective_from' => '2026-01-01',
++        'is_active' => true,
++        'updated_by' => $hr->getKey(),
++    ]);
++    EmployeeStatutoryProfile::query()->create([
++        'employee_id' => $employeeId,
++        'kwsp_category' => 'citizen_below_60',
++        'socso_category' => 'first',
++        'eis_enabled' => true,
++        'pcb_method' => 'fixed',
++        'pcb_monthly_amount' => 25,
++        'epf_number' => 'EPF-STAT-001',
++        'socso_number' => 'SOCSO-STAT-001',
++        'tax_number' => 'TAX-STAT-001',
++        'effective_from' => '2026-01-01',
++        'is_active' => true,
++        'updated_by' => $hr->getKey(),
++    ]);
++
++    $this->actingAs($hr)
++        ->post(route('payroll.store'), ['period' => '2026-07'])
++        ->assertSessionDoesntHaveErrors();
++
++    $run = PayrollRun::query()->firstOrFail();
++    $entry = PayrollEntry::query()->with('statutorySnapshot')->firstOrFail();
++    expect((float) $entry->statutorySnapshot->kwsp_employee)->toBe(330.0);
++    expect((float) $entry->statutorySnapshot->kwsp_employer)->toBe(390.0);
++    expect((float) $entry->statutorySnapshot->socso_employee)->toBe(36.9);
++    expect((float) $entry->statutorySnapshot->socso_employer)->toBe(51.65);
++    expect((float) $entry->statutorySnapshot->eis_employee)->toBe(5.9);
++    expect((float) $entry->statutorySnapshot->pcb)->toBe(25.0);
++    expect((float) $entry->net_pay)->toBe(2602.2);
++
++    $this->actingAs($employeeUser)
++        ->get(route('payslips.download', $entry))
++        ->assertNotFound();
++
++    $this->actingAs($hr)
++        ->patch(route('payroll.review', $run))
++        ->assertSessionDoesntHaveErrors();
++    $this->actingAs($approver)
++        ->patch(route('payroll.approve', $run))
++        ->assertSessionDoesntHaveErrors();
++    $this->actingAs($approver)
++        ->patch(route('payroll.finalize', $run))
++        ->assertSessionDoesntHaveErrors();
++
++    $this->actingAs($employeeUser)
++        ->get(route('payslips.index'))
++        ->assertOk();
++    $response = $this->actingAs($employeeUser)
++        ->get(route('payslips.download', $entry))
++        ->assertOk()
++        ->assertHeader('content-type', 'application/pdf');
++    expect($response->getContent())->toStartWith('%PDF-1.4');
++    $this->actingAs($otherEmployee)
++        ->get(route('payslips.download', $entry))
++        ->assertNotFound();
++});
++
++test('hr may override draft statutory values and db_spp remains select only', function () {
++    $hr = User::factory()->hrAdmin()->create();
++    $employeeId = createStatutoryEmployee('EMP-STAT-002');
++    EmployeeSalaryProfile::query()->create([
++        'employee_id' => $employeeId,
++        'basic_salary' => 3000,
++        'effective_from' => '2026-01-01',
++        'is_active' => true,
++        'updated_by' => $hr->getKey(),
++    ]);
++    $ibcoQueries = [];
++    Event::listen(QueryExecuted::class, function (QueryExecuted $query) use (&$ibcoQueries) {
++        if ($query->connectionName === 'ibco') {
++            $ibcoQueries[] = strtolower(ltrim($query->sql));
++        }
++    });
++
++    $this->actingAs($hr)
++        ->post(route('payroll.store'), ['period' => '2026-07'])
++        ->assertSessionDoesntHaveErrors();
++    $run = PayrollRun::query()->firstOrFail();
++    $entry = PayrollEntry::query()->firstOrFail();
++
++    $this->actingAs($hr)
++        ->put(route('payroll.statutory.update', [$run, $entry]), [
++            'kwsp_employee' => 300,
++            'kwsp_employer' => 360,
++            'socso_employee' => 35,
++            'socso_employer' => 50,
++            'eis_employee' => 6,
++            'eis_employer' => 6,
++            'pcb' => 40,
++            'notes' => 'Disahkan melalui kalkulator rasmi.',
++        ])
++        ->assertSessionDoesntHaveErrors();
++
++    $entry->load('statutorySnapshot');
++    expect($entry->statutorySnapshot->is_overridden)->toBeTrue();
++    expect((float) $entry->statutorySnapshot->pcb)->toBe(40.0);
++    expect((float) $entry->fresh()->net_pay)->toBe(2619.0);
++    expect($ibcoQueries)->not->toBeEmpty();
++    expect($ibcoQueries)->each->toStartWith('select');
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'payroll.statutory_overridden',
++    ]);
++});

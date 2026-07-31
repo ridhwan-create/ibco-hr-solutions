@@ -4,12 +4,20 @@ namespace App\Http\Controllers;
 
 use App\Enums\UserRole;
 use App\Models\GeoAttendanceRecord;
+use App\Models\ClaimRequest;
+use App\Models\PayrollRun;
+use App\Models\PerformanceReview;
+use App\Support\MonthlyHrReportBuilder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 
 class DashboardController extends Controller
 {
+    public function __construct(
+        private readonly MonthlyHrReportBuilder $reportBuilder,
+    ) {}
+
     public function index(Request $request)
     {
         if ($request->user()->hasOnlyRole(UserRole::Employee)) {
@@ -25,7 +33,6 @@ class DashboardController extends Controller
             'jawatan' => ['positions.view', 'maklumatjawatan'],
             'cuti' => ['leave.view', 'maklumatcuti'],
             'kerja_lebih_masa' => ['overtime.view', 'maklumatot'],
-            'payroll' => ['payroll.view', 'maklumatpayroll'],
             'laporan_bulanan' => ['reports.view', 'reportbulanan'],
         ];
 
@@ -35,6 +42,18 @@ class DashboardController extends Controller
                     ->where('rcd_enable', 1)
                     ->count();
             }
+        }
+
+        if ($user->hasPermission('payroll.view')) {
+            $statistics['payroll'] = PayrollRun::query()->count();
+        }
+
+        if ($user->hasPermission('claims.view')) {
+            $statistics['tuntutan'] = ClaimRequest::query()->count();
+        }
+
+        if ($user->hasPermission('performance.view')) {
+            $statistics['prestasi'] = PerformanceReview::query()->count();
         }
 
         $recentAttendance = [];
@@ -96,6 +115,9 @@ class DashboardController extends Controller
             'statistics' => $statistics,
             'recentAttendance' => $recentAttendance,
             'recentLeave' => $recentLeave,
+            'executiveOverview' => $user->hasPermission('reports.view')
+                ? $this->reportBuilder->overview(now()->format('Y-m'))
+                : null,
         ]);
     }
 }

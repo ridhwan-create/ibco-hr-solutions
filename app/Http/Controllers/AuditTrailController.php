@@ -4,8 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Enums\UserRole;
 use App\Models\AuditLog;
+use App\Models\ClaimType;
 use App\Models\MaklumatPekerja;
 use App\Models\OfficeLocation;
+use App\Models\OvertimeType;
+use App\Models\PayrollComponent;
 use App\Models\User;
 use App\Support\AuditLogger;
 use Illuminate\Database\Eloquent\Builder;
@@ -60,6 +63,101 @@ class AuditTrailController extends Controller
         'leave_approver.removed' => 'Penyelia Cuti Dibuang',
         'public_holiday.created' => 'Cuti Umum Ditambah',
         'public_holiday.deleted' => 'Cuti Umum Dibuang',
+        'overtime.submitted' => 'Permohonan OT Dihantar',
+        'overtime.supervisor_approved' => 'Permohonan OT Disokong Penyelia',
+        'overtime.supervisor_rejected' => 'Permohonan OT Ditolak Penyelia',
+        'overtime.approved' => 'Permohonan OT Diluluskan',
+        'overtime.rejected' => 'Permohonan OT Ditolak',
+        'overtime.cancelled' => 'Permohonan OT Dibatalkan',
+        'overtime.approved_cancelled' => 'OT Diluluskan Dibatalkan HR',
+        'overtime_type.created' => 'Jenis OT Ditambah',
+        'overtime_type.updated' => 'Jenis OT Dikemas Kini',
+        'overtime_type.activated' => 'Jenis OT Diaktifkan',
+        'overtime_type.deactivated' => 'Jenis OT Dinyahaktifkan',
+        'overtime_approver.assigned' => 'Penyelia OT Ditetapkan',
+        'overtime_approver.removed' => 'Penyelia OT Dibuang',
+        'shift_template.created' => 'Template Syif Ditambah',
+        'shift_template.updated' => 'Template Syif Dikemas Kini',
+        'shift_template.activated' => 'Template Syif Diaktifkan',
+        'shift_template.deactivated' => 'Template Syif Dinyahaktifkan',
+        'schedule_assignment.created' => 'Penetapan Jadual Ditambah',
+        'schedule_assignment.activated' => 'Penetapan Jadual Diaktifkan',
+        'schedule_assignment.deactivated' => 'Penetapan Jadual Dinyahaktifkan',
+        'roster.generated' => 'Roster Dijana',
+        'roster.entry_updated' => 'Jadual Pekerja Dikemas Kini',
+        'roster.published' => 'Roster Diterbitkan',
+        'roster.locked' => 'Roster Dikunci',
+        'roster.swap_requested' => 'Pertukaran Syif Dimohon',
+        'roster.swap_cancelled' => 'Pertukaran Syif Dibatalkan',
+        'roster.swap_approved' => 'Pertukaran Syif Diluluskan',
+        'roster.swap_rejected' => 'Pertukaran Syif Ditolak',
+        'roster.report_exported' => 'Laporan Roster Dieksport',
+        'claim.submitted' => 'Tuntutan Dihantar',
+        'claim.cancelled_by_employee' => 'Tuntutan Dibatalkan Pekerja',
+        'claim.supervisor_approved' => 'Tuntutan Disokong Penyelia',
+        'claim.supervisor_rejected' => 'Tuntutan Ditolak Penyelia',
+        'claim.approved' => 'Tuntutan Diluluskan',
+        'claim.rejected' => 'Tuntutan Ditolak',
+        'claim.payroll_scheduled' => 'Tuntutan Dijadualkan ke Payroll',
+        'claim.approved_cancelled' => 'Kelulusan Tuntutan Dibatalkan',
+        'claim.report_exported' => 'Laporan Tuntutan Dieksport',
+        'claim_type.created' => 'Jenis Tuntutan Ditambah',
+        'claim_type.updated' => 'Jenis Tuntutan Dikemas Kini',
+        'claim_type.activated' => 'Jenis Tuntutan Diaktifkan',
+        'claim_type.deactivated' => 'Jenis Tuntutan Dinyahaktifkan',
+        'claim_approver.assigned' => 'Penyelia Tuntutan Ditetapkan',
+        'claim_approver.removed' => 'Penyelia Tuntutan Dibuang',
+        'claim_limit.saved' => 'Had Tuntutan Khas Disimpan',
+        'claim_limit.removed' => 'Had Tuntutan Khas Dibuang',
+        'performance_cycle.created' => 'Kitaran Prestasi Ditambah',
+        'performance_cycle.updated' => 'Kitaran Prestasi Dikemas Kini',
+        'performance_cycle.open' => 'Kitaran Prestasi Dibuka',
+        'performance_cycle.in_review' => 'Kitaran Prestasi Masuk Semakan',
+        'performance_cycle.finalized' => 'Kitaran Prestasi Dimuktamadkan',
+        'performance_template.created' => 'Template KPI Ditambah',
+        'performance_template.updated' => 'Template KPI Dikemas Kini',
+        'performance_template.activated' => 'Template KPI Diaktifkan',
+        'performance_template.deactivated' => 'Template KPI Dinyahaktifkan',
+        'performance_supervisor.assigned' => 'Penyelia Prestasi Ditetapkan',
+        'performance_supervisor.removed' => 'Penyelia Prestasi Dibuang',
+        'performance_review.created' => 'Penilaian Prestasi Dijana',
+        'performance_review.bulk_generated' => 'Penilaian Prestasi Dijana Pukal',
+        'performance_review.self_saved' => 'Draf Self-Assessment Disimpan',
+        'performance_review.self_submitted' => 'Self-Assessment Dihantar',
+        'performance_review.supervisor_submitted' => 'Penilaian Penyelia Dihantar',
+        'performance_review.moderated' => 'Penilaian Prestasi Dimoderasi',
+        'performance_review.finalized' => 'Penilaian Prestasi Dimuktamadkan',
+        'performance_evidence.uploaded' => 'Bukti Prestasi Dimuat Naik',
+        'performance_evidence.deleted' => 'Bukti Prestasi Dibuang',
+        'performance_pip.created' => 'PIP Dibuka',
+        'performance_pip.updated' => 'PIP Dikemas Kini',
+        'performance_pip.checkin_added' => 'Semakan PIP Direkodkan',
+        'performance_report.exported' => 'Laporan Prestasi Dieksport',
+        'payroll.generated' => 'Payroll Dijana',
+        'payroll.recalculated' => 'Payroll Dikira Semula',
+        'payroll.manual_item_added' => 'Pelarasan Payroll Ditambah',
+        'payroll.manual_item_removed' => 'Pelarasan Payroll Dibuang',
+        'payroll.statutory_overridden' => 'Amaun Statutori Dilaras',
+        'payroll.hr_reviewed' => 'Payroll Disemak HR',
+        'payroll.approved' => 'Payroll Diluluskan',
+        'payroll.finalized' => 'Payroll Dimuktamadkan',
+        'payroll.returned_to_draft' => 'Payroll Dikembalikan ke Draf',
+        'payroll_settings.updated' => 'Tetapan Payroll Dikemas Kini',
+        'payroll_component.created' => 'Komponen Payroll Ditambah',
+        'payroll_component.updated' => 'Komponen Payroll Dikemas Kini',
+        'payroll_component.activated' => 'Komponen Payroll Diaktifkan',
+        'payroll_component.deactivated' => 'Komponen Payroll Dinyahaktifkan',
+        'salary_profile.created' => 'Profil Gaji Ditambah',
+        'salary_profile.updated' => 'Profil Gaji Dikemas Kini',
+        'employee_payroll_component.created' => 'Komponen Gaji Pekerja Ditambah',
+        'employee_payroll_component.updated' => 'Komponen Gaji Pekerja Dikemas Kini',
+        'employee_payroll_component.activated' => 'Komponen Gaji Pekerja Diaktifkan',
+        'employee_payroll_component.deactivated' => 'Komponen Gaji Pekerja Dinyahaktifkan',
+        'statutory_settings.updated' => 'Kadar Statutori Dikemas Kini',
+        'payslip_settings.updated' => 'Tetapan Slip Gaji Dikemas Kini',
+        'statutory_profile.created' => 'Profil Statutori Ditambah',
+        'statutory_profile.updated' => 'Profil Statutori Dikemas Kini',
+        'report.monthly_exported' => 'Laporan Bulanan Dieksport',
     ];
 
     private const AUDITABLE_TYPES = [
@@ -75,6 +173,35 @@ class AuditTrailController extends Controller
         'leave_entitlements',
         'leave_approval_assignments',
         'public_holidays',
+        'overtime_requests',
+        'overtime_types',
+        'overtime_approval_assignments',
+        'shift_templates',
+        'schedule_assignments',
+        'roster_periods',
+        'roster_entries',
+        'shift_swap_requests',
+        'claim_requests',
+        'claim_types',
+        'claim_approval_assignments',
+        'claim_limit_overrides',
+        'performance_cycles',
+        'performance_templates',
+        'performance_supervisor_assignments',
+        'performance_reviews',
+        'performance_evidence',
+        'performance_improvement_plans',
+        'performance_pip_checkins',
+        'payroll_runs',
+        'payroll_entry_items',
+        'payroll_settings',
+        'payroll_components',
+        'employee_salary_profiles',
+        'employee_payroll_components',
+        'statutory_settings',
+        'employee_statutory_profiles',
+        'payroll_statutory_snapshots',
+        'monthly_hr_report',
     ];
 
     public function index(Request $request): Response
@@ -266,6 +393,18 @@ class AuditTrailController extends Controller
                     + ($actionCounts['leave_type.created'] ?? 0)
                     + ($actionCounts['leave_entitlement.created'] ?? 0)
                     + ($actionCounts['public_holiday.created'] ?? 0)
+                    + ($actionCounts['overtime.submitted'] ?? 0)
+                    + ($actionCounts['overtime_type.created'] ?? 0)
+                    + ($actionCounts['shift_template.created'] ?? 0)
+                    + ($actionCounts['schedule_assignment.created'] ?? 0)
+                    + ($actionCounts['roster.generated'] ?? 0)
+                    + ($actionCounts['roster.swap_requested'] ?? 0)
+                    + ($actionCounts['claim.submitted'] ?? 0)
+                    + ($actionCounts['claim_type.created'] ?? 0)
+                    + ($actionCounts['performance_cycle.created'] ?? 0)
+                    + ($actionCounts['performance_template.created'] ?? 0)
+                    + ($actionCounts['performance_review.created'] ?? 0)
+                    + ($actionCounts['performance_pip.created'] ?? 0)
                 ),
                 'updated' => (int) (
                     ($actionCounts['employee.updated'] ?? 0)
@@ -285,6 +424,41 @@ class AuditTrailController extends Controller
                     + ($actionCounts['leave_type.updated'] ?? 0)
                     + ($actionCounts['leave_entitlement.updated'] ?? 0)
                     + ($actionCounts['leave_approver.assigned'] ?? 0)
+                    + ($actionCounts['overtime.approved'] ?? 0)
+                    + ($actionCounts['overtime.rejected'] ?? 0)
+                    + ($actionCounts['overtime.supervisor_approved'] ?? 0)
+                    + ($actionCounts['overtime.supervisor_rejected'] ?? 0)
+                    + ($actionCounts['overtime_type.updated'] ?? 0)
+                    + ($actionCounts['overtime_approver.assigned'] ?? 0)
+                    + ($actionCounts['shift_template.updated'] ?? 0)
+                    + ($actionCounts['schedule_assignment.activated'] ?? 0)
+                    + ($actionCounts['roster.entry_updated'] ?? 0)
+                    + ($actionCounts['roster.published'] ?? 0)
+                    + ($actionCounts['roster.locked'] ?? 0)
+                    + ($actionCounts['roster.swap_approved'] ?? 0)
+                    + ($actionCounts['roster.swap_rejected'] ?? 0)
+                    + ($actionCounts['claim.approved'] ?? 0)
+                    + ($actionCounts['claim.rejected'] ?? 0)
+                    + ($actionCounts['claim.supervisor_approved'] ?? 0)
+                    + ($actionCounts['claim.supervisor_rejected'] ?? 0)
+                    + ($actionCounts['claim.payroll_scheduled'] ?? 0)
+                    + ($actionCounts['claim_type.updated'] ?? 0)
+                    + ($actionCounts['claim_approver.assigned'] ?? 0)
+                    + ($actionCounts['claim_limit.saved'] ?? 0)
+                    + ($actionCounts['performance_cycle.updated'] ?? 0)
+                    + ($actionCounts['performance_cycle.open'] ?? 0)
+                    + ($actionCounts['performance_cycle.in_review'] ?? 0)
+                    + ($actionCounts['performance_cycle.finalized'] ?? 0)
+                    + ($actionCounts['performance_template.updated'] ?? 0)
+                    + ($actionCounts['performance_supervisor.assigned'] ?? 0)
+                    + ($actionCounts['performance_review.self_saved'] ?? 0)
+                    + ($actionCounts['performance_review.self_submitted'] ?? 0)
+                    + ($actionCounts['performance_review.supervisor_submitted'] ?? 0)
+                    + ($actionCounts['performance_review.moderated'] ?? 0)
+                    + ($actionCounts['performance_review.finalized'] ?? 0)
+                    + ($actionCounts['performance_evidence.uploaded'] ?? 0)
+                    + ($actionCounts['performance_pip.updated'] ?? 0)
+                    + ($actionCounts['performance_pip.checkin_added'] ?? 0)
                 ),
                 'deactivated' => (int) (
                     ($actionCounts['employee.deactivated'] ?? 0)
@@ -297,11 +471,30 @@ class AuditTrailController extends Controller
                     + ($actionCounts['leave_type.deactivated'] ?? 0)
                     + ($actionCounts['leave_approver.removed'] ?? 0)
                     + ($actionCounts['public_holiday.deleted'] ?? 0)
+                    + ($actionCounts['overtime.cancelled'] ?? 0)
+                    + ($actionCounts['overtime.approved_cancelled'] ?? 0)
+                    + ($actionCounts['overtime_type.deactivated'] ?? 0)
+                    + ($actionCounts['overtime_approver.removed'] ?? 0)
+                    + ($actionCounts['shift_template.deactivated'] ?? 0)
+                    + ($actionCounts['schedule_assignment.deactivated'] ?? 0)
+                    + ($actionCounts['roster.swap_cancelled'] ?? 0)
+                    + ($actionCounts['claim.cancelled_by_employee'] ?? 0)
+                    + ($actionCounts['claim.approved_cancelled'] ?? 0)
+                    + ($actionCounts['claim_type.deactivated'] ?? 0)
+                    + ($actionCounts['claim_approver.removed'] ?? 0)
+                    + ($actionCounts['claim_limit.removed'] ?? 0)
+                    + ($actionCounts['performance_template.deactivated'] ?? 0)
+                    + ($actionCounts['performance_supervisor.removed'] ?? 0)
+                    + ($actionCounts['performance_evidence.deleted'] ?? 0)
                 ),
                 'reactivated' => (int) (
                     ($actionCounts['employee.reactivated'] ?? 0)
                     + ($actionCounts['office.activated'] ?? 0)
                     + ($actionCounts['leave_type.activated'] ?? 0)
+                    + ($actionCounts['overtime_type.activated'] ?? 0)
+                    + ($actionCounts['shift_template.activated'] ?? 0)
+                    + ($actionCounts['claim_type.activated'] ?? 0)
+                    + ($actionCounts['performance_template.activated'] ?? 0)
                 ),
                 'inactive' => DB::connection('ibco')
                     ->table('maklumatpekerja')
@@ -409,6 +602,10 @@ class AuditTrailController extends Controller
                 'employee_user_links',
                 'employee_personal_profiles',
                 'employee_leave_requests',
+                'employee_salary_profiles',
+                'employee_payroll_components',
+                'payroll_entry_items',
+                'claim_requests',
             ])
             ->map(fn (AuditLog $audit) => (
                 data_get($audit->new_values, 'employee_id')
@@ -453,7 +650,12 @@ class AuditTrailController extends Controller
                     'geo_attendance_records',
                     'employee_user_links',
                     'employee_personal_profiles',
-                    'employee_leave_requests' => (
+                    'employee_leave_requests',
+                    'overtime_requests',
+                    'claim_requests',
+                    'employee_salary_profiles',
+                    'employee_payroll_components',
+                    'payroll_entry_items' => (
                         data_get($audit->new_values, 'employee_id')
                         ?? data_get($audit->old_values, 'employee_id')
                         ?? null
@@ -534,7 +736,20 @@ class AuditTrailController extends Controller
             ->all();
 
         $lookups['employee_id'] = $lookups['id_pekerja'];
+        $lookups['department_id'] = $lookups['id_department'];
         $lookups['office_location_id'] = OfficeLocation::query()
+            ->pluck('name', 'id')
+            ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
+            ->all();
+        $lookups['overtime_type_id'] = OvertimeType::query()
+            ->pluck('name', 'id')
+            ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
+            ->all();
+        $lookups['claim_type_id'] = ClaimType::query()
+            ->pluck('name', 'id')
+            ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
+            ->all();
+        $lookups['payroll_component_id'] = PayrollComponent::query()
             ->pluck('name', 'id')
             ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
             ->all();

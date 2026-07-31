@@ -75,6 +75,13 @@ type Office = {
 type AttendanceRecord = {
     id: number;
     attendance_date: string;
+    roster_entry_id: number | null;
+    scheduled_start_at: string | null;
+    scheduled_end_at: string | null;
+    scheduled_minutes: number;
+    late_minutes: number;
+    early_departure_minutes: number;
+    attendance_day_type: string | null;
     clock_in_at: string;
     clock_out_at: string | null;
     clock_in_accuracy_meters: string | null;
@@ -793,6 +800,7 @@ export default function GeoAttendanceIndex({
                                     <TableHead>Tarikh / Lokasi</TableHead>
                                     <TableHead>Masuk</TableHead>
                                     <TableHead>Keluar</TableHead>
+                                    <TableHead>Jadual / Varians</TableHead>
                                     <TableHead>Verifikasi</TableHead>
                                     <TableHead>Status</TableHead>
                                     <TableHead className="text-right">
@@ -846,6 +854,39 @@ export default function GeoAttendanceIndex({
                                                     ? `${Math.round(Number(record.clock_out_distance_meters))} m`
                                                     : '-'}
                                             </p>
+                                        </TableCell>
+                                        <TableCell>
+                                            <p className="text-sm">
+                                                {record.scheduled_start_at
+                                                    ? `${formatDateTime(record.scheduled_start_at)} – ${formatDateTime(record.scheduled_end_at)}`
+                                                    : record.attendance_day_type ||
+                                                      'Tiada roster'}
+                                            </p>
+                                            <div className="mt-1 flex flex-wrap gap-1">
+                                                {record.late_minutes > 0 && (
+                                                    <Badge
+                                                        variant="outline"
+                                                        className="border-amber-500/30 bg-amber-500/10 text-amber-700"
+                                                    >
+                                                        Lewat{' '}
+                                                        {record.late_minutes}{' '}
+                                                        min
+                                                    </Badge>
+                                                )}
+                                                {record.early_departure_minutes >
+                                                    0 && (
+                                                    <Badge
+                                                        variant="outline"
+                                                        className="border-orange-500/30 bg-orange-500/10 text-orange-700"
+                                                    >
+                                                        Awal{' '}
+                                                        {
+                                                            record.early_departure_minutes
+                                                        }{' '}
+                                                        min
+                                                    </Badge>
+                                                )}
+                                            </div>
                                         </TableCell>
                                         <TableCell>
                                             <Badge variant="outline">
@@ -938,6 +979,25 @@ export default function GeoAttendanceIndex({
                                             )}
                                         </p>
                                     </div>
+                                </div>
+                                <div className="rounded-lg border p-3 text-sm">
+                                    <p className="text-xs text-muted-foreground">
+                                        Jadual Roster
+                                    </p>
+                                    <p className="mt-1">
+                                        {record.scheduled_start_at
+                                            ? `${formatDateTime(record.scheduled_start_at)} – ${formatDateTime(record.scheduled_end_at)}`
+                                            : record.attendance_day_type ||
+                                              'Tiada roster'}
+                                    </p>
+                                    {(record.late_minutes > 0 ||
+                                        record.early_departure_minutes > 0) && (
+                                        <p className="mt-1 text-xs text-amber-700">
+                                            Lewat {record.late_minutes} min ·
+                                            pulang awal{' '}
+                                            {record.early_departure_minutes} min
+                                        </p>
+                                    )}
                                 </div>
                                 <p className="flex items-center gap-2 text-sm">
                                     <MapPin className="size-4 text-primary" />

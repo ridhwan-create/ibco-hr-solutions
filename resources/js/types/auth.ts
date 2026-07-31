@@ -20,7 +20,36 @@ export type Permission =
     | 'leave.self'
     | 'leave.apply'
     | 'overtime.view'
+    | 'overtime.manage'
+    | 'overtime.supervise'
+    | 'overtime.settings'
+    | 'overtime.self'
+    | 'overtime.apply'
+    | 'roster.view'
+    | 'roster.manage'
+    | 'roster.publish'
+    | 'roster.supervise'
+    | 'roster.settings'
+    | 'roster.self'
+    | 'roster.swap'
+    | 'performance.view'
+    | 'performance.manage'
+    | 'performance.supervise'
+    | 'performance.moderate'
+    | 'performance.finalize'
+    | 'performance.settings'
+    | 'performance.self'
+    | 'claims.view'
+    | 'claims.manage'
+    | 'claims.supervise'
+    | 'claims.settings'
+    | 'claims.self'
+    | 'claims.apply'
     | 'payroll.view'
+    | 'payroll.manage'
+    | 'payroll.approve'
+    | 'payroll.settings'
+    | 'payslip.self'
     | 'reports.view'
     | 'audit.view'
     | 'users.manage';
@@ -50,6 +79,18 @@ export type LeaveApprovalAlerts = {
     supervisor: number;
     hr: number;
     polling_seconds: number;
+    leave_total: number;
+    leave_supervisor: number;
+    leave_hr: number;
+    overtime_total: number;
+    overtime_supervisor: number;
+    overtime_hr: number;
+    claim_total: number;
+    claim_supervisor: number;
+    claim_finance: number;
+    performance_total: number;
+    performance_supervisor: number;
+    performance_hr: number;
 };
 
 /* @chisel-passkeys */

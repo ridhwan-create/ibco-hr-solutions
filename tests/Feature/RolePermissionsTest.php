@@ -92,7 +92,15 @@ test('supervisor receives department leave review permission and can combine emp
     $supervisor = User::factory()->supervisor()->create();
 
     expect($supervisor->hasPermission('leave.supervise'))->toBeTrue();
+    expect($supervisor->hasPermission('overtime.supervise'))->toBeTrue();
+    expect($supervisor->hasPermission('roster.supervise'))->toBeTrue();
+    expect($supervisor->hasPermission('claims.supervise'))->toBeTrue();
+    expect($supervisor->hasPermission('performance.supervise'))->toBeTrue();
     expect($supervisor->hasPermission('leave.manage'))->toBeFalse();
+    expect($supervisor->hasPermission('overtime.manage'))->toBeFalse();
+    expect($supervisor->hasPermission('roster.manage'))->toBeFalse();
+    expect($supervisor->hasPermission('claims.manage'))->toBeFalse();
+    expect($supervisor->hasPermission('performance.manage'))->toBeFalse();
 
     $supervisor->syncRoles([
         UserRole::Supervisor,
@@ -100,5 +108,41 @@ test('supervisor receives department leave review permission and can combine emp
     ]);
 
     expect($supervisor->hasPermission('leave.apply'))->toBeTrue();
+    expect($supervisor->hasPermission('overtime.apply'))->toBeTrue();
+    expect($supervisor->hasPermission('roster.swap'))->toBeTrue();
+    expect($supervisor->hasPermission('claims.apply'))->toBeTrue();
+    expect($supervisor->hasPermission('performance.self'))->toBeTrue();
     expect($supervisor->hasPermission('attendance.clock'))->toBeTrue();
+    expect($supervisor->hasPermission('payslip.self'))->toBeTrue();
+});
+
+test('payroll permissions separate hr preparation from final approval', function () {
+    $hrAdmin = User::factory()->hrAdmin()->create();
+    $superAdmin = User::factory()->superAdmin()->create();
+
+    expect($hrAdmin->hasPermission('payroll.view'))->toBeTrue();
+    expect($hrAdmin->hasPermission('payroll.manage'))->toBeTrue();
+    expect($hrAdmin->hasPermission('payroll.settings'))->toBeTrue();
+    expect($hrAdmin->hasPermission('payroll.approve'))->toBeFalse();
+
+    expect($superAdmin->hasPermission('payroll.manage'))->toBeTrue();
+    expect($superAdmin->hasPermission('payroll.approve'))->toBeTrue();
+    expect($superAdmin->hasPermission('payroll.settings'))->toBeTrue();
+});
+
+test('performance permissions separate employee supervisor and hr workflows', function () {
+    $employee = User::factory()->employee()->create();
+    $supervisor = User::factory()->supervisor()->create();
+    $hr = User::factory()->hrAdmin()->create();
+    $superAdmin = User::factory()->superAdmin()->create();
+
+    expect($employee->hasPermission('performance.self'))->toBeTrue();
+    expect($employee->hasPermission('performance.view'))->toBeFalse();
+    expect($supervisor->hasPermission('performance.view'))->toBeTrue();
+    expect($supervisor->hasPermission('performance.supervise'))->toBeTrue();
+    expect($supervisor->hasPermission('performance.moderate'))->toBeFalse();
+    expect($hr->hasPermission('performance.manage'))->toBeTrue();
+    expect($hr->hasPermission('performance.moderate'))->toBeTrue();
+    expect($hr->hasPermission('performance.finalize'))->toBeTrue();
+    expect($superAdmin->hasPermission('performance.settings'))->toBeTrue();
 });

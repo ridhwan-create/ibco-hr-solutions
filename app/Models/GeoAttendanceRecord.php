@@ -12,7 +12,14 @@ class GeoAttendanceRecord extends Model
         'user_id',
         'employee_id',
         'office_location_id',
+        'roster_entry_id',
         'attendance_date',
+        'scheduled_start_at',
+        'scheduled_end_at',
+        'scheduled_minutes',
+        'late_minutes',
+        'early_departure_minutes',
+        'attendance_day_type',
         'clock_in_at',
         'clock_out_at',
         'clock_in_latitude',
@@ -39,6 +46,11 @@ class GeoAttendanceRecord extends Model
         return [
             'employee_id' => 'integer',
             'attendance_date' => 'date',
+            'scheduled_start_at' => 'datetime',
+            'scheduled_end_at' => 'datetime',
+            'scheduled_minutes' => 'integer',
+            'late_minutes' => 'integer',
+            'early_departure_minutes' => 'integer',
             'clock_in_at' => 'datetime',
             'clock_out_at' => 'datetime',
             'clock_in_latitude' => 'decimal:7',
@@ -65,5 +77,10 @@ class GeoAttendanceRecord extends Model
     public function adjustments(): HasMany
     {
         return $this->hasMany(AttendanceAdjustment::class);
+    }
+
+    public function rosterEntry(): BelongsTo
+    {
+        return $this->belongsTo(RosterEntry::class);
     }
 }

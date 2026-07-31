@@ -5,9 +5,10 @@ import type {
 } from '@/components/records-index';
 
 const config: RecordPageConfig = {
-    title: 'Maklumat Payroll',
-    description: 'Senarai rekod payroll mengikut pekerja dan tempoh gaji.',
-    routePath: '/payroll',
+    title: 'Payroll Asal (db_spp)',
+    description:
+        'Rekod payroll lama untuk rujukan sahaja. Payroll Core baharu tidak mengubah data ini.',
+    routePath: '/payroll-asal',
     searchPlaceholder: 'Cari nama, ID, NRIC atau bulan...',
     columns: [
         { key: 'employee_id', label: 'ID Pekerja' },
@@ -26,5 +27,5 @@ export default function PayrollIndex(props: RecordsIndexPageProps) {
 }
 
 PayrollIndex.layout = {
-    breadcrumbs: [{ title: 'Payroll', href: '/payroll' }],
+    breadcrumbs: [{ title: 'Payroll Asal', href: '/payroll-asal' }],
 };

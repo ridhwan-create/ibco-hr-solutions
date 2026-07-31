@@ -1,0 +1,33 @@
+diff --git a/tests/Feature/StatutoryPayslipTest.php b/tests/Feature/StatutoryPayslipTest.php
+--- a/tests/Feature/StatutoryPayslipTest.php
++++ b/tests/Feature/StatutoryPayslipTest.php
+@@ -3,6 +3,7 @@
+ use App\Models\EmployeeSalaryProfile;
+ use App\Models\EmployeeStatutoryProfile;
+ use App\Models\EmployeeUserLink;
++use App\Models\OfficeLocation;
+ use App\Models\PayrollEntry;
+ use App\Models\PayrollRun;
+ use App\Models\User;
+@@ -79,9 +80,21 @@ test('statutory contributions are snapshotted and employee can download only own
+     $employeeUser = User::factory()->employee()->create();
+     $otherEmployee = User::factory()->employee()->create();
+     $employeeId = createStatutoryEmployee();
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.139,
++        'longitude' => 101.6869,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++        'created_by' => $hr->getKey(),
++        'updated_by' => $hr->getKey(),
++    ]);
+     EmployeeUserLink::query()->create([
+         'user_id' => $employeeUser->getKey(),
+         'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
+         'is_active' => true,
+         'created_by' => $hr->getKey(),
+         'updated_by' => $hr->getKey(),

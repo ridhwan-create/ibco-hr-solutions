@@ -850,7 +850,7 @@ export default function EmployeeProfile({
                                     </CardDescription>
                                 </div>
                                 <Link
-                                    href={`/payroll?search=${employeeSearch}`}
+                                    href={`/payroll-asal?search=${employeeSearch}`}
                                     className="text-sm font-medium text-muted-foreground hover:text-foreground"
                                 >
                                     Lihat semua

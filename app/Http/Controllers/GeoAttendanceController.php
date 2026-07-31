@@ -11,6 +11,7 @@ use App\Models\GeoAttendanceRecord;
 use App\Models\OfficeLocation;
 use App\Support\AuditLogger;
 use App\Support\Geofence;
+use App\Support\WorkScheduleResolver;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -23,6 +24,10 @@ use Inertia\Response;
 
 class GeoAttendanceController extends Controller
 {
+    public function __construct(
+        private readonly WorkScheduleResolver $scheduleResolver,
+    ) {}
+
     public function clockPage(Request $request): Response
     {
         $link = EmployeeUserLink::query()
@@ -43,7 +48,19 @@ class GeoAttendanceController extends Controller
         $todayRecord = $link
             ? GeoAttendanceRecord::query()
                 ->where('employee_id', $link->employee_id)
-                ->whereDate('attendance_date', $today)
+                ->where('status', 'active')
+                ->where(function (Builder $query) use ($today) {
+                    $query->whereDate('attendance_date', $today)
+                        ->orWhere(function (Builder $open) use ($today) {
+                            $open->whereNull('clock_out_at')
+                                ->whereDate(
+                                    'attendance_date',
+                                    '>=',
+                                    Carbon::parse($today)->subDay(),
+                                );
+                        });
+                })
+                ->latest('attendance_date')
                 ->first()
             : null;
 
@@ -83,8 +100,33 @@ class GeoAttendanceController extends Controller
         $link = $this->activeEmployeeLink($request);
         $location = $this->validatedLocation($request, $link->officeLocation);
         $now = now();
+        $schedule = $this->scheduleResolver->attendanceSnapshot(
+            $link->employee_id,
+            $now,
+            $now,
+            officeLocationId: $link->office_location_id,
+        );
 
-        $record = DB::transaction(function () use ($request, $link, $location, $now) {
+        $record = DB::transaction(function () use (
+            $request,
+            $link,
+            $location,
+            $now,
+            $schedule,
+        ) {
+            $openRecord = GeoAttendanceRecord::query()
+                ->where('employee_id', $link->employee_id)
+                ->where('status', 'active')
+                ->whereNull('clock_out_at')
+                ->lockForUpdate()
+                ->exists();
+
+            if ($openRecord) {
+                throw ValidationException::withMessages([
+                    'attendance' => 'Masih terdapat rekod masuk aktif yang belum direkodkan waktu keluar.',
+                ]);
+            }
+
             $exists = GeoAttendanceRecord::query()
                 ->where('employee_id', $link->employee_id)
                 ->whereDate('attendance_date', $now->toDateString())
@@ -101,6 +143,7 @@ class GeoAttendanceController extends Controller
                 'user_id' => $request->user()->getAuthIdentifier(),
                 'employee_id' => $link->employee_id,
                 'office_location_id' => $link->office_location_id,
+                ...$schedule,
                 'attendance_date' => $now->toDateString(),
                 'clock_in_at' => $now,
                 'clock_in_latitude' => $location['latitude'],
@@ -148,8 +191,10 @@ class GeoAttendanceController extends Controller
         $record = DB::transaction(function () use ($request, $link, $location, $now) {
             $record = GeoAttendanceRecord::query()
                 ->where('employee_id', $link->employee_id)
-                ->whereDate('attendance_date', $now->toDateString())
                 ->where('status', 'active')
+                ->whereNull('clock_out_at')
+                ->whereDate('attendance_date', '>=', $now->copy()->subDay())
+                ->latest('attendance_date')
                 ->lockForUpdate()
                 ->first();
 
@@ -165,8 +210,16 @@ class GeoAttendanceController extends Controller
                 ]);
             }
 
+            $schedule = $this->scheduleResolver->attendanceSnapshot(
+                $record->employee_id,
+                $record->attendance_date,
+                $record->clock_in_at,
+                $now,
+                officeLocationId: $record->office_location_id,
+            );
             $record->update([
                 'clock_out_at' => $now,
+                ...$schedule,
                 'clock_out_latitude' => $location['latitude'],
                 'clock_out_longitude' => $location['longitude'],
                 'clock_out_accuracy_meters' => $location['accuracy'],
@@ -296,6 +349,13 @@ class GeoAttendanceController extends Controller
             ? Carbon::parse($validated['clock_out_at'])
             : null;
         $attendanceDate = Carbon::parse($validated['attendance_date'])->toDateString();
+        $schedule = $this->scheduleResolver->attendanceSnapshot(
+            (int) $validated['employee_id'],
+            $attendanceDate,
+            $clockIn,
+            $clockOut,
+            officeLocationId: (int) $validated['office_location_id'],
+        );
 
         if ($clockIn->toDateString() !== $attendanceDate) {
             throw ValidationException::withMessages([
@@ -320,10 +380,12 @@ class GeoAttendanceController extends Controller
             $clockIn,
             $clockOut,
             $attendanceDate,
+            $schedule,
         ) {
             $record = GeoAttendanceRecord::query()->create([
                 'employee_id' => (int) $validated['employee_id'],
                 'office_location_id' => (int) $validated['office_location_id'],
+                ...$schedule,
                 'attendance_date' => $attendanceDate,
                 'clock_in_at' => $clockIn,
                 'clock_out_at' => $clockOut,
@@ -373,6 +435,13 @@ class GeoAttendanceController extends Controller
         $clockOut = isset($validated['clock_out_at'])
             ? Carbon::parse($validated['clock_out_at'])
             : null;
+        $schedule = $this->scheduleResolver->attendanceSnapshot(
+            $record->employee_id,
+            $record->attendance_date,
+            $clockIn,
+            $clockOut,
+            officeLocationId: $record->office_location_id,
+        );
 
         if ($clockIn->toDateString() !== $record->attendance_date->toDateString()) {
             throw ValidationException::withMessages([
@@ -387,10 +456,12 @@ class GeoAttendanceController extends Controller
             $clockIn,
             $clockOut,
             $before,
+            $schedule,
         ) {
             $record->update([
                 'clock_in_at' => $clockIn,
                 'clock_out_at' => $clockOut,
+                ...$schedule,
                 'status' => $validated['cancelled'] ? 'cancelled' : 'active',
                 'notes' => $validated['reason'],
                 'updated_by' => $request->user()->getAuthIdentifier(),
@@ -581,6 +652,13 @@ class GeoAttendanceController extends Controller
         return [
             'id' => $record->getKey(),
             'attendance_date' => $record->attendance_date?->toDateString(),
+            'roster_entry_id' => $record->roster_entry_id,
+            'scheduled_start_at' => $record->scheduled_start_at?->toIso8601String(),
+            'scheduled_end_at' => $record->scheduled_end_at?->toIso8601String(),
+            'scheduled_minutes' => $record->scheduled_minutes,
+            'late_minutes' => $record->late_minutes,
+            'early_departure_minutes' => $record->early_departure_minutes,
+            'attendance_day_type' => $record->attendance_day_type,
             'clock_in_at' => $record->clock_in_at?->toIso8601String(),
             'clock_out_at' => $record->clock_out_at?->toIso8601String(),
             'clock_in_accuracy_meters' => $record->clock_in_accuracy_meters,
@@ -632,6 +710,12 @@ class GeoAttendanceController extends Controller
         return [
             'clock_in_at' => $record->clock_in_at?->toIso8601String(),
             'clock_out_at' => $record->clock_out_at?->toIso8601String(),
+            'roster_entry_id' => $record->roster_entry_id,
+            'scheduled_start_at' => $record->scheduled_start_at?->toIso8601String(),
+            'scheduled_end_at' => $record->scheduled_end_at?->toIso8601String(),
+            'late_minutes' => $record->late_minutes,
+            'early_departure_minutes' => $record->early_departure_minutes,
+            'attendance_day_type' => $record->attendance_day_type,
             'status' => $record->status,
         ];
     }

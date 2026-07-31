@@ -166,6 +166,31 @@ class User extends Authenticatable implements PasskeyUser
         return $this->hasMany(UserRoleAssignment::class);
     }
 
+    public function rosterEntries(): HasMany
+    {
+        return $this->hasMany(RosterEntry::class);
+    }
+
+    public function rosterNotifications(): HasMany
+    {
+        return $this->hasMany(RosterNotification::class);
+    }
+
+    public function performanceReviews(): HasMany
+    {
+        return $this->hasMany(PerformanceReview::class, 'employee_user_id');
+    }
+
+    public function supervisedPerformanceReviews(): HasMany
+    {
+        return $this->hasMany(PerformanceReview::class, 'supervisor_user_id');
+    }
+
+    public function performanceNotifications(): HasMany
+    {
+        return $this->hasMany(PerformanceNotification::class);
+    }
+
     /**
      * Get the attributes that should be cast.
      *

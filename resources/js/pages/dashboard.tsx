@@ -5,9 +5,13 @@ import {
     BriefcaseBusiness,
     CalendarCheck2,
     CalendarDays,
+    CircleAlert,
     Clock3,
     Database,
     FileText,
+    ReceiptText,
+    Target,
+    TrendingUp,
     UsersRound,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -30,6 +34,8 @@ type StatisticKey =
     | 'cuti'
     | 'kerja_lebih_masa'
     | 'payroll'
+    | 'tuntutan'
+    | 'prestasi'
     | 'laporan_bulanan';
 
 type Statistics = Partial<Record<StatisticKey, number>>;
@@ -57,6 +63,27 @@ type DashboardProps = {
     statistics: Statistics;
     recentAttendance: AttendanceRecord[];
     recentLeave: LeaveRecord[];
+    executiveOverview: ExecutiveOverview | null;
+};
+
+type ExecutiveOverview = {
+    period: string;
+    period_label: string;
+    summary: {
+        attendance_rate: number;
+        leave_days: number;
+        overtime_hours: number;
+        pending_actions: number;
+        payroll: {
+            status: string;
+            net_pay: number;
+        };
+    };
+    insights: {
+        level: 'success' | 'warning' | 'info';
+        title: string;
+        message: string;
+    }[];
 };
 
 type StatisticCard = {
@@ -119,11 +146,31 @@ const statisticCards: StatisticCard[] = [
     {
         key: 'payroll',
         title: 'Payroll',
-        description: 'Jumlah rekod payroll',
+        description: 'Payroll Core bulanan',
         href: '/payroll',
         icon: Banknote,
         iconClassName: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
         permission: 'payroll.view',
+    },
+    {
+        key: 'tuntutan',
+        title: 'Tuntutan',
+        description: 'Tuntutan & bayaran balik',
+        href: '/permohonan-tuntutan',
+        icon: ReceiptText,
+        iconClassName:
+            'bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400',
+        permission: 'claims.view',
+    },
+    {
+        key: 'prestasi',
+        title: 'Prestasi & KPI',
+        description: 'Penilaian prestasi pekerja',
+        href: '/prestasi',
+        icon: Target,
+        iconClassName:
+            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+        permission: 'performance.view',
     },
     {
         key: 'laporan_bulanan',
@@ -167,10 +214,27 @@ function employeeLabel(
     return employeeName || employeeId || 'Pekerja tidak dikenal pasti';
 }
 
+function formatMoney(value: number): string {
+    return new Intl.NumberFormat('ms-MY', {
+        style: 'currency',
+        currency: 'MYR',
+        maximumFractionDigits: 2,
+    }).format(value);
+}
+
+const payrollStatusLabels: Record<string, string> = {
+    not_generated: 'Belum dijana',
+    draft: 'Draf',
+    hr_reviewed: 'Disemak HR',
+    approved: 'Diluluskan',
+    finalized: 'Dimuktamadkan',
+};
+
 export default function Dashboard({
     statistics,
     recentAttendance,
     recentLeave,
+    executiveOverview,
 }: DashboardProps) {
     const { auth } = usePage<{ auth: Auth }>().props;
     const visibleStatisticCards = statisticCards.filter((card) =>
@@ -235,6 +299,90 @@ export default function Dashboard({
                         );
                     })}
                 </div>
+
+                {executiveOverview && (
+                    <Card className="gap-5 overflow-hidden">
+                        <CardHeader className="flex-row items-start justify-between gap-4 border-b bg-muted/20">
+                            <div className="space-y-1.5">
+                                <CardTitle className="flex items-center gap-2">
+                                    <TrendingUp className="size-5 text-primary" />
+                                    Ringkasan Eksekutif
+                                </CardTitle>
+                                <CardDescription>
+                                    Prestasi operasi bagi{' '}
+                                    {executiveOverview.period_label}.
+                                </CardDescription>
+                            </div>
+                            <Link
+                                href={`/laporan-bulanan?period=${executiveOverview.period}`}
+                                className="flex shrink-0 items-center gap-1 text-sm font-medium text-primary hover:underline"
+                            >
+                                Laporan penuh
+                                <ArrowRight className="size-4" />
+                            </Link>
+                        </CardHeader>
+                        <CardContent className="space-y-5">
+                            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                                <ExecutiveMetric
+                                    label="Kadar Kehadiran"
+                                    value={`${executiveOverview.summary.attendance_rate.toLocaleString('ms-MY')}%`}
+                                    detail="Hari bekerja direkodkan"
+                                />
+                                <ExecutiveMetric
+                                    label="Cuti Diluluskan"
+                                    value={`${executiveOverview.summary.leave_days.toLocaleString('ms-MY')} hari`}
+                                    detail="Dalam bulan dipilih"
+                                />
+                                <ExecutiveMetric
+                                    label="OT Diluluskan"
+                                    value={`${executiveOverview.summary.overtime_hours.toLocaleString('ms-MY')} jam`}
+                                    detail="Jumlah jam disahkan"
+                                />
+                                <ExecutiveMetric
+                                    label="Gaji Bersih"
+                                    value={formatMoney(
+                                        executiveOverview.summary.payroll
+                                            .net_pay,
+                                    )}
+                                    detail={
+                                        payrollStatusLabels[
+                                            executiveOverview.summary.payroll
+                                                .status
+                                        ] ??
+                                        executiveOverview.summary.payroll.status
+                                    }
+                                />
+                                <ExecutiveMetric
+                                    label="Menunggu Tindakan"
+                                    value={executiveOverview.summary.pending_actions.toLocaleString(
+                                        'ms-MY',
+                                    )}
+                                    detail="Permohonan cuti dan OT"
+                                />
+                            </div>
+
+                            {executiveOverview.insights[0] && (
+                                <div className="flex gap-3 rounded-lg border bg-muted/20 p-3">
+                                    <CircleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                                    <div>
+                                        <p className="text-sm font-medium">
+                                            {
+                                                executiveOverview.insights[0]
+                                                    .title
+                                            }
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {
+                                                executiveOverview.insights[0]
+                                                    .message
+                                            }
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+                        </CardContent>
+                    </Card>
+                )}
 
                 <div className="grid gap-6 xl:grid-cols-2">
                     <Card className="gap-4">
@@ -360,6 +508,26 @@ export default function Dashboard({
                 </div>
             </div>
         </>
+    );
+}
+
+function ExecutiveMetric({
+    label,
+    value,
+    detail,
+}: {
+    label: string;
+    value: string;
+    detail: string;
+}) {
+    return (
+        <div className="rounded-lg border bg-background p-3">
+            <p className="text-xs font-medium text-muted-foreground">{label}</p>
+            <p className="mt-1 truncate text-xl font-semibold tabular-nums">
+                {value}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+        </div>
     );
 }
 

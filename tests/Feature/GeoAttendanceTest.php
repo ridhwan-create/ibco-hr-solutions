@@ -34,6 +34,15 @@ beforeEach(function () {
         $table->boolean('rcd_enable')->default(true);
     });
 
+    Schema::connection('ibco')->create('maklumatjawatan', function (
+        Blueprint $table,
+    ) {
+        $table->increments('id');
+        $table->integer('id_pekerja')->nullable();
+        $table->integer('id_department')->nullable();
+        $table->boolean('rcd_enable')->default(true);
+    });
+
     Schema::connection('ibco')->create('xpilihanjam', function (Blueprint $table) {
         $table->increments('id');
         $table->string('description')->nullable();

@@ -5,8 +5,9 @@ import type {
 } from '@/components/records-index';
 
 const config: RecordPageConfig = {
-    title: 'Kerja Lebih Masa',
-    description: 'Rekod kerja lebih masa yang telah dimasukkan.',
+    title: 'OT Asal (db_spp)',
+    description:
+        'Rekod kerja lebih masa terdahulu untuk rujukan sahaja. Data asal tidak diubah.',
     routePath: '/kerja-lebih-masa',
     searchPlaceholder: 'Cari nama, ID, jenis OT atau catatan...',
     columns: [
@@ -25,5 +26,5 @@ export default function OtIndex(props: RecordsIndexPageProps) {
 }
 
 OtIndex.layout = {
-    breadcrumbs: [{ title: 'Kerja Lebih Masa', href: '/kerja-lebih-masa' }],
+    breadcrumbs: [{ title: 'OT Asal', href: '/kerja-lebih-masa' }],
 };

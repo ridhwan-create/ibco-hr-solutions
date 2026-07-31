@@ -1,0 +1,2406 @@
+diff --git a/README.md b/README.md
+index 82f285adc8e4bbcb3b8f8ab354bb2e94390854f8..30a3fd8714f7648171d900204ec7bad5a8e93028 100644
+--- a/README.md
++++ b/README.md
+@@ -6,8 +6,10 @@ # IBCO HR Solutions
+ ## Dashboard
+ 
+ Dashboard memaparkan jumlah rekod aktif bagi setiap modul serta lima rekod
+-kehadiran dan permohonan cuti terkini. Semua kad ringkasan boleh digunakan
+-untuk membuka halaman index modul berkaitan.
++kehadiran dan permohonan cuti terkini. HR Admin dan Super Admin turut menerima
++ringkasan eksekutif bulan semasa bagi kadar kehadiran, cuti, OT, gaji bersih
++dan permohonan yang masih menunggu tindakan. Semua kad ringkasan boleh
++digunakan untuk membuka halaman modul berkaitan.
+ 
+ ## Modul index
+ 
+@@ -189,6 +191,24 @@ ## Statutori & Slip Gaji PDF
+ PCB tidak dianggap sebagai peratus tetap kerana amaun sebenar bergantung pada
+ data cukai individu, TP1, TP3 dan saraan tambahan.
+ 
++## Laporan Bulanan & Dashboard Eksekutif
++
++Laporan operasi baharu menggabungkan data pekerja, kehadiran geolocation, cuti,
++OT dan snapshot payroll mengikut bulan. HR Admin dan Super Admin boleh:
++
++- menapis laporan mengikut bulan, jabatan dan lokasi pejabat;
++- melihat kadar kehadiran, purata jam bekerja dan rekod keluar tidak lengkap;
++- melihat hari cuti dan jam OT yang telah diluluskan;
++- melihat status payroll, gaji kasar, potongan, gaji bersih dan caruman majikan;
++- membandingkan trend enam bulan;
++- membandingkan prestasi mengikut jabatan;
++- melihat perkara yang memerlukan perhatian pengurusan; dan
++- mengeksport ringkasan, pecahan jabatan dan trend dalam CSV.
++
++Halaman **Laporan Asal** mengekalkan rekod `reportbulanan` daripada `db_spp`
++sebagai rujukan. Penjanaan laporan baharu hanya menjalankan `SELECT` pada
++`db_spp`; eksport direkodkan dalam Audit Trail pada database aplikasi.
++
+ ## Roles & Permissions
+ 
+ Kawalan akses disimpan dalam jadual `users` pada database sistem:
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 0c7641c454b8be667604684250f6157080736a7b..2515d7f831701fc6588112b35209b863d1999f30 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -99,6 +99,7 @@ class AuditTrailController extends Controller
+         'payslip_settings.updated' => 'Tetapan Slip Gaji Dikemas Kini',
+         'statutory_profile.created' => 'Profil Statutori Ditambah',
+         'statutory_profile.updated' => 'Profil Statutori Dikemas Kini',
++        'report.monthly_exported' => 'Laporan Bulanan Dieksport',
+     ];
+ 
+     private const AUDITABLE_TYPES = [
+@@ -126,6 +127,7 @@ class AuditTrailController extends Controller
+         'statutory_settings',
+         'employee_statutory_profiles',
+         'payroll_statutory_snapshots',
++        'monthly_hr_report',
+     ];
+ 
+     public function index(Request $request): Response
+@@ -605,6 +607,7 @@ private function referenceLookups(): array
+             ->all();
+ 
+         $lookups['employee_id'] = $lookups['id_pekerja'];
++        $lookups['department_id'] = $lookups['id_department'];
+         $lookups['office_location_id'] = OfficeLocation::query()
+             ->pluck('name', 'id')
+             ->mapWithKeys(fn ($name, $id) => [(string) $id => (string) $name])
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 9ba752259df3b3354c701ca31d94ee5c7021206b..8e3aa8b55d629794dc2ab39fab04a1dd3828bf1b 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -5,12 +5,17 @@
+ use App\Enums\UserRole;
+ use App\Models\GeoAttendanceRecord;
+ use App\Models\PayrollRun;
++use App\Support\MonthlyHrReportBuilder;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
+ use Inertia\Inertia;
+ 
+ class DashboardController extends Controller
+ {
++    public function __construct(
++        private readonly MonthlyHrReportBuilder $reportBuilder,
++    ) {}
++
+     public function index(Request $request)
+     {
+         if ($request->user()->hasOnlyRole(UserRole::Employee)) {
+@@ -100,6 +105,9 @@ public function index(Request $request)
+             'statistics' => $statistics,
+             'recentAttendance' => $recentAttendance,
+             'recentLeave' => $recentLeave,
++            'executiveOverview' => $user->hasPermission('reports.view')
++                ? $this->reportBuilder->overview(now()->format('Y-m'))
++                : null,
+         ]);
+     }
+ }
+diff --git a/app/Http/Controllers/ReportBulananController.php b/app/Http/Controllers/ReportBulananController.php
+index f6053a8f4a63a6cacb61d9d56d5abe392445665d..90a1939b82d97fafa5a960785f2c5b94f22f1736 100644
+--- a/app/Http/Controllers/ReportBulananController.php
++++ b/app/Http/Controllers/ReportBulananController.php
+@@ -2,14 +2,147 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Models\ReportBulanan;
++use App\Support\AuditLogger;
++use App\Support\MonthlyHrReportBuilder;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
++use Inertia\Response;
++use Symfony\Component\HttpFoundation\StreamedResponse;
+ 
+ class ReportBulananController extends Controller
+ {
+-    public function index(Request $request)
++    public function __construct(
++        private readonly MonthlyHrReportBuilder $reportBuilder,
++    ) {}
++
++    public function index(Request $request): Response
++    {
++        $filters = $this->validatedFilters($request);
++        $report = $this->reportBuilder->build(
++            $filters['period'],
++            $filters['department_id'],
++            $filters['office_location_id'],
++        );
++
++        return Inertia::render('MonthlyReports/Index', [
++            'report' => $report,
++        ]);
++    }
++
++    public function export(Request $request): StreamedResponse
++    {
++        $filters = $this->validatedFilters($request);
++        $report = $this->reportBuilder->build(
++            $filters['period'],
++            $filters['department_id'],
++            $filters['office_location_id'],
++        );
++        AuditLogger::record(
++            $request,
++            'report.monthly_exported',
++            'monthly_hr_report',
++            $filters['period'],
++            newValues: [
++                'period' => $filters['period'],
++                'department_id' => $filters['department_id'],
++                'office_location_id' => $filters['office_location_id'],
++            ],
++        );
++
++        return response()->streamDownload(
++            function () use ($report) {
++                $stream = fopen('php://output', 'w');
++
++                if ($stream === false) {
++                    return;
++                }
++
++                fwrite($stream, "\xEF\xBB\xBF");
++                fputcsv($stream, ['Laporan HR Bulanan', $report['period_label']]);
++                fputcsv($stream, ['Dijana pada', $report['generated_at']]);
++                fputcsv($stream, []);
++                fputcsv($stream, ['RINGKASAN']);
++                fputcsv($stream, ['Metrik', 'Nilai']);
++
++                $summary = $report['summary'];
++                $summaryRows = [
++                    ['Pekerja aktif', $summary['active_employees']],
++                    ['Hari bekerja', $summary['working_days']],
++                    ['Rekod kehadiran', $summary['attendance_days']],
++                    ['Kadar kehadiran (%)', $summary['attendance_rate']],
++                    ['Purata jam bekerja', $summary['average_work_hours']],
++                    ['Rekod keluar tidak lengkap', $summary['incomplete_clock_out']],
++                    ['Permohonan cuti diluluskan', $summary['leave_requests']],
++                    ['Hari cuti diluluskan', $summary['leave_days']],
++                    ['Permohonan OT diluluskan', $summary['overtime_requests']],
++                    ['Jam OT diluluskan', $summary['overtime_hours']],
++                    ['Kelulusan menunggu', $summary['pending_actions']],
++                    ['Status payroll', $summary['payroll']['status']],
++                    ['Gaji kasar', $summary['payroll']['gross_pay']],
++                    ['Jumlah potongan', $summary['payroll']['deductions']],
++                    ['Gaji bersih', $summary['payroll']['net_pay']],
++                    [
++                        'Caruman majikan',
++                        $summary['payroll']['employer_contributions'],
++                    ],
++                ];
++
++                foreach ($summaryRows as $row) {
++                    fputcsv($stream, $row);
++                }
++
++                fputcsv($stream, []);
++                fputcsv($stream, ['PECAHAN JABATAN']);
++                fputcsv($stream, [
++                    'Jabatan',
++                    'Pekerja',
++                    'Hari Kehadiran',
++                    'Hari Cuti',
++                    'Jam OT',
++                    'Gaji Bersih',
++                ]);
++
++                foreach ($report['departments'] as $department) {
++                    fputcsv($stream, [
++                        $department['name'],
++                        $department['employee_count'],
++                        $department['attendance_days'],
++                        $department['leave_days'],
++                        $department['overtime_hours'],
++                        $department['net_pay'],
++                    ]);
++                }
++
++                fputcsv($stream, []);
++                fputcsv($stream, ['TREND ENAM BULAN']);
++                fputcsv($stream, [
++                    'Bulan',
++                    'Kadar Kehadiran (%)',
++                    'Hari Cuti',
++                    'Jam OT',
++                    'Gaji Bersih',
++                ]);
++
++                foreach ($report['trend'] as $month) {
++                    fputcsv($stream, [
++                        $month['period'],
++                        $month['attendance_rate'],
++                        $month['leave_days'],
++                        $month['overtime_hours'],
++                        $month['net_pay'],
++                    ]);
++                }
++
++                fclose($stream);
++            },
++            "laporan-hr-bulanan-{$filters['period']}.csv",
++            ['Content-Type' => 'text/csv; charset=UTF-8'],
++        );
++    }
++
++    public function legacy(Request $request): Response
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+@@ -43,50 +176,46 @@ public function index(Request $request)
+     }
+ 
+     /**
+-     * Show the form for creating a new resource.
++     * @return array{
++     *     period: string,
++     *     department_id: ?int,
++     *     office_location_id: ?int
++     * }
+      */
+-    public function create()
++    private function validatedFilters(Request $request): array
+     {
+-        //
+-    }
+-
+-    /**
+-     * Store a newly created resource in storage.
+-     */
+-    public function store(Request $request)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Display the specified resource.
+-     */
+-    public function show(ReportBulanan $reportBulanan)
+-    {
+-        //
+-    }
+-
+-    /**
+-     * Show the form for editing the specified resource.
+-     */
+-    public function edit(ReportBulanan $reportBulanan)
+-    {
+-        //
+-    }
++        $validated = $request->validate([
++            'period' => ['nullable', 'date_format:Y-m'],
++            'department_id' => ['nullable', 'integer', 'min:1'],
++            'office_location_id' => [
++                'nullable',
++                'integer',
++                'exists:office_locations,id',
++            ],
++        ]);
++        $departmentId = isset($validated['department_id'])
++            ? (int) $validated['department_id']
++            : null;
+ 
+-    /**
+-     * Update the specified resource in storage.
+-     */
+-    public function update(Request $request, ReportBulanan $reportBulanan)
+-    {
+-        //
+-    }
++        if (
++            $departmentId !== null
++            && ! DB::connection('ibco')
++                ->table('xdepartment')
++                ->where('id', $departmentId)
++                ->where('rcd_enable', 1)
++                ->exists()
++        ) {
++            throw ValidationException::withMessages([
++                'department_id' => 'Jabatan yang dipilih tidak sah.',
++            ]);
++        }
+ 
+-    /**
+-     * Remove the specified resource from storage.
+-     */
+-    public function destroy(ReportBulanan $reportBulanan)
+-    {
+-        //
++        return [
++            'period' => $validated['period'] ?? now()->format('Y-m'),
++            'department_id' => $departmentId,
++            'office_location_id' => isset($validated['office_location_id'])
++                ? (int) $validated['office_location_id']
++                : null,
++        ];
+     }
+ }
+diff --git a/app/Support/MonthlyHrReportBuilder.php b/app/Support/MonthlyHrReportBuilder.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..d184d517ae6b1207e5df15331469db9cb2aacd98
+--- /dev/null
++++ b/app/Support/MonthlyHrReportBuilder.php
+@@ -0,0 +1,629 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\EmployeeLeaveRequest;
++use App\Models\EmployeeUserLink;
++use App\Models\GeoAttendanceRecord;
++use App\Models\OfficeLocation;
++use App\Models\OvertimeRequest;
++use App\Models\PayrollRun;
++use App\Models\PublicHoliday;
++use Carbon\CarbonImmutable;
++use Carbon\CarbonInterface;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\DB;
++
++class MonthlyHrReportBuilder
++{
++    /**
++     * @return array<string, mixed>
++     */
++    public function build(
++        string $period,
++        ?int $departmentId = null,
++        ?int $officeLocationId = null,
++    ): array {
++        $periodStart = CarbonImmutable::createFromFormat(
++            'Y-m-d',
++            "{$period}-01",
++        )->startOfMonth();
++        $context = $this->employeeContext(
++            $departmentId,
++            $officeLocationId,
++        );
++        $periodData = $this->periodData(
++            $periodStart,
++            $context['employee_ids'],
++        );
++        $trend = collect(range(5, 0))
++            ->map(function (int $monthsAgo) use ($periodStart, $context) {
++                $start = $periodStart->subMonths($monthsAgo);
++                $data = $this->periodData(
++                    $start,
++                    $context['employee_ids'],
++                );
++
++                return [
++                    'period' => $start->format('Y-m'),
++                    'label' => $start->translatedFormat('M Y'),
++                    'attendance_rate' => $data['summary']['attendance_rate'],
++                    'leave_days' => $data['summary']['leave_days'],
++                    'overtime_hours' => $data['summary']['overtime_hours'],
++                    'net_pay' => $data['summary']['payroll']['net_pay'],
++                ];
++            })
++            ->values()
++            ->all();
++
++        return [
++            'period' => $periodStart->format('Y-m'),
++            'period_label' => $periodStart->translatedFormat('F Y'),
++            'generated_at' => now()->toIso8601String(),
++            'filters' => [
++                'department_id' => $departmentId,
++                'office_location_id' => $officeLocationId,
++            ],
++            'filter_options' => [
++                'departments' => $context['department_options'],
++                'office_locations' => $context['office_options'],
++            ],
++            'summary' => $periodData['summary'],
++            'leave_breakdown' => $periodData['leave_breakdown'],
++            'overtime_breakdown' => $periodData['overtime_breakdown'],
++            'departments' => $this->departmentRows(
++                $context['employees'],
++                $periodData,
++            ),
++            'trend' => $trend,
++            'insights' => $this->insights($periodData['summary']),
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public function overview(string $period): array
++    {
++        $report = $this->build($period);
++
++        return [
++            'period' => $report['period'],
++            'period_label' => $report['period_label'],
++            'summary' => $report['summary'],
++            'trend' => $report['trend'],
++            'insights' => $report['insights'],
++        ];
++    }
++
++    /**
++     * @return array{
++     *     employees: Collection<int, array<string, mixed>>,
++     *     employee_ids: array<int, int>,
++     *     department_options: array<int, array{id: int, name: string}>,
++     *     office_options: array<int, array{id: int, name: string}>
++     * }
++     */
++    private function employeeContext(
++        ?int $departmentId,
++        ?int $officeLocationId,
++    ): array {
++        $connection = DB::connection('ibco');
++        $employees = $connection->table('maklumatpekerja')
++            ->where('rcd_enable', 1)
++            ->orderBy('nama')
++            ->get(['id', 'employeeID', 'nama']);
++        $employeeIds = $employees
++            ->pluck('id')
++            ->map(fn ($id) => (int) $id)
++            ->all();
++        $positions = $employeeIds === []
++            ? collect()
++            : $connection->table('maklumatjawatan as j')
++                ->leftJoin('xdepartment as d', 'j.id_department', '=', 'd.id')
++                ->where('j.rcd_enable', 1)
++                ->whereIn('j.id_pekerja', $employeeIds)
++                ->orderByDesc('j.id')
++                ->get([
++                    'j.id_pekerja as employee_id',
++                    'j.id_department as department_id',
++                    'd.description as department_name',
++                ]);
++        $positionsByEmployee = [];
++
++        foreach ($positions as $position) {
++            $employeeId = (int) $position->employee_id;
++
++            if (isset($positionsByEmployee[$employeeId])) {
++                continue;
++            }
++
++            $positionsByEmployee[$employeeId] = [
++                'department_id' => $position->department_id === null
++                    ? null
++                    : (int) $position->department_id,
++                'department_name' => $position->department_name
++                    ?: 'Tanpa Jabatan',
++            ];
++        }
++
++        $officeEmployeeIds = null;
++
++        if ($officeLocationId !== null) {
++            $officeEmployeeIds = EmployeeUserLink::query()
++                ->where('office_location_id', $officeLocationId)
++                ->where('is_active', true)
++                ->pluck('employee_id')
++                ->map(fn ($id) => (int) $id)
++                ->flip();
++        }
++
++        $resolvedEmployees = $employees
++            ->map(function ($employee) use ($positionsByEmployee) {
++                $employeeId = (int) $employee->id;
++                $position = $positionsByEmployee[$employeeId] ?? [
++                    'department_id' => null,
++                    'department_name' => 'Tanpa Jabatan',
++                ];
++
++                return [
++                    'id' => $employeeId,
++                    'employee_number' => $employee->employeeID,
++                    'name' => $employee->nama,
++                    ...$position,
++                ];
++            })
++            ->when(
++                $departmentId !== null,
++                fn (Collection $items) => $items->where(
++                    'department_id',
++                    $departmentId,
++                ),
++            )
++            ->when(
++                $officeEmployeeIds !== null,
++                fn (Collection $items) => $items->filter(
++                    fn (array $employee) => $officeEmployeeIds->has(
++                        $employee['id'],
++                    ),
++                ),
++            )
++            ->values();
++
++        return [
++            'employees' => $resolvedEmployees,
++            'employee_ids' => $resolvedEmployees->pluck('id')->all(),
++            'department_options' => $connection->table('xdepartment')
++                ->where('rcd_enable', 1)
++                ->orderBy('description')
++                ->get(['id', 'description'])
++                ->map(fn ($department) => [
++                    'id' => (int) $department->id,
++                    'name' => $department->description,
++                ])
++                ->all(),
++            'office_options' => OfficeLocation::query()
++                ->where('is_active', true)
++                ->orderBy('name')
++                ->get(['id', 'name'])
++                ->map(fn (OfficeLocation $office) => [
++                    'id' => $office->getKey(),
++                    'name' => $office->name,
++                ])
++                ->all(),
++        ];
++    }
++
++    /**
++     * @param  array<int, int>  $employeeIds
++     * @return array<string, mixed>
++     */
++    private function periodData(
++        CarbonImmutable $periodStart,
++        array $employeeIds,
++    ): array {
++        $periodEnd = $periodStart->endOfMonth();
++        $holidays = PublicHoliday::query()
++            ->where('is_active', true)
++            ->whereBetween('holiday_date', [
++                $periodStart->toDateString(),
++                $periodEnd->toDateString(),
++            ])
++            ->pluck('holiday_date')
++            ->map(fn ($date) => CarbonImmutable::parse($date)->toDateString())
++            ->flip()
++            ->all();
++        $workingDays = $this->workingDays(
++            $periodStart,
++            $periodEnd,
++            $holidays,
++        );
++
++        $attendance = GeoAttendanceRecord::query()
++            ->whereIn('employee_id', $employeeIds)
++            ->where('status', 'active')
++            ->whereBetween('attendance_date', [
++                $periodStart->toDateString(),
++                $periodEnd->toDateString(),
++            ])
++            ->get([
++                'employee_id',
++                'attendance_date',
++                'clock_in_at',
++                'clock_out_at',
++            ]);
++        $workingDayAttendance = $attendance->filter(
++            fn (GeoAttendanceRecord $record) => $this->isWorkingDay(
++                $record->attendance_date,
++                $holidays,
++            ),
++        );
++        $completedAttendance = $attendance->filter(
++            fn (GeoAttendanceRecord $record) => $record->clock_out_at !== null,
++        );
++        $workedMinutes = $completedAttendance->sum(function (
++            GeoAttendanceRecord $record,
++        ) {
++            return max(
++                0,
++                $record->clock_in_at->diffInMinutes(
++                    $record->clock_out_at,
++                    false,
++                ),
++            );
++        });
++        $attendanceDaysByEmployee = $attendance
++            ->groupBy('employee_id')
++            ->map->count()
++            ->mapWithKeys(fn ($count, $employeeId) => [
++                (int) $employeeId => (int) $count,
++            ])
++            ->all();
++
++        $approvedLeave = EmployeeLeaveRequest::query()
++            ->with('systemLeaveType:id,name')
++            ->whereIn('employee_id', $employeeIds)
++            ->where('status', 'approved')
++            ->whereDate('start_date', '<=', $periodEnd)
++            ->whereDate('end_date', '>=', $periodStart)
++            ->get();
++        $leaveDaysByEmployee = [];
++        $leaveBreakdown = [];
++
++        foreach ($approvedLeave as $leave) {
++            $days = $this->leaveDaysInPeriod(
++                $leave,
++                $periodStart,
++                $periodEnd,
++                $holidays,
++            );
++            $employeeId = (int) $leave->employee_id;
++            $leaveDaysByEmployee[$employeeId] = round(
++                ($leaveDaysByEmployee[$employeeId] ?? 0) + $days,
++                1,
++            );
++            $label = $leave->systemLeaveType?->name
++                ?: ($leave->leave_type_label ?: 'Cuti Lain-lain');
++            $leaveBreakdown[$label] = round(
++                ($leaveBreakdown[$label] ?? 0) + $days,
++                1,
++            );
++        }
++
++        $approvedOvertime = OvertimeRequest::query()
++            ->with('overtimeType:id,name')
++            ->whereIn('employee_id', $employeeIds)
++            ->where('status', 'approved')
++            ->whereBetween('work_date', [
++                $periodStart->toDateString(),
++                $periodEnd->toDateString(),
++            ])
++            ->get();
++        $overtimeMinutesByEmployee = [];
++        $overtimeBreakdown = [];
++
++        foreach ($approvedOvertime as $overtime) {
++            $minutes = (int) (
++                $overtime->approved_minutes
++                ?? $overtime->requested_minutes
++            );
++            $employeeId = (int) $overtime->employee_id;
++            $overtimeMinutesByEmployee[$employeeId] =
++                ($overtimeMinutesByEmployee[$employeeId] ?? 0) + $minutes;
++            $label = $overtime->overtimeType?->name ?: 'OT Lain-lain';
++            $overtimeBreakdown[$label] =
++                ($overtimeBreakdown[$label] ?? 0) + $minutes;
++        }
++
++        $payrollRun = PayrollRun::query()
++            ->whereDate('period_start', $periodStart->toDateString())
++            ->first();
++        $payrollEntries = $payrollRun
++            ? $payrollRun->entries()
++                ->with('statutorySnapshot')
++                ->whereIn('employee_id', $employeeIds)
++                ->get()
++            : collect();
++        $payrollNetByEmployee = $payrollEntries
++            ->mapWithKeys(fn ($entry) => [
++                (int) $entry->employee_id => (float) $entry->net_pay,
++            ])
++            ->all();
++        $activeEmployees = count($employeeIds);
++        $expectedAttendanceDays = $workingDays * $activeEmployees;
++        $attendanceRate = $expectedAttendanceDays > 0
++            ? min(
++                100,
++                round(
++                    ($workingDayAttendance->count()
++                        / $expectedAttendanceDays) * 100,
++                    1,
++                ),
++            )
++            : 0;
++        $leaveDays = round(array_sum($leaveDaysByEmployee), 1);
++        $overtimeMinutes = array_sum($overtimeMinutesByEmployee);
++        $pendingLeave = EmployeeLeaveRequest::query()
++            ->whereIn('employee_id', $employeeIds)
++            ->where('status', 'pending')
++            ->whereDate('start_date', '<=', $periodEnd)
++            ->whereDate('end_date', '>=', $periodStart)
++            ->count();
++        $pendingOvertime = OvertimeRequest::query()
++            ->whereIn('employee_id', $employeeIds)
++            ->where('status', 'pending')
++            ->whereBetween('work_date', [
++                $periodStart->toDateString(),
++                $periodEnd->toDateString(),
++            ])
++            ->count();
++
++        return [
++            'summary' => [
++                'active_employees' => $activeEmployees,
++                'working_days' => $workingDays,
++                'attendance_days' => $attendance->count(),
++                'attendance_employees' => $attendance
++                    ->pluck('employee_id')
++                    ->unique()
++                    ->count(),
++                'attendance_rate' => $attendanceRate,
++                'average_work_hours' => $completedAttendance->count() > 0
++                    ? round(
++                        $workedMinutes / $completedAttendance->count() / 60,
++                        1,
++                    )
++                    : 0,
++                'incomplete_clock_out' => $attendance
++                    ->whereNull('clock_out_at')
++                    ->count(),
++                'leave_requests' => $approvedLeave->count(),
++                'leave_days' => $leaveDays,
++                'pending_leave' => $pendingLeave,
++                'overtime_requests' => $approvedOvertime->count(),
++                'overtime_hours' => round($overtimeMinutes / 60, 1),
++                'pending_overtime' => $pendingOvertime,
++                'pending_actions' => $pendingLeave + $pendingOvertime,
++                'payroll' => [
++                    'run_id' => $payrollRun?->getKey(),
++                    'status' => $payrollRun?->status ?? 'not_generated',
++                    'employee_count' => $payrollEntries->count(),
++                    'gross_pay' => round(
++                        (float) $payrollEntries->sum('gross_pay'),
++                        2,
++                    ),
++                    'deductions' => round(
++                        (float) $payrollEntries->sum('total_deductions'),
++                        2,
++                    ),
++                    'net_pay' => round(
++                        (float) $payrollEntries->sum('net_pay'),
++                        2,
++                    ),
++                    'employer_contributions' => round(
++                        (float) $payrollEntries->sum(
++                            fn ($entry) => (float) (
++                                $entry->statutorySnapshot
++                                    ?->total_employer_contributions
++                                ?? 0
++                            ),
++                        ),
++                        2,
++                    ),
++                ],
++            ],
++            'attendance_days_by_employee' => $attendanceDaysByEmployee,
++            'leave_days_by_employee' => $leaveDaysByEmployee,
++            'overtime_minutes_by_employee' => $overtimeMinutesByEmployee,
++            'payroll_net_by_employee' => $payrollNetByEmployee,
++            'leave_breakdown' => collect($leaveBreakdown)
++                ->map(fn ($days, $name) => [
++                    'name' => $name,
++                    'days' => $days,
++                ])
++                ->sortByDesc('days')
++                ->values()
++                ->all(),
++            'overtime_breakdown' => collect($overtimeBreakdown)
++                ->map(fn ($minutes, $name) => [
++                    'name' => $name,
++                    'hours' => round($minutes / 60, 1),
++                ])
++                ->sortByDesc('hours')
++                ->values()
++                ->all(),
++        ];
++    }
++
++    /**
++     * @param  Collection<int, array<string, mixed>>  $employees
++     * @param  array<string, mixed>  $periodData
++     * @return array<int, array<string, mixed>>
++     */
++    private function departmentRows(
++        Collection $employees,
++        array $periodData,
++    ): array {
++        return $employees
++            ->groupBy(fn (array $employee) => (string) (
++                $employee['department_id'] ?? 'none'
++            ))
++            ->map(function (Collection $departmentEmployees) use ($periodData) {
++                $first = $departmentEmployees->first();
++                $employeeIds = $departmentEmployees->pluck('id');
++
++                return [
++                    'department_id' => $first['department_id'],
++                    'name' => $first['department_name'],
++                    'employee_count' => $departmentEmployees->count(),
++                    'attendance_days' => $employeeIds->sum(
++                        fn ($employeeId) => $periodData[
++                            'attendance_days_by_employee'
++                        ][$employeeId] ?? 0,
++                    ),
++                    'leave_days' => round(
++                        (float) $employeeIds->sum(
++                            fn ($employeeId) => $periodData[
++                                'leave_days_by_employee'
++                            ][$employeeId] ?? 0,
++                        ),
++                        1,
++                    ),
++                    'overtime_hours' => round(
++                        (float) $employeeIds->sum(
++                            fn ($employeeId) => $periodData[
++                                'overtime_minutes_by_employee'
++                            ][$employeeId] ?? 0,
++                        ) / 60,
++                        1,
++                    ),
++                    'net_pay' => round(
++                        (float) $employeeIds->sum(
++                            fn ($employeeId) => $periodData[
++                                'payroll_net_by_employee'
++                            ][$employeeId] ?? 0,
++                        ),
++                        2,
++                    ),
++                ];
++            })
++            ->sortByDesc('employee_count')
++            ->values()
++            ->all();
++    }
++
++    /**
++     * @param  array<string, mixed>  $summary
++     * @return array<int, array{level: string, title: string, message: string}>
++     */
++    private function insights(array $summary): array
++    {
++        $insights = [];
++
++        if ($summary['payroll']['status'] === 'not_generated') {
++            $insights[] = [
++                'level' => 'warning',
++                'title' => 'Payroll belum dijana',
++                'message' => 'Jana payroll bulan ini untuk melengkapkan ringkasan kewangan.',
++            ];
++        } elseif ($summary['payroll']['status'] !== 'finalized') {
++            $insights[] = [
++                'level' => 'warning',
++                'title' => 'Payroll belum dimuktamadkan',
++                'message' => 'Payroll masih berstatus '.$summary['payroll']['status'].'.',
++            ];
++        }
++
++        if ($summary['pending_actions'] > 0) {
++            $insights[] = [
++                'level' => 'warning',
++                'title' => 'Kelulusan masih menunggu',
++                'message' => $summary['pending_actions'].' permohonan cuti atau OT memerlukan tindakan.',
++            ];
++        }
++
++        if ($summary['incomplete_clock_out'] > 0) {
++            $insights[] = [
++                'level' => 'info',
++                'title' => 'Rekod keluar belum lengkap',
++                'message' => $summary['incomplete_clock_out'].' rekod kehadiran belum mempunyai waktu keluar.',
++            ];
++        }
++
++        if ($summary['attendance_rate'] < 85) {
++            $insights[] = [
++                'level' => 'info',
++                'title' => 'Liputan kehadiran perlu disemak',
++                'message' => 'Kadar rekod kehadiran bulan ini berada di bawah 85%.',
++            ];
++        }
++
++        if ($insights === []) {
++            $insights[] = [
++                'level' => 'success',
++                'title' => 'Operasi bulan ini terkawal',
++                'message' => 'Tiada isu utama dikesan daripada data kehadiran, kelulusan dan payroll.',
++            ];
++        }
++
++        return $insights;
++    }
++
++    /**
++     * @param  array<string, bool>  $holidays
++     */
++    private function workingDays(
++        CarbonImmutable $start,
++        CarbonImmutable $end,
++        array $holidays,
++    ): int {
++        $days = 0;
++
++        for ($date = $start; $date->lte($end); $date = $date->addDay()) {
++            if ($this->isWorkingDay($date, $holidays)) {
++                $days++;
++            }
++        }
++
++        return $days;
++    }
++
++    /**
++     * @param  array<string, bool>  $holidays
++     */
++    private function isWorkingDay(
++        CarbonInterface $date,
++        array $holidays,
++    ): bool {
++        return ! $date->isWeekend()
++            && ! isset($holidays[$date->toDateString()]);
++    }
++
++    /**
++     * @param  array<string, bool>  $holidays
++     */
++    private function leaveDaysInPeriod(
++        EmployeeLeaveRequest $leave,
++        CarbonImmutable $periodStart,
++        CarbonImmutable $periodEnd,
++        array $holidays,
++    ): float {
++        $start = CarbonImmutable::parse($leave->start_date)
++            ->max($periodStart);
++        $end = CarbonImmutable::parse($leave->end_date)
++            ->min($periodEnd);
++
++        if ($start->gt($end)) {
++            return 0;
++        }
++
++        if (
++            $leave->duration_type !== 'full_day'
++            && $start->isSameDay($end)
++        ) {
++            return $this->isWorkingDay($start, $holidays) ? .5 : 0;
++        }
++
++        return (float) $this->workingDays($start, $end, $holidays);
++    }
++}
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index fdaf7e85a003c1466c17981f604dc5340d3a5623..ea8614d6e63fb4144e013eee3dc458352c8189e2 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -156,6 +156,12 @@ const payrollNavItems: AuthorizedNavItem[] = [
+         icon: FileText,
+         permission: 'reports.view',
+     },
++    {
++        title: 'Laporan Asal',
++        href: '/laporan-bulanan-asal',
++        icon: Database,
++        permission: 'reports.view',
++    },
+ ];
+ 
+ const administrationNavItems: AuthorizedNavItem[] = [
+diff --git a/resources/js/pages/AuditTrail/Index.tsx b/resources/js/pages/AuditTrail/Index.tsx
+index bb18ca4fb1afad4a550ed90c65e0adaf911eade9..388e01406b63f685a1b18a296c10d7306699b76e 100644
+--- a/resources/js/pages/AuditTrail/Index.tsx
++++ b/resources/js/pages/AuditTrail/Index.tsx
+@@ -175,6 +175,8 @@ const fieldLabels: Record<string, string> = {
+     is_active: 'Status Aktif',
+     employee_id: 'Pekerja',
+     office_location_id: 'Lokasi Pejabat',
++    department_id: 'Jabatan',
++    period: 'Bulan Laporan',
+     clock_in_at: 'Waktu Masuk',
+     clock_out_at: 'Waktu Keluar',
+     distance_meters: 'Jarak (meter)',
+@@ -273,6 +275,8 @@ const actionStyles: Record<string, string> = {
+         'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+     'public_holiday.deleted':
+         'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300',
++    'report.monthly_exported':
++        'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
+ };
+ 
+ function formatDate(value: string | null): string {
+diff --git a/resources/js/pages/MonthlyReports/Index.tsx b/resources/js/pages/MonthlyReports/Index.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..54297a4ac8141c89b1f92b55680775e8a88cfd12
+--- /dev/null
++++ b/resources/js/pages/MonthlyReports/Index.tsx
+@@ -0,0 +1,797 @@
++import { Head, Link, router } from '@inertiajs/react';
++import {
++    AlertTriangle,
++    ArrowRight,
++    CalendarCheck2,
++    CalendarDays,
++    CheckCircle2,
++    Clock3,
++    Database,
++    Download,
++    FileSpreadsheet,
++    Filter,
++    Info,
++    UsersRound,
++    WalletCards,
++} from 'lucide-react';
++import { useMemo, useState } from 'react';
++import HeadingSmall from '@/components/heading-small';
++import { Badge } from '@/components/ui/badge';
++import { Button } from '@/components/ui/button';
++import {
++    Card,
++    CardContent,
++    CardDescription,
++    CardHeader,
++    CardTitle,
++} from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++
++type FilterOption = {
++    id: number;
++    name: string;
++};
++
++type PayrollSummary = {
++    run_id: number | null;
++    status: string;
++    employee_count: number;
++    gross_pay: number;
++    deductions: number;
++    net_pay: number;
++    employer_contributions: number;
++};
++
++type Summary = {
++    active_employees: number;
++    working_days: number;
++    attendance_days: number;
++    attendance_employees: number;
++    attendance_rate: number;
++    average_work_hours: number;
++    incomplete_clock_out: number;
++    leave_requests: number;
++    leave_days: number;
++    pending_leave: number;
++    overtime_requests: number;
++    overtime_hours: number;
++    pending_overtime: number;
++    pending_actions: number;
++    payroll: PayrollSummary;
++};
++
++type Breakdown = {
++    name: string;
++    days?: number;
++    hours?: number;
++};
++
++type DepartmentRow = {
++    department_id: number | null;
++    name: string;
++    employee_count: number;
++    attendance_days: number;
++    leave_days: number;
++    overtime_hours: number;
++    net_pay: number;
++};
++
++type TrendPoint = {
++    period: string;
++    label: string;
++    attendance_rate: number;
++    leave_days: number;
++    overtime_hours: number;
++    net_pay: number;
++};
++
++type Insight = {
++    level: 'success' | 'warning' | 'info';
++    title: string;
++    message: string;
++};
++
++type MonthlyReport = {
++    period: string;
++    period_label: string;
++    generated_at: string;
++    filters: {
++        department_id: number | null;
++        office_location_id: number | null;
++    };
++    filter_options: {
++        departments: FilterOption[];
++        office_locations: FilterOption[];
++    };
++    summary: Summary;
++    leave_breakdown: Breakdown[];
++    overtime_breakdown: Breakdown[];
++    departments: DepartmentRow[];
++    trend: TrendPoint[];
++    insights: Insight[];
++};
++
++const payrollStatusLabels: Record<string, string> = {
++    not_generated: 'Belum Dijana',
++    draft: 'Draf',
++    hr_reviewed: 'Disemak HR',
++    approved: 'Diluluskan',
++    finalized: 'Dimuktamadkan',
++};
++
++function number(value: number, maximumFractionDigits = 1): string {
++    return value.toLocaleString('ms-MY', {
++        maximumFractionDigits,
++    });
++}
++
++function money(value: number): string {
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++        maximumFractionDigits: 2,
++    }).format(value);
++}
++
++function exportUrl(report: MonthlyReport): string {
++    const params = new URLSearchParams({ period: report.period });
++
++    if (report.filters.department_id !== null) {
++        params.set('department_id', String(report.filters.department_id));
++    }
++
++    if (report.filters.office_location_id !== null) {
++        params.set(
++            'office_location_id',
++            String(report.filters.office_location_id),
++        );
++    }
++
++    return `/laporan-bulanan/laporan.csv?${params.toString()}`;
++}
++
++export default function MonthlyReportsIndex({
++    report,
++}: {
++    report: MonthlyReport;
++}) {
++    const [period, setPeriod] = useState(report.period);
++    const [departmentId, setDepartmentId] = useState(
++        report.filters.department_id === null
++            ? ''
++            : String(report.filters.department_id),
++    );
++    const [officeLocationId, setOfficeLocationId] = useState(
++        report.filters.office_location_id === null
++            ? ''
++            : String(report.filters.office_location_id),
++    );
++    const filtersActive =
++        report.filters.department_id !== null ||
++        report.filters.office_location_id !== null;
++    const metricCards = [
++        {
++            label: 'Pekerja Aktif',
++            value: number(report.summary.active_employees, 0),
++            detail: `${number(report.summary.working_days, 0)} hari bekerja`,
++            icon: UsersRound,
++            className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
++        },
++        {
++            label: 'Kadar Kehadiran',
++            value: `${number(report.summary.attendance_rate)}%`,
++            detail: `${number(report.summary.attendance_days, 0)} rekod kehadiran`,
++            icon: CalendarCheck2,
++            className:
++                'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
++        },
++        {
++            label: 'Cuti Diluluskan',
++            value: `${number(report.summary.leave_days)} hari`,
++            detail: `${number(report.summary.leave_requests, 0)} permohonan`,
++            icon: CalendarDays,
++            className: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
++        },
++        {
++            label: 'OT Diluluskan',
++            value: `${number(report.summary.overtime_hours)} jam`,
++            detail: `${number(report.summary.overtime_requests, 0)} permohonan`,
++            icon: Clock3,
++            className: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
++        },
++        {
++            label: 'Gaji Bersih',
++            value: money(report.summary.payroll.net_pay),
++            detail:
++                payrollStatusLabels[report.summary.payroll.status] ??
++                report.summary.payroll.status,
++            icon: WalletCards,
++            className: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
++        },
++    ];
++
++    const applyFilters = () => {
++        router.get(
++            '/laporan-bulanan',
++            {
++                period,
++                department_id: departmentId || undefined,
++                office_location_id: officeLocationId || undefined,
++            },
++            {
++                preserveState: true,
++                preserveScroll: true,
++                replace: true,
++            },
++        );
++    };
++
++    const resetFilters = () => {
++        setDepartmentId('');
++        setOfficeLocationId('');
++        router.get(
++            '/laporan-bulanan',
++            { period },
++            {
++                preserveState: true,
++                preserveScroll: true,
++                replace: true,
++            },
++        );
++    };
++
++    return (
++        <>
++            <Head title={`Laporan Bulanan ${report.period_label}`} />
++
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
++                    <HeadingSmall
++                        title="Laporan Bulanan & Dashboard Eksekutif"
++                        description={`Ringkasan kehadiran, cuti, OT dan payroll bagi ${report.period_label}.`}
++                    />
++                    <div className="flex flex-wrap gap-2">
++                        <Button variant="outline" asChild>
++                            <Link href="/laporan-bulanan-asal">
++                                <Database className="size-4" />
++                                Laporan Asal
++                            </Link>
++                        </Button>
++                        <Button asChild>
++                            <a href={exportUrl(report)}>
++                                <Download className="size-4" />
++                                Eksport CSV
++                            </a>
++                        </Button>
++                    </div>
++                </div>
++
++                <Card className="gap-4">
++                    <CardHeader>
++                        <CardTitle className="flex items-center gap-2 text-base">
++                            <Filter className="size-4" />
++                            Tapisan Laporan
++                        </CardTitle>
++                        <CardDescription>
++                            Pilih bulan, jabatan atau lokasi pejabat untuk
++                            mengecilkan skop laporan.
++                        </CardDescription>
++                    </CardHeader>
++                    <CardContent>
++                        <div className="grid gap-4 lg:grid-cols-[180px_1fr_1fr_auto] lg:items-end">
++                            <div className="space-y-2">
++                                <Label htmlFor="period">Bulan</Label>
++                                <Input
++                                    id="period"
++                                    type="month"
++                                    value={period}
++                                    onChange={(event) =>
++                                        setPeriod(event.target.value)
++                                    }
++                                />
++                            </div>
++                            <div className="space-y-2">
++                                <Label htmlFor="department_id">Jabatan</Label>
++                                <select
++                                    id="department_id"
++                                    value={departmentId}
++                                    onChange={(event) =>
++                                        setDepartmentId(event.target.value)
++                                    }
++                                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
++                                >
++                                    <option value="">Semua jabatan</option>
++                                    {report.filter_options.departments.map(
++                                        (department) => (
++                                            <option
++                                                key={department.id}
++                                                value={department.id}
++                                            >
++                                                {department.name}
++                                            </option>
++                                        ),
++                                    )}
++                                </select>
++                            </div>
++                            <div className="space-y-2">
++                                <Label htmlFor="office_location_id">
++                                    Lokasi Pejabat
++                                </Label>
++                                <select
++                                    id="office_location_id"
++                                    value={officeLocationId}
++                                    onChange={(event) =>
++                                        setOfficeLocationId(event.target.value)
++                                    }
++                                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
++                                >
++                                    <option value="">Semua lokasi</option>
++                                    {report.filter_options.office_locations.map(
++                                        (office) => (
++                                            <option
++                                                key={office.id}
++                                                value={office.id}
++                                            >
++                                                {office.name}
++                                            </option>
++                                        ),
++                                    )}
++                                </select>
++                            </div>
++                            <div className="flex gap-2">
++                                <Button onClick={applyFilters}>
++                                    Jana Laporan
++                                </Button>
++                                {filtersActive && (
++                                    <Button
++                                        variant="outline"
++                                        onClick={resetFilters}
++                                    >
++                                        Reset
++                                    </Button>
++                                )}
++                            </div>
++                        </div>
++                    </CardContent>
++                </Card>
++
++                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
++                    {metricCards.map((metric) => {
++                        const Icon = metric.icon;
++
++                        return (
++                            <Card key={metric.label} className="gap-4">
++                                <CardHeader className="flex-row items-start justify-between">
++                                    <div className="min-w-0 space-y-1.5">
++                                        <CardDescription>
++                                            {metric.label}
++                                        </CardDescription>
++                                        <CardTitle className="truncate text-2xl tabular-nums">
++                                            {metric.value}
++                                        </CardTitle>
++                                    </div>
++                                    <div
++                                        className={`rounded-lg p-2 ${metric.className}`}
++                                    >
++                                        <Icon className="size-4" />
++                                    </div>
++                                </CardHeader>
++                                <CardContent className="text-xs text-muted-foreground">
++                                    {metric.detail}
++                                </CardContent>
++                            </Card>
++                        );
++                    })}
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
++                    <Card className="gap-4">
++                        <CardHeader>
++                            <CardTitle>Trend Enam Bulan</CardTitle>
++                            <CardDescription>
++                                Perbandingan kadar kehadiran dan jam OT sehingga
++                                {` ${report.period_label}`}.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="grid gap-6 lg:grid-cols-2">
++                            <TrendBars
++                                title="Kadar Kehadiran"
++                                points={report.trend}
++                                valueKey="attendance_rate"
++                                fixedMaximum={100}
++                                formatValue={(value) => `${number(value)}%`}
++                                barClassName="bg-emerald-500"
++                            />
++                            <TrendBars
++                                title="Jam OT"
++                                points={report.trend}
++                                valueKey="overtime_hours"
++                                formatValue={(value) => `${number(value)} jam`}
++                                barClassName="bg-orange-500"
++                            />
++                        </CardContent>
++                    </Card>
++
++                    <Card className="gap-4">
++                        <CardHeader>
++                            <CardTitle>Perhatian Pengurusan</CardTitle>
++                            <CardDescription>
++                                Perkara yang memerlukan semakan berdasarkan data
++                                bulan dipilih.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="space-y-3">
++                            {report.insights.map((insight) => (
++                                <InsightItem
++                                    key={`${insight.title}-${insight.message}`}
++                                    insight={insight}
++                                />
++                            ))}
++                        </CardContent>
++                    </Card>
++                </div>
++
++                <div className="grid gap-6 xl:grid-cols-3">
++                    <BreakdownCard
++                        title="Pecahan Cuti"
++                        description="Hari cuti diluluskan mengikut jenis."
++                        items={report.leave_breakdown}
++                        valueKey="days"
++                        unit="hari"
++                        emptyLabel="Tiada cuti diluluskan bagi bulan ini."
++                    />
++                    <BreakdownCard
++                        title="Pecahan OT"
++                        description="Jam OT diluluskan mengikut jenis."
++                        items={report.overtime_breakdown}
++                        valueKey="hours"
++                        unit="jam"
++                        emptyLabel="Tiada OT diluluskan bagi bulan ini."
++                    />
++                    <Card className="gap-4">
++                        <CardHeader>
++                            <CardTitle>Ringkasan Payroll</CardTitle>
++                            <CardDescription>
++                                Nilai payroll mengikut skop tapisan semasa.
++                            </CardDescription>
++                        </CardHeader>
++                        <CardContent className="space-y-3">
++                            <SummaryRow
++                                label="Status"
++                                value={
++                                    payrollStatusLabels[
++                                        report.summary.payroll.status
++                                    ] ?? report.summary.payroll.status
++                                }
++                            />
++                            <SummaryRow
++                                label="Pekerja"
++                                value={number(
++                                    report.summary.payroll.employee_count,
++                                    0,
++                                )}
++                            />
++                            <SummaryRow
++                                label="Gaji kasar"
++                                value={money(report.summary.payroll.gross_pay)}
++                            />
++                            <SummaryRow
++                                label="Potongan"
++                                value={money(report.summary.payroll.deductions)}
++                            />
++                            <SummaryRow
++                                label="Caruman majikan"
++                                value={money(
++                                    report.summary.payroll
++                                        .employer_contributions,
++                                )}
++                            />
++                            <div className="flex items-center justify-between border-t pt-3">
++                                <span className="font-medium">Gaji bersih</span>
++                                <span className="font-semibold tabular-nums">
++                                    {money(report.summary.payroll.net_pay)}
++                                </span>
++                            </div>
++                            {report.summary.payroll.run_id !== null && (
++                                <Button
++                                    variant="outline"
++                                    className="w-full"
++                                    asChild
++                                >
++                                    <Link
++                                        href={`/payroll/${report.summary.payroll.run_id}`}
++                                    >
++                                        Buka Payroll
++                                        <ArrowRight className="size-4" />
++                                    </Link>
++                                </Button>
++                            )}
++                        </CardContent>
++                    </Card>
++                </div>
++
++                <Card className="gap-4">
++                    <CardHeader className="flex-row items-start justify-between gap-4">
++                        <div className="space-y-1.5">
++                            <CardTitle>Prestasi Mengikut Jabatan</CardTitle>
++                            <CardDescription>
++                                Perbandingan tenaga kerja, kehadiran, cuti, OT
++                                dan gaji bersih.
++                            </CardDescription>
++                        </div>
++                        <Badge variant="outline" className="shrink-0">
++                            {report.departments.length} jabatan
++                        </Badge>
++                    </CardHeader>
++                    <CardContent>
++                        {report.departments.length > 0 ? (
++                            <div className="overflow-x-auto rounded-lg border">
++                                <table className="w-full text-sm">
++                                    <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
++                                        <tr>
++                                            <th className="px-4 py-3 font-medium">
++                                                Jabatan
++                                            </th>
++                                            <th className="px-4 py-3 text-right font-medium">
++                                                Pekerja
++                                            </th>
++                                            <th className="px-4 py-3 text-right font-medium">
++                                                Kehadiran
++                                            </th>
++                                            <th className="px-4 py-3 text-right font-medium">
++                                                Cuti
++                                            </th>
++                                            <th className="px-4 py-3 text-right font-medium">
++                                                OT
++                                            </th>
++                                            <th className="px-4 py-3 text-right font-medium">
++                                                Gaji Bersih
++                                            </th>
++                                        </tr>
++                                    </thead>
++                                    <tbody>
++                                        {report.departments.map(
++                                            (department) => (
++                                                <tr
++                                                    key={
++                                                        department.department_id ??
++                                                        department.name
++                                                    }
++                                                    className="border-t"
++                                                >
++                                                    <td className="px-4 py-3 font-medium">
++                                                        {department.name}
++                                                    </td>
++                                                    <td className="px-4 py-3 text-right tabular-nums">
++                                                        {number(
++                                                            department.employee_count,
++                                                            0,
++                                                        )}
++                                                    </td>
++                                                    <td className="px-4 py-3 text-right tabular-nums">
++                                                        {number(
++                                                            department.attendance_days,
++                                                            0,
++                                                        )}{' '}
++                                                        hari
++                                                    </td>
++                                                    <td className="px-4 py-3 text-right tabular-nums">
++                                                        {number(
++                                                            department.leave_days,
++                                                        )}{' '}
++                                                        hari
++                                                    </td>
++                                                    <td className="px-4 py-3 text-right tabular-nums">
++                                                        {number(
++                                                            department.overtime_hours,
++                                                        )}{' '}
++                                                        jam
++                                                    </td>
++                                                    <td className="px-4 py-3 text-right font-medium tabular-nums">
++                                                        {money(
++                                                            department.net_pay,
++                                                        )}
++                                                    </td>
++                                                </tr>
++                                            ),
++                                        )}
++                                    </tbody>
++                                </table>
++                            </div>
++                        ) : (
++                            <EmptyState label="Tiada pekerja aktif dalam skop tapisan ini." />
++                        )}
++                    </CardContent>
++                </Card>
++
++                <div className="flex flex-col gap-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
++                    <div className="flex items-center gap-2">
++                        <FileSpreadsheet className="size-4" />
++                        Laporan dijana terus daripada snapshot payroll dan rekod
++                        operasi sistem.
++                    </div>
++                    <span>
++                        <code>db_spp</code> digunakan sebagai sumber rujukan
++                        baca sahaja.
++                    </span>
++                </div>
++            </div>
++        </>
++    );
++}
++
++function TrendBars({
++    title,
++    points,
++    valueKey,
++    fixedMaximum,
++    formatValue,
++    barClassName,
++}: {
++    title: string;
++    points: TrendPoint[];
++    valueKey: 'attendance_rate' | 'overtime_hours';
++    fixedMaximum?: number;
++    formatValue: (value: number) => string;
++    barClassName: string;
++}) {
++    const maximum = useMemo(
++        () =>
++            fixedMaximum ??
++            Math.max(...points.map((point) => point[valueKey]), 1),
++        [fixedMaximum, points, valueKey],
++    );
++
++    return (
++        <div className="space-y-3">
++            <p className="text-sm font-medium">{title}</p>
++            <div className="grid h-52 grid-cols-6 items-end gap-2 border-b">
++                {points.map((point) => {
++                    const value = point[valueKey];
++                    const height =
++                        value > 0
++                            ? Math.max(
++                                  4,
++                                  Math.min(100, (value / maximum) * 100),
++                              )
++                            : 0;
++
++                    return (
++                        <div
++                            key={`${title}-${point.period}`}
++                            className="flex h-full min-w-0 flex-col justify-end gap-2"
++                        >
++                            <span className="truncate text-center text-[10px] font-medium tabular-nums">
++                                {formatValue(value)}
++                            </span>
++                            <div className="flex h-36 items-end justify-center rounded-t bg-muted/30 px-1">
++                                <div
++                                    className={`w-full max-w-10 rounded-t transition-all ${barClassName}`}
++                                    style={{ height: `${height}%` }}
++                                />
++                            </div>
++                            <span className="truncate pb-2 text-center text-[10px] text-muted-foreground">
++                                {point.label}
++                            </span>
++                        </div>
++                    );
++                })}
++            </div>
++        </div>
++    );
++}
++
++function InsightItem({ insight }: { insight: Insight }) {
++    const config = {
++        success: {
++            icon: CheckCircle2,
++            className:
++                'border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300',
++        },
++        warning: {
++            icon: AlertTriangle,
++            className:
++                'border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300',
++        },
++        info: {
++            icon: Info,
++            className:
++                'border-blue-500/30 bg-blue-500/5 text-blue-700 dark:text-blue-300',
++        },
++    }[insight.level];
++    const Icon = config.icon;
++
++    return (
++        <div className={`flex gap-3 rounded-lg border p-3 ${config.className}`}>
++            <Icon className="mt-0.5 size-4 shrink-0" />
++            <div>
++                <p className="text-sm font-medium">{insight.title}</p>
++                <p className="mt-0.5 text-xs opacity-80">{insight.message}</p>
++            </div>
++        </div>
++    );
++}
++
++function BreakdownCard({
++    title,
++    description,
++    items,
++    valueKey,
++    unit,
++    emptyLabel,
++}: {
++    title: string;
++    description: string;
++    items: Breakdown[];
++    valueKey: 'days' | 'hours';
++    unit: string;
++    emptyLabel: string;
++}) {
++    const maximum = Math.max(...items.map((item) => item[valueKey] ?? 0), 1);
++
++    return (
++        <Card className="gap-4">
++            <CardHeader>
++                <CardTitle>{title}</CardTitle>
++                <CardDescription>{description}</CardDescription>
++            </CardHeader>
++            <CardContent className="space-y-4">
++                {items.length > 0 ? (
++                    items.map((item) => {
++                        const value = item[valueKey] ?? 0;
++
++                        return (
++                            <div key={item.name} className="space-y-1.5">
++                                <div className="flex justify-between gap-3 text-sm">
++                                    <span className="truncate">
++                                        {item.name}
++                                    </span>
++                                    <span className="shrink-0 font-medium tabular-nums">
++                                        {number(value)} {unit}
++                                    </span>
++                                </div>
++                                <div className="h-2 overflow-hidden rounded-full bg-muted">
++                                    <div
++                                        className="h-full rounded-full bg-primary"
++                                        style={{
++                                            width: `${(value / maximum) * 100}%`,
++                                        }}
++                                    />
++                                </div>
++                            </div>
++                        );
++                    })
++                ) : (
++                    <EmptyState label={emptyLabel} />
++                )}
++            </CardContent>
++        </Card>
++    );
++}
++
++function SummaryRow({ label, value }: { label: string; value: string }) {
++    return (
++        <div className="flex items-center justify-between gap-4 text-sm">
++            <span className="text-muted-foreground">{label}</span>
++            <span className="text-right font-medium tabular-nums">{value}</span>
++        </div>
++    );
++}
++
++function EmptyState({ label }: { label: string }) {
++    return (
++        <div className="py-8 text-center text-sm text-muted-foreground">
++            {label}
++        </div>
++    );
++}
++
++MonthlyReportsIndex.layout = {
++    breadcrumbs: [
++        {
++            title: 'Laporan Bulanan',
++            href: '/laporan-bulanan',
++        },
++    ],
++};
+diff --git a/resources/js/pages/ReportBulanan/Index.tsx b/resources/js/pages/ReportBulanan/Index.tsx
+index d8be31f8e713b5c58645dc72d8adfe380bbd7525..2008285928a6c9b1f043879795534bd4ebea0d65 100644
+--- a/resources/js/pages/ReportBulanan/Index.tsx
++++ b/resources/js/pages/ReportBulanan/Index.tsx
+@@ -5,9 +5,10 @@ import type {
+ } from '@/components/records-index';
+ 
+ const config: RecordPageConfig = {
+-    title: 'Laporan Bulanan',
+-    description: 'Laporan bulanan yang direkodkan oleh pekerja.',
+-    routePath: '/laporan-bulanan',
++    title: 'Laporan Asal',
++    description:
++        'Rekod laporan bulanan lama daripada db_spp untuk rujukan sahaja.',
++    routePath: '/laporan-bulanan-asal',
+     searchPlaceholder: 'Cari nama, ID atau kandungan laporan...',
+     columns: [
+         { key: 'employee_id', label: 'ID Pekerja' },
+@@ -23,5 +24,5 @@ export default function LaporanBulananIndex(props: RecordsIndexPageProps) {
+ }
+ 
+ LaporanBulananIndex.layout = {
+-    breadcrumbs: [{ title: 'Laporan Bulanan', href: '/laporan-bulanan' }],
++    breadcrumbs: [{ title: 'Laporan Asal', href: '/laporan-bulanan-asal' }],
+ };
+diff --git a/resources/js/pages/dashboard.tsx b/resources/js/pages/dashboard.tsx
+index e6ee39d2461cf6f71d19c55dc8d9781ecdf34f61..715451c8342afc78421110189e910a588dac1d47 100644
+--- a/resources/js/pages/dashboard.tsx
++++ b/resources/js/pages/dashboard.tsx
+@@ -5,9 +5,11 @@ import {
+     BriefcaseBusiness,
+     CalendarCheck2,
+     CalendarDays,
++    CircleAlert,
+     Clock3,
+     Database,
+     FileText,
++    TrendingUp,
+     UsersRound,
+ } from 'lucide-react';
+ import type { LucideIcon } from 'lucide-react';
+@@ -57,6 +59,27 @@ type DashboardProps = {
+     statistics: Statistics;
+     recentAttendance: AttendanceRecord[];
+     recentLeave: LeaveRecord[];
++    executiveOverview: ExecutiveOverview | null;
++};
++
++type ExecutiveOverview = {
++    period: string;
++    period_label: string;
++    summary: {
++        attendance_rate: number;
++        leave_days: number;
++        overtime_hours: number;
++        pending_actions: number;
++        payroll: {
++            status: string;
++            net_pay: number;
++        };
++    };
++    insights: {
++        level: 'success' | 'warning' | 'info';
++        title: string;
++        message: string;
++    }[];
+ };
+ 
+ type StatisticCard = {
+@@ -167,10 +190,27 @@ function employeeLabel(
+     return employeeName || employeeId || 'Pekerja tidak dikenal pasti';
+ }
+ 
++function formatMoney(value: number): string {
++    return new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++        maximumFractionDigits: 2,
++    }).format(value);
++}
++
++const payrollStatusLabels: Record<string, string> = {
++    not_generated: 'Belum dijana',
++    draft: 'Draf',
++    hr_reviewed: 'Disemak HR',
++    approved: 'Diluluskan',
++    finalized: 'Dimuktamadkan',
++};
++
+ export default function Dashboard({
+     statistics,
+     recentAttendance,
+     recentLeave,
++    executiveOverview,
+ }: DashboardProps) {
+     const { auth } = usePage<{ auth: Auth }>().props;
+     const visibleStatisticCards = statisticCards.filter((card) =>
+@@ -236,6 +276,90 @@ export default function Dashboard({
+                     })}
+                 </div>
+ 
++                {executiveOverview && (
++                    <Card className="gap-5 overflow-hidden">
++                        <CardHeader className="flex-row items-start justify-between gap-4 border-b bg-muted/20">
++                            <div className="space-y-1.5">
++                                <CardTitle className="flex items-center gap-2">
++                                    <TrendingUp className="size-5 text-primary" />
++                                    Ringkasan Eksekutif
++                                </CardTitle>
++                                <CardDescription>
++                                    Prestasi operasi bagi{' '}
++                                    {executiveOverview.period_label}.
++                                </CardDescription>
++                            </div>
++                            <Link
++                                href={`/laporan-bulanan?period=${executiveOverview.period}`}
++                                className="flex shrink-0 items-center gap-1 text-sm font-medium text-primary hover:underline"
++                            >
++                                Laporan penuh
++                                <ArrowRight className="size-4" />
++                            </Link>
++                        </CardHeader>
++                        <CardContent className="space-y-5">
++                            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
++                                <ExecutiveMetric
++                                    label="Kadar Kehadiran"
++                                    value={`${executiveOverview.summary.attendance_rate.toLocaleString('ms-MY')}%`}
++                                    detail="Hari bekerja direkodkan"
++                                />
++                                <ExecutiveMetric
++                                    label="Cuti Diluluskan"
++                                    value={`${executiveOverview.summary.leave_days.toLocaleString('ms-MY')} hari`}
++                                    detail="Dalam bulan dipilih"
++                                />
++                                <ExecutiveMetric
++                                    label="OT Diluluskan"
++                                    value={`${executiveOverview.summary.overtime_hours.toLocaleString('ms-MY')} jam`}
++                                    detail="Jumlah jam disahkan"
++                                />
++                                <ExecutiveMetric
++                                    label="Gaji Bersih"
++                                    value={formatMoney(
++                                        executiveOverview.summary.payroll
++                                            .net_pay,
++                                    )}
++                                    detail={
++                                        payrollStatusLabels[
++                                            executiveOverview.summary.payroll
++                                                .status
++                                        ] ??
++                                        executiveOverview.summary.payroll.status
++                                    }
++                                />
++                                <ExecutiveMetric
++                                    label="Menunggu Tindakan"
++                                    value={executiveOverview.summary.pending_actions.toLocaleString(
++                                        'ms-MY',
++                                    )}
++                                    detail="Permohonan cuti dan OT"
++                                />
++                            </div>
++
++                            {executiveOverview.insights[0] && (
++                                <div className="flex gap-3 rounded-lg border bg-muted/20 p-3">
++                                    <CircleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
++                                    <div>
++                                        <p className="text-sm font-medium">
++                                            {
++                                                executiveOverview.insights[0]
++                                                    .title
++                                            }
++                                        </p>
++                                        <p className="text-xs text-muted-foreground">
++                                            {
++                                                executiveOverview.insights[0]
++                                                    .message
++                                            }
++                                        </p>
++                                    </div>
++                                </div>
++                            )}
++                        </CardContent>
++                    </Card>
++                )}
++
+                 <div className="grid gap-6 xl:grid-cols-2">
+                     <Card className="gap-4">
+                         <CardHeader className="flex-row items-center justify-between">
+@@ -363,6 +487,26 @@ export default function Dashboard({
+     );
+ }
+ 
++function ExecutiveMetric({
++    label,
++    value,
++    detail,
++}: {
++    label: string;
++    value: string;
++    detail: string;
++}) {
++    return (
++        <div className="rounded-lg border bg-background p-3">
++            <p className="text-xs font-medium text-muted-foreground">{label}</p>
++            <p className="mt-1 truncate text-xl font-semibold tabular-nums">
++                {value}
++            </p>
++            <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
++        </div>
++    );
++}
++
+ Dashboard.layout = {
+     breadcrumbs: [
+         {
+diff --git a/routes/web.php b/routes/web.php
+index 5b89942c653b13ed219549d569082f1d091191b8..230a894d036f651e472526e09229343c13ee35fd 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -243,6 +243,12 @@
+     Route::get('laporan-bulanan', [ReportBulananController::class, 'index'])
+         ->middleware('permission:reports.view')
+         ->name('laporan-bulanan.index');
++    Route::get('laporan-bulanan/laporan.csv', [ReportBulananController::class, 'export'])
++        ->middleware('permission:reports.view')
++        ->name('laporan-bulanan.export');
++    Route::get('laporan-bulanan-asal', [ReportBulananController::class, 'legacy'])
++        ->middleware('permission:reports.view')
++        ->name('laporan-bulanan.legacy');
+ 
+     Route::get('audit-trail', [AuditTrailController::class, 'index'])
+         ->middleware('permission:audit.view')
+diff --git a/tests/Feature/MonthlyExecutiveReportTest.php b/tests/Feature/MonthlyExecutiveReportTest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..49de47e6891cc672bdd69e730bd24338dc8ea005
+--- /dev/null
++++ b/tests/Feature/MonthlyExecutiveReportTest.php
+@@ -0,0 +1,347 @@
++<?php
++
++use App\Models\EmployeeLeaveRequest;
++use App\Models\EmployeeUserLink;
++use App\Models\GeoAttendanceRecord;
++use App\Models\LeaveType;
++use App\Models\OfficeLocation;
++use App\Models\OvertimeRequest;
++use App\Models\OvertimeType;
++use App\Models\PayrollEntry;
++use App\Models\PayrollRun;
++use App\Models\PayrollStatutorySnapshot;
++use App\Models\User;
++use Illuminate\Database\Events\QueryExecuted;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Event;
++use Illuminate\Support\Facades\Schema;
++use Inertia\Testing\AssertableInertia as Assert;
++
++uses(RefreshDatabase::class);
++
++beforeEach(function () {
++    Carbon::setTestNow('2026-07-30 10:00:00');
++
++    config()->set('database.connections.ibco', [
++        'driver' => 'sqlite',
++        'database' => ':memory:',
++        'prefix' => '',
++        'foreign_key_constraints' => true,
++    ]);
++    DB::purge('ibco');
++
++    Schema::connection('ibco')->create('maklumatpekerja', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->string('employeeID', 30)->nullable();
++        $table->string('nama')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('maklumatjawatan', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->integer('id_department')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('xdepartment', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->string('description')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('reportbulanan', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->date('date_mula');
++        $table->date('date_akhir');
++        $table->text('laporan')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('maklumatcuti', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->integer('jenis_cuti')->nullable();
++        $table->integer('status_permohonan')->nullable();
++        $table->date('date_mulacuti')->nullable();
++        $table->date('date_tamatcuti')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++    Schema::connection('ibco')->create('xsenaraicuti', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->string('description')->nullable();
++    });
++    Schema::connection('ibco')->create('xstatuscuti', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->string('description')->nullable();
++    });
++    Schema::connection('ibco')->create('maklumatot', function (
++        Blueprint $table,
++    ) {
++        $table->increments('id');
++        $table->integer('id_pekerja')->nullable();
++        $table->boolean('rcd_enable')->default(true);
++    });
++
++    DB::connection('ibco')->table('xdepartment')->insert([
++        'id' => 1,
++        'description' => 'Teknologi Maklumat',
++        'rcd_enable' => 1,
++    ]);
++});
++
++afterEach(function () {
++    Carbon::setTestNow();
++    DB::disconnect('ibco');
++});
++
++function createMonthlyReportEmployee(User $user): int
++{
++    $employeeId = DB::connection('ibco')->table('maklumatpekerja')->insertGetId([
++        'employeeID' => 'EMP-RPT-'.$user->getKey(),
++        'nama' => 'Pekerja Laporan',
++        'rcd_enable' => 1,
++    ]);
++    DB::connection('ibco')->table('maklumatjawatan')->insert([
++        'id_pekerja' => $employeeId,
++        'id_department' => 1,
++        'rcd_enable' => 1,
++    ]);
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO Solutions HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.139,
++        'longitude' => 101.6869,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++    EmployeeUserLink::query()->create([
++        'user_id' => $user->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $office->getKey(),
++        'is_active' => true,
++    ]);
++
++    return $employeeId;
++}
++
++function seedMonthlyReportOperations(
++    int $employeeId,
++    User $employeeUser,
++    User $hrAdmin,
++): PayrollRun {
++    $officeId = EmployeeUserLink::query()
++        ->where('user_id', $employeeUser->getKey())
++        ->value('office_location_id');
++    GeoAttendanceRecord::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'office_location_id' => $officeId,
++        'attendance_date' => '2026-07-14',
++        'clock_in_at' => '2026-07-14 09:00:00',
++        'clock_out_at' => '2026-07-14 18:00:00',
++        'source' => 'geolocation',
++        'status' => 'active',
++    ]);
++    $leaveType = LeaveType::query()->where('code', 'ANNUAL')->firstOrFail();
++    EmployeeLeaveRequest::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'department_id' => 1,
++        'leave_type_id' => $leaveType->getKey(),
++        'system_leave_type_id' => $leaveType->getKey(),
++        'leave_type_label' => $leaveType->name,
++        'start_date' => '2026-07-15',
++        'end_date' => '2026-07-15',
++        'duration_type' => 'full_day',
++        'requested_days' => 1,
++        'reason' => 'Urusan keluarga',
++        'status' => 'approved',
++        'approval_stage' => 'completed',
++        'submitted_at' => now(),
++        'reviewed_at' => now(),
++        'reviewed_by' => $hrAdmin->getKey(),
++    ]);
++    $overtimeType = OvertimeType::query()
++        ->where('code', 'WEEKDAY')
++        ->firstOrFail();
++    OvertimeRequest::query()->create([
++        'user_id' => $employeeUser->getKey(),
++        'employee_id' => $employeeId,
++        'department_id' => 1,
++        'overtime_type_id' => $overtimeType->getKey(),
++        'work_date' => '2026-07-16',
++        'start_at' => '2026-07-16 18:00:00',
++        'end_at' => '2026-07-16 20:00:00',
++        'break_minutes' => 0,
++        'requested_minutes' => 120,
++        'approved_minutes' => 120,
++        'attendance_match_status' => 'matched',
++        'reason' => 'Penutupan sistem',
++        'work_description' => 'Menyiapkan laporan operasi.',
++        'status' => 'approved',
++        'approval_stage' => 'completed',
++        'submitted_at' => now(),
++        'reviewed_at' => now(),
++        'reviewed_by' => $hrAdmin->getKey(),
++    ]);
++    $run = PayrollRun::query()->create([
++        'period_start' => '2026-07-01',
++        'status' => 'finalized',
++        'currency' => 'MYR',
++        'employee_count' => 1,
++        'total_basic_salary' => 3000,
++        'total_earnings' => 3200,
++        'total_deductions' => 450,
++        'total_net_pay' => 2750,
++        'total_employee_statutory' => 400,
++        'total_employer_statutory' => 500,
++        'total_pcb' => 50,
++        'generated_at' => now(),
++        'generated_by' => $hrAdmin->getKey(),
++        'finalized_at' => now(),
++        'finalized_by' => $hrAdmin->getKey(),
++    ]);
++    $entry = PayrollEntry::query()->create([
++        'payroll_run_id' => $run->getKey(),
++        'employee_id' => $employeeId,
++        'employee_number' => 'EMP-RPT-'.$employeeUser->getKey(),
++        'employee_name' => 'Pekerja Laporan',
++        'basic_salary' => 3000,
++        'overtime_minutes' => 120,
++        'overtime_amount' => 100,
++        'unpaid_leave_days' => 0,
++        'unpaid_leave_amount' => 0,
++        'recurring_earnings' => 100,
++        'recurring_deductions' => 0,
++        'manual_earnings' => 0,
++        'manual_deductions' => 0,
++        'gross_pay' => 3200,
++        'total_deductions' => 450,
++        'net_pay' => 2750,
++        'calculated_at' => now(),
++    ]);
++    PayrollStatutorySnapshot::query()->create([
++        'payroll_entry_id' => $entry->getKey(),
++        'kwsp_category' => 'citizen_below_60',
++        'socso_category' => 'first',
++        'eis_enabled' => true,
++        'total_employee_deductions' => 400,
++        'total_employer_contributions' => 500,
++        'rate_version' => 'Ujian Julai 2026',
++        'calculated_at' => now(),
++    ]);
++
++    return $run;
++}
++
++test('monthly executive report combines operations and exports csv using db_spp as select only', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createMonthlyReportEmployee($employeeUser);
++    seedMonthlyReportOperations($employeeId, $employeeUser, $hrAdmin);
++    $ibcoQueries = [];
++    Event::listen(QueryExecuted::class, function (QueryExecuted $query) use (
++        &$ibcoQueries,
++    ) {
++        if ($query->connectionName === 'ibco') {
++            $ibcoQueries[] = strtolower(ltrim($query->sql));
++        }
++    });
++
++    $this->actingAs($hrAdmin)
++        ->get(route('laporan-bulanan.index', ['period' => '2026-07']))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('MonthlyReports/Index')
++            ->where('report.period', '2026-07')
++            ->where('report.summary.active_employees', 1)
++            ->where('report.summary.attendance_days', 1)
++            ->where('report.summary.leave_days', 1)
++            ->where('report.summary.overtime_hours', 2)
++            ->where('report.summary.payroll.status', 'finalized')
++            ->where('report.summary.payroll.net_pay', 2750)
++            ->has('report.departments', 1)
++            ->has('report.trend', 6));
++
++    $this->actingAs($hrAdmin)
++        ->get(route('laporan-bulanan.export', ['period' => '2026-07']))
++        ->assertOk()
++        ->assertHeader('content-type', 'text/csv; charset=UTF-8');
++
++    expect($ibcoQueries)->not->toBeEmpty();
++    expect($ibcoQueries)->each->toStartWith('select');
++    $this->assertDatabaseHas('audit_logs', [
++        'action' => 'report.monthly_exported',
++        'auditable_id' => '2026-07',
++    ]);
++});
++
++test('dashboard exposes executive overview only to report roles', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createMonthlyReportEmployee($employeeUser);
++    seedMonthlyReportOperations($employeeId, $employeeUser, $hrAdmin);
++
++    $this->actingAs($hrAdmin)
++        ->get(route('dashboard'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('dashboard')
++            ->where('executiveOverview.period', '2026-07')
++            ->where(
++                'executiveOverview.summary.payroll.status',
++                'finalized',
++            ));
++
++    $viewer = User::factory()->create();
++    $this->actingAs($viewer)
++        ->get(route('dashboard'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('dashboard')
++            ->where('executiveOverview', null));
++});
++
++test('legacy monthly reports remain read only and unauthorized roles cannot access executive report', function () {
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $employeeUser = User::factory()->employee()->create();
++    $employeeId = createMonthlyReportEmployee($employeeUser);
++    DB::connection('ibco')->table('reportbulanan')->insert([
++        'id_pekerja' => $employeeId,
++        'date_mula' => '2026-07-01',
++        'date_akhir' => '2026-07-31',
++        'laporan' => 'Laporan operasi lama',
++        'rcd_enable' => 1,
++    ]);
++
++    $this->actingAs($hrAdmin)
++        ->get(route('laporan-bulanan.legacy'))
++        ->assertOk()
++        ->assertInertia(fn (Assert $page) => $page
++            ->component('ReportBulanan/Index')
++            ->has('records.data', 1));
++
++    $viewer = User::factory()->create();
++    $this->actingAs($viewer)
++        ->get(route('laporan-bulanan.index'))
++        ->assertForbidden();
++    $this->actingAs($viewer)
++        ->get(route('laporan-bulanan.export'))
++        ->assertForbidden();
++});
