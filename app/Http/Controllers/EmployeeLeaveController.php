@@ -45,11 +45,17 @@ class EmployeeLeaveController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'id' => $link->employee_id,
+                'employee_id' => $link->employeeRecord->employee_number,
+                'name' => $link->employeeRecord->name,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['id', 'employeeID as employee_id', 'nama as name']);
 
         $leaveTypes = LeaveType::query()
             ->where('is_active', true)
@@ -89,20 +95,24 @@ class EmployeeLeaveController extends Controller
             })
             ->values();
 
-        $leaveEntitlement = DB::connection('ibco')
-            ->table('maklumatjawatan')
-            ->where('id_pekerja', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->orderByDesc('id')
-            ->value('jumlahcuti');
+        $leaveEntitlement = $link->employee_source === 'local'
+            ? null
+            : DB::connection('ibco')
+                ->table('maklumatjawatan')
+                ->where('id_pekerja', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->orderByDesc('id')
+                ->value('jumlahcuti');
 
-        $legacyBalance = DB::connection('ibco')
-            ->table('maklumatcuti')
-            ->where('id_pekerja', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->where('tahun', (string) now()->year)
-            ->orderByDesc('id')
-            ->value('bakicuti');
+        $legacyBalance = $link->employee_source === 'local'
+            ? null
+            : DB::connection('ibco')
+                ->table('maklumatcuti')
+                ->where('id_pekerja', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->where('tahun', (string) now()->year)
+                ->orderByDesc('id')
+                ->value('bakicuti');
 
         $requests = EmployeeLeaveRequest::query()
             ->where('employee_id', $link->employee_id)
@@ -112,7 +122,9 @@ class EmployeeLeaveController extends Controller
             ->get()
             ->map(fn (EmployeeLeaveRequest $leave) => $this->requestPayload($leave));
 
-        $legacyLeave = DB::connection('ibco')
+        $legacyLeave = $link->employee_source === 'local'
+            ? collect()
+            : DB::connection('ibco')
             ->table('maklumatcuti as leave')
             ->leftJoin('xsenaraicuti as type', 'leave.jenis_cuti', '=', 'type.id')
             ->leftJoin('xstatuscuti as status', 'leave.status_permohonan', '=', 'status.id')
@@ -179,11 +191,13 @@ class EmployeeLeaveController extends Controller
             ]);
         }
 
-        $employeeExists = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->exists();
+        $employeeExists = $link->employee_source === 'local'
+            ? $link->employeeRecord !== null
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->exists();
 
         if (! $employeeExists) {
             throw ValidationException::withMessages([
@@ -518,6 +532,7 @@ class EmployeeLeaveController extends Controller
     private function activeLink(Request $request): ?EmployeeUserLink
     {
         return EmployeeUserLink::query()
+            ->with('employeeRecord')
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
@@ -525,6 +540,14 @@ class EmployeeLeaveController extends Controller
 
     private function employeeDepartmentId(int $employeeId): ?int
     {
+        $localDepartmentId = \App\Models\EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->value('department_id');
+
+        if ($localDepartmentId !== null) {
+            return (int) $localDepartmentId;
+        }
+
         $departmentId = DB::connection('ibco')
             ->table('maklumatjawatan')
             ->where('id_pekerja', $employeeId)

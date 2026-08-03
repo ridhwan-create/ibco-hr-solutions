@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\EmployeeRecord;
 use App\Http\Requests\ReviewOvertimeRequest;
 use App\Models\OvertimeApprovalAssignment;
 use App\Models\OvertimeNotification;
@@ -99,6 +100,7 @@ class OvertimeRequestController extends Controller
             'permissions' => [
                 'can_supervise' => $request->user()->hasPermission('overtime.supervise'),
                 'can_manage' => $request->user()->hasPermission('overtime.manage'),
+                'can_approve' => $request->user()->hasPermission('overtime.approve'),
             ],
         ]);
     }
@@ -162,7 +164,7 @@ class OvertimeRequestController extends Controller
                     ? 'Permohonan OT disokong penyelia'
                     : 'Permohonan OT ditolak penyelia',
                 'message' => $supported
-                    ? 'Permohonan OT anda telah dihantar kepada HR untuk kelulusan akhir.'
+                    ? 'Permohonan OT anda telah dihantar kepada Pengurus HR untuk kelulusan akhir.'
                     : 'Permohonan OT anda tidak disokong oleh penyelia.',
             ]);
 
@@ -188,7 +190,7 @@ class OvertimeRequestController extends Controller
         return back()->with('toast', [
             'type' => 'success',
             'message' => $overtimeRequest->status === 'pending'
-                ? 'Permohonan OT disokong dan dihantar kepada HR.'
+                ? 'Permohonan OT disokong dan dihantar kepada Pengurus HR.'
                 : 'Permohonan OT telah ditolak.',
         ]);
     }
@@ -212,6 +214,12 @@ class OvertimeRequestController extends Controller
             ) {
                 throw ValidationException::withMessages([
                     'status' => 'Permohonan ini belum sampai ke peringkat HR atau telah selesai.',
+                ]);
+            }
+
+            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
+                throw ValidationException::withMessages([
+                    'status' => 'Anda tidak boleh meluluskan permohonan OT sendiri.',
                 ]);
             }
 
@@ -247,7 +255,7 @@ class OvertimeRequestController extends Controller
                     ? 'Permohonan OT diluluskan'
                     : 'Permohonan OT ditolak',
                 'message' => $approved
-                    ? 'HR meluluskan '.number_format($approvedMinutes / 60, 2).' jam OT anda.'
+                    ? 'Pengurus HR meluluskan '.number_format($approvedMinutes / 60, 2).' jam OT anda.'
                     : 'HR telah menolak permohonan OT anda.',
             ]);
 
@@ -283,7 +291,7 @@ class OvertimeRequestController extends Controller
         Request $request,
         OvertimeRequest $overtimeRequest,
     ): RedirectResponse {
-        abort_unless($request->user()->hasPermission('overtime.manage'), 403);
+        abort_unless($request->user()->hasPermission('overtime.approve'), 403);
         $validated = $request->validate([
             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
         ]);
@@ -291,6 +299,12 @@ class OvertimeRequestController extends Controller
         if ($overtimeRequest->status !== 'approved') {
             throw ValidationException::withMessages([
                 'cancellation_notes' => 'Hanya OT yang telah diluluskan boleh dibatalkan oleh HR.',
+            ]);
+        }
+
+        if ((int) $overtimeRequest->user_id === (int) $request->user()->getAuthIdentifier()) {
+            throw ValidationException::withMessages([
+                'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan OT sendiri.',
             ]);
         }
 
@@ -334,6 +348,7 @@ class OvertimeRequestController extends Controller
     {
         abort_unless(
             $request->user()->hasPermission('overtime.manage')
+                || $request->user()->hasPermission('overtime.approve')
                 || $request->user()->hasPermission('overtime.supervise'),
             403,
         );
@@ -477,7 +492,10 @@ class OvertimeRequestController extends Controller
     {
         $query = OvertimeRequest::query();
 
-        if ($request->user()->hasPermission('overtime.manage')) {
+        if (
+            $request->user()->hasPermission('overtime.manage')
+            || $request->user()->hasPermission('overtime.approve')
+        ) {
             return $query;
         }
 
@@ -544,7 +562,7 @@ class OvertimeRequestController extends Controller
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->whereIn('id', $employeeIds)
             ->get(['id', 'employeeID', 'nama'])
@@ -556,6 +574,19 @@ class OvertimeRequestController extends Controller
                 ],
             ])
             ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', $employeeIds)
+            ->get()
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => [
+                    'id' => $employee->directory_id,
+                    'employee_id' => $employee->employee_number,
+                    'name' => $employee->name,
+                ],
+            ])
+            ->all();
+
+        return $legacy + $local;
     }
 
     /**
@@ -576,6 +607,16 @@ class OvertimeRequestController extends Controller
             })
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
+            ->concat(
+                EmployeeRecord::query()
+                    ->whereIn('status', ['pending_activation', 'active'])
+                    ->where(function ($query) use ($search) {
+                        $query->where('name', 'like', "%{$search}%")
+                            ->orWhere('employee_number', 'like', "%{$search}%");
+                    })
+                    ->pluck('directory_id'),
+            )
+            ->unique()
             ->all();
     }
 

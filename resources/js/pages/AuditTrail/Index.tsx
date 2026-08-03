@@ -76,7 +76,11 @@ type AuditRecord = {
         | 'employee_user_links'
         | 'users'
         | 'employee_personal_profiles'
-        | 'employee_leave_requests';
+        | 'employee_leave_requests'
+        | 'document_templates'
+        | 'document_sequences'
+        | 'hr_documents'
+        | 'hr_document_attachments';
     auditable_id: string;
     employee: AuditEmployee | null;
     user: AuditActor | null;

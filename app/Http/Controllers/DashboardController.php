@@ -3,8 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Enums\UserRole;
-use App\Models\GeoAttendanceRecord;
 use App\Models\ClaimRequest;
+use App\Models\EmployeeRecord;
+use App\Models\GeoAttendanceRecord;
 use App\Models\PayrollRun;
 use App\Models\PerformanceReview;
 use App\Support\MonthlyHrReportBuilder;
@@ -44,6 +45,12 @@ class DashboardController extends Controller
             }
         }
 
+        if (array_key_exists('pekerja', $statistics)) {
+            $statistics['pekerja'] += EmployeeRecord::query()
+                ->where('status', 'active')
+                ->count();
+        }
+
         if ($user->hasPermission('payroll.view')) {
             $statistics['payroll'] = PayrollRun::query()->count();
         }
@@ -73,6 +80,16 @@ class DashboardController extends Controller
                 ->whereIn('id', $geoAttendance->pluck('employee_id'))
                 ->get(['id', 'employeeID', 'nama'])
                 ->keyBy(fn ($employee) => (string) $employee->id);
+            $localEmployees = EmployeeRecord::query()
+                ->whereIn('directory_id', $geoAttendance->pluck('employee_id'))
+                ->get()
+                ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                    (string) $employee->directory_id => (object) [
+                        'employeeID' => $employee->employee_number,
+                        'nama' => $employee->name,
+                    ],
+                ]);
+            $employees = $employees->union($localEmployees);
 
             $recentAttendance = $geoAttendance->map(function (
                 GeoAttendanceRecord $record,

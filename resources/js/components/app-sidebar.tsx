@@ -6,20 +6,29 @@ import {
     CalendarClock,
     CalendarDays,
     Clock3,
+    ClipboardCheck,
     Database,
+    FileCog,
     FileText,
+    Files,
     FolderGit2,
+    GraduationCap,
     History,
     IdCard,
     LayoutGrid,
+    ListChecks,
+    LogOut,
     MapPinned,
+    MessageSquareWarning,
     Navigation,
     ReceiptText,
     ShieldCheck,
+    ShieldAlert,
     SlidersHorizontal,
     Target,
     TrendingUp,
     TimerReset,
+    UserPlus,
     UserRoundCheck,
     UsersRound,
 } from 'lucide-react';
@@ -139,6 +148,65 @@ const selfServiceNavItems: AuthorizedNavItem[] = [
             'bg-emerald-100 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-800',
         permission: 'performance.self',
     },
+    {
+        title: 'Onboarding Saya',
+        href: '/onboarding-saya',
+        icon: ListChecks,
+        iconClassName:
+            'bg-cyan-100 text-cyan-700 ring-cyan-200 dark:bg-cyan-950 dark:text-cyan-300 dark:ring-cyan-800',
+        permission: 'onboarding.self',
+    },
+    {
+        title: 'Latihan Saya',
+        href: '/latihan-saya',
+        icon: GraduationCap,
+        iconClassName:
+            'bg-indigo-100 text-indigo-700 ring-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-800',
+        permission: 'training.self',
+    },
+    {
+        title: 'Dokumen Saya',
+        href: '/dokumen-saya',
+        icon: Files,
+        iconClassName:
+            'bg-rose-100 text-rose-700 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-800',
+        permission: 'documents.self',
+    },
+    {
+        title: 'Aduan Saya',
+        href: '/aduan-saya',
+        icon: MessageSquareWarning,
+        iconClassName:
+            'bg-red-100 text-red-700 ring-red-200 dark:bg-red-950 dark:text-red-300 dark:ring-red-800',
+        permission: 'discipline.self',
+    },
+    {
+        title: 'Pengakhiran Saya',
+        href: '/pengakhiran-saya',
+        icon: LogOut,
+        iconClassName:
+            'bg-orange-100 text-orange-700 ring-orange-200 dark:bg-orange-950 dark:text-orange-300 dark:ring-orange-800',
+        permission: 'separation.self',
+    },
+];
+
+const recruitmentNavItems: AuthorizedNavItem[] = [
+    {
+        title: 'Pengambilan',
+        href: '/pengambilan',
+        icon: UserPlus,
+        iconClassName:
+            'bg-pink-100 text-pink-700 ring-pink-200 dark:bg-pink-950 dark:text-pink-300 dark:ring-pink-800',
+        permission: 'recruitment.view',
+    },
+    {
+        title: 'Onboarding',
+        href: '/onboarding',
+        icon: ListChecks,
+        iconClassName:
+            'bg-cyan-100 text-cyan-700 ring-cyan-200 dark:bg-cyan-950 dark:text-cyan-300 dark:ring-cyan-800',
+        permission: 'onboarding.view',
+    },
 ];
 
 const performanceNavItems: AuthorizedNavItem[] = [
@@ -149,6 +217,50 @@ const performanceNavItems: AuthorizedNavItem[] = [
         iconClassName:
             'bg-emerald-100 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-800',
         permission: ['performance.view', 'performance.supervise'],
+    },
+];
+
+const trainingNavItems: AuthorizedNavItem[] = [
+    {
+        title: 'Latihan & Kompetensi',
+        href: '/latihan-kompetensi',
+        icon: GraduationCap,
+        iconClassName:
+            'bg-indigo-100 text-indigo-700 ring-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-800',
+        permission: 'training.view',
+    },
+];
+
+const documentNavItems: AuthorizedNavItem[] = [
+    {
+        title: 'Dokumen & Surat HR',
+        href: '/dokumen-hr',
+        icon: Files,
+        iconClassName:
+            'bg-rose-100 text-rose-700 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-800',
+        permission: 'documents.view',
+    },
+];
+
+const disciplineNavItems: AuthorizedNavItem[] = [
+    {
+        title: 'Disiplin & Aduan',
+        href: '/disiplin-aduan',
+        icon: ShieldAlert,
+        iconClassName:
+            'bg-red-100 text-red-700 ring-red-200 dark:bg-red-950 dark:text-red-300 dark:ring-red-800',
+        permission: 'discipline.view',
+    },
+];
+
+const separationNavItems: AuthorizedNavItem[] = [
+    {
+        title: 'Berhenti & Clearance',
+        href: '/berhenti-clearance',
+        icon: ClipboardCheck,
+        iconClassName:
+            'bg-orange-100 text-orange-700 ring-orange-200 dark:bg-orange-950 dark:text-orange-300 dark:ring-orange-800',
+        permission: 'separation.view',
     },
 ];
 
@@ -320,6 +432,46 @@ const administrationNavItems: AuthorizedNavItem[] = [
         permission: 'performance.settings',
     },
     {
+        title: 'Tetapan Pengambilan',
+        href: '/tetapan-pengambilan',
+        icon: UserPlus,
+        iconClassName:
+            'bg-pink-100 text-pink-700 ring-pink-200 dark:bg-pink-950 dark:text-pink-300 dark:ring-pink-800',
+        permission: 'recruitment.settings',
+    },
+    {
+        title: 'Tetapan Latihan',
+        href: '/tetapan-latihan',
+        icon: GraduationCap,
+        iconClassName:
+            'bg-indigo-100 text-indigo-700 ring-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-800',
+        permission: 'training.settings',
+    },
+    {
+        title: 'Tetapan Dokumen',
+        href: '/tetapan-dokumen',
+        icon: FileCog,
+        iconClassName:
+            'bg-rose-100 text-rose-700 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-800',
+        permission: 'documents.settings',
+    },
+    {
+        title: 'Tetapan Disiplin',
+        href: '/tetapan-disiplin',
+        icon: ShieldAlert,
+        iconClassName:
+            'bg-red-100 text-red-700 ring-red-200 dark:bg-red-950 dark:text-red-300 dark:ring-red-800',
+        permission: 'discipline.settings',
+    },
+    {
+        title: 'Tetapan Clearance',
+        href: '/tetapan-clearance',
+        icon: ClipboardCheck,
+        iconClassName:
+            'bg-orange-100 text-orange-700 ring-orange-200 dark:bg-orange-950 dark:text-orange-300 dark:ring-orange-800',
+        permission: 'separation.settings',
+    },
+    {
         title: 'Audit Trail',
         href: '/audit-trail',
         icon: History,
@@ -362,6 +514,18 @@ export function AppSidebar() {
     const visibleMainItems = visibleItems(mainNavItems);
     const visibleEmployeeItems = visibleItems(employeeNavItems);
     const visibleSelfServiceItems = visibleItems(selfServiceNavItems);
+    const visibleRecruitmentItems = visibleItems(recruitmentNavItems).map(
+        (item) =>
+            item.title === 'Pengambilan'
+                ? {
+                      ...item,
+                      badge: leaveApprovalAlerts?.recruitment_total ?? 0,
+                  }
+                : {
+                      ...item,
+                      badge: leaveApprovalAlerts?.onboarding_total ?? 0,
+                  },
+    );
     const visibleAttendanceItems = visibleItems(attendanceNavItems).map(
         (item) =>
             item.title === 'Permohonan Cuti'
@@ -388,6 +552,26 @@ export function AppSidebar() {
         (item) => ({
             ...item,
             badge: leaveApprovalAlerts?.performance_total ?? 0,
+        }),
+    );
+    const visibleTrainingItems = visibleItems(trainingNavItems).map((item) => ({
+        ...item,
+        badge: leaveApprovalAlerts?.training_total ?? 0,
+    }));
+    const visibleDocumentItems = visibleItems(documentNavItems).map((item) => ({
+        ...item,
+        badge: leaveApprovalAlerts?.document_total ?? 0,
+    }));
+    const visibleDisciplineItems = visibleItems(disciplineNavItems).map(
+        (item) => ({
+            ...item,
+            badge: leaveApprovalAlerts?.discipline_total ?? 0,
+        }),
+    );
+    const visibleSeparationItems = visibleItems(separationNavItems).map(
+        (item) => ({
+            ...item,
+            badge: leaveApprovalAlerts?.separation_total ?? 0,
         }),
     );
     const visibleAdministrationItems = visibleItems(administrationNavItems);
@@ -423,6 +607,12 @@ export function AppSidebar() {
                         label="Layan Diri Pekerja"
                     />
                 )}
+                {visibleRecruitmentItems.length > 0 && (
+                    <NavMain
+                        items={visibleRecruitmentItems}
+                        label="Pengambilan & Onboarding"
+                    />
+                )}
                 {visibleAttendanceItems.length > 0 && (
                     <NavMain
                         items={visibleAttendanceItems}
@@ -437,6 +627,30 @@ export function AppSidebar() {
                 )}
                 {visiblePerformanceItems.length > 0 && (
                     <NavMain items={visiblePerformanceItems} label="Prestasi" />
+                )}
+                {visibleTrainingItems.length > 0 && (
+                    <NavMain
+                        items={visibleTrainingItems}
+                        label="Latihan & Kompetensi"
+                    />
+                )}
+                {visibleDocumentItems.length > 0 && (
+                    <NavMain
+                        items={visibleDocumentItems}
+                        label="Dokumen & Surat HR"
+                    />
+                )}
+                {visibleDisciplineItems.length > 0 && (
+                    <NavMain
+                        items={visibleDisciplineItems}
+                        label="Disiplin & Aduan"
+                    />
+                )}
+                {visibleSeparationItems.length > 0 && (
+                    <NavMain
+                        items={visibleSeparationItems}
+                        label="Berhenti & Clearance"
+                    />
                 )}
                 {visibleAdministrationItems.length > 0 && (
                     <NavMain

@@ -111,9 +111,10 @@ type ImportForm = {
 
 const roleLabels: Record<UserRole, string> = {
     super_admin: 'Super Admin',
+    hr_manager: 'Pengurus HR',
     hr_admin: 'HR Admin',
     supervisor: 'Penyelia / Ketua Jabatan',
-    viewer: 'Viewer / Manager',
+    viewer: 'Viewer / Pemerhati',
     employee: 'Employee',
 };
 

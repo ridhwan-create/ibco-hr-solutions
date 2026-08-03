@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\EmployeeRecord;
 use App\Models\OfficeLocation;
 use App\Models\ScheduleAssignment;
 use App\Models\ShiftTemplate;
@@ -35,6 +36,17 @@ class ScheduleSettingsController extends Controller
                 ->whereIn('id', $employeeIds)
                 ->get(['id', 'employeeID', 'nama'])
                 ->keyBy(fn ($employee) => (string) $employee->id);
+        $localEmployees = EmployeeRecord::query()
+            ->whereIn('directory_id', $employeeIds)
+            ->get()
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => (object) [
+                    'id' => $employee->directory_id,
+                    'employeeID' => $employee->employee_number,
+                    'nama' => $employee->name,
+                ],
+            ]);
+        $employees = $employees->union($localEmployees);
         $departments = DB::connection('ibco')
             ->table('xdepartment')
             ->where('rcd_enable', 1)
@@ -101,7 +113,20 @@ class ScheduleSettingsController extends Controller
                     'id' => (int) $employee->id,
                     'employee_id' => $employee->employeeID,
                     'name' => $employee->nama,
-                ]),
+                ])
+                ->concat(
+                    EmployeeRecord::query()
+                        ->whereIn('status', ['pending_activation', 'active'])
+                        ->orderBy('name')
+                        ->get()
+                        ->map(fn (EmployeeRecord $employee) => [
+                            'id' => $employee->directory_id,
+                            'employee_id' => $employee->employee_number,
+                            'name' => $employee->name,
+                        ]),
+                )
+                ->sortBy('name')
+                ->values(),
             'departmentOptions' => $departments->map(fn ($department) => [
                 'id' => (int) $department->id,
                 'name' => $department->description,
@@ -368,7 +393,11 @@ class ScheduleSettingsController extends Controller
                 ->table('maklumatpekerja')
                 ->where('id', $validated['employee_id'])
                 ->where('rcd_enable', 1)
-                ->exists(),
+                ->exists()
+                || EmployeeRecord::query()
+                    ->where('directory_id', $validated['employee_id'])
+                    ->whereIn('status', ['pending_activation', 'active'])
+                    ->exists(),
             'department' => DB::connection('ibco')
                 ->table('xdepartment')
                 ->where('id', $validated['department_id'])

@@ -115,7 +115,7 @@ function configurePayrollEmployee(int $employeeId, User $actor): void
 
 test('payroll core calculates approved ot and unpaid leave then follows approval lock', function () {
     $hrAdmin = User::factory()->hrAdmin()->create();
-    $approver = User::factory()->superAdmin()->create();
+    $approver = User::factory()->hrManager()->create();
     $employeeUser = User::factory()->employee()->create();
     $employeeId = createPayrollEmployee();
     configurePayrollEmployee($employeeId, $hrAdmin);

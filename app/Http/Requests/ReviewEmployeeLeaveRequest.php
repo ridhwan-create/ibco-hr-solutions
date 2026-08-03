@@ -9,7 +9,7 @@ class ReviewEmployeeLeaveRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->hasPermission('leave.manage') ?? false;
+        return $this->user()?->hasPermission('leave.approve') ?? false;
     }
 
     /**

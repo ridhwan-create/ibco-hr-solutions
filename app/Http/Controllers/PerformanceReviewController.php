@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\EmployeeUserLink;
+use App\Models\EmployeeRecord;
 use App\Models\PerformanceCycle;
 use App\Models\PerformanceEvidence;
 use App\Models\PerformanceImprovementPlan;
@@ -57,6 +58,15 @@ class PerformanceReviewController extends Controller
                         ->orWhere('employeeID', 'like', "%{$search}%");
                 })
                 ->pluck('id')
+                ->concat(
+                    EmployeeRecord::query()
+                        ->whereIn('status', ['pending_activation', 'active'])
+                        ->where(function ($query) use ($search) {
+                            $query->where('name', 'like', "%{$search}%")
+                                ->orWhere('employee_number', 'like', "%{$search}%");
+                        })
+                        ->pluck('directory_id'),
+                )
             : collect();
         $visibleBase = $this->visibleQuery($request);
         $query = (clone $visibleBase)
@@ -455,6 +465,15 @@ class PerformanceReviewController extends Controller
             ]);
         }
 
+        if (in_array((int) $request->user()->getAuthIdentifier(), [
+            (int) $review->employee_user_id,
+            (int) $review->moderated_by,
+        ], true)) {
+            throw ValidationException::withMessages([
+                'review' => 'Pengurus HR yang memuktamadkan mestilah berbeza daripada pekerja dan pegawai yang membuat moderasi.',
+            ]);
+        }
+
         DB::transaction(function () use ($request, $review) {
             $review->update([
                 'status' => 'finalized',
@@ -700,6 +719,7 @@ class PerformanceReviewController extends Controller
         if (
             $request->user()->hasPermission('performance.manage')
             || $request->user()->hasPermission('performance.moderate')
+            || $request->user()->hasPermission('performance.finalize')
         ) {
             return $query;
         }
@@ -717,6 +737,7 @@ class PerformanceReviewController extends Controller
         abort_unless(
             $request->user()->hasPermission('performance.manage')
             || $request->user()->hasPermission('performance.moderate')
+            || $request->user()->hasPermission('performance.finalize')
             || $review->supervisor_user_id === $request->user()->getAuthIdentifier(),
             403,
         );
@@ -885,7 +906,7 @@ class PerformanceReviewController extends Controller
      */
     private function employeeSnapshots(array $employeeIds): Collection
     {
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja as employee')
             ->leftJoin('maklumatjawatan as position', function ($join) {
                 $join->on('position.id_pekerja', '=', 'employee.id')
@@ -903,6 +924,19 @@ class PerformanceReviewController extends Controller
             ])
             ->unique('id')
             ->values();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', $employeeIds)
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->get()
+            ->map(fn (EmployeeRecord $employee) => (object) [
+                'id' => $employee->directory_id,
+                'employee_number' => $employee->employee_number,
+                'name' => $employee->name,
+                'department_id' => $employee->department_id,
+                'position_name' => $employee->position_name,
+            ]);
+
+        return $legacy->concat($local)->values();
     }
 
     /**
@@ -927,7 +961,7 @@ class PerformanceReviewController extends Controller
     {
         $links = EmployeeUserLink::query()
             ->where('is_active', true)
-            ->with('user:id,name,email')
+            ->with(['user:id,name,email', 'employeeRecord'])
             ->get()
             ->keyBy('employee_id');
 

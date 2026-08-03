@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\EmployeeRecord;
 use App\Http\Requests\ReviewClaimRequest;
 use App\Models\ClaimApprovalAssignment;
 use App\Models\ClaimAttachment;
@@ -122,6 +123,7 @@ class ClaimRequestController extends Controller
             'permissions' => [
                 'can_supervise' => $request->user()->hasPermission('claims.supervise'),
                 'can_manage' => $request->user()->hasPermission('claims.manage'),
+                'can_approve' => $request->user()->hasPermission('claims.approve'),
             ],
         ]);
     }
@@ -183,7 +185,7 @@ class ClaimRequestController extends Controller
                     ? 'Tuntutan disokong penyelia'
                     : 'Tuntutan ditolak penyelia',
                 'message' => $supported
-                    ? 'Tuntutan anda dihantar kepada HR/Kewangan untuk kelulusan akhir.'
+                    ? 'Tuntutan anda dihantar kepada Pengurus HR untuk kelulusan akhir.'
                     : 'Tuntutan anda tidak disokong oleh penyelia.',
             ]);
 
@@ -209,7 +211,7 @@ class ClaimRequestController extends Controller
         return back()->with('toast', [
             'type' => 'success',
             'message' => $claimRequest->status === 'pending'
-                ? 'Tuntutan disokong dan dihantar kepada HR/Kewangan.'
+                ? 'Tuntutan disokong dan dihantar kepada Pengurus HR.'
                 : 'Tuntutan telah ditolak.',
         ]);
     }
@@ -285,7 +287,13 @@ class ClaimRequestController extends Controller
                 || ! in_array($locked->approval_stage, ['finance', null], true)
             ) {
                 throw ValidationException::withMessages([
-                    'status' => 'Tuntutan ini belum sampai kepada HR/Kewangan atau telah selesai.',
+                    'status' => 'Tuntutan ini belum sampai kepada Pengurus HR atau telah selesai.',
+                ]);
+            }
+
+            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
+                throw ValidationException::withMessages([
+                    'status' => 'Anda tidak boleh meluluskan tuntutan sendiri.',
                 ]);
             }
 
@@ -305,12 +313,12 @@ class ClaimRequestController extends Controller
                     ? 'Tuntutan diluluskan'
                     : 'Tuntutan ditolak',
                 'message' => $approved
-                    ? 'HR/Kewangan meluluskan RM'
+                    ? 'Pengurus HR meluluskan RM'
                         .number_format($approvedAmount, 2)
                         .($scheduledPeriod
                             ? ' untuk dimasukkan ke payroll.'
                             : '.')
-                    : 'HR/Kewangan telah menolak tuntutan anda.',
+                    : 'Pengurus HR telah menolak tuntutan anda.',
             ]);
             $this->recalculateScheduledDraft($scheduledPeriod, $request);
 
@@ -410,7 +418,7 @@ class ClaimRequestController extends Controller
         Request $request,
         ClaimRequest $claimRequest,
     ): RedirectResponse {
-        abort_unless($request->user()->hasPermission('claims.manage'), 403);
+        abort_unless($request->user()->hasPermission('claims.approve'), 403);
         $validated = $request->validate([
             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
         ]);
@@ -418,6 +426,12 @@ class ClaimRequestController extends Controller
         if ($claimRequest->status !== 'approved') {
             throw ValidationException::withMessages([
                 'cancellation_notes' => 'Hanya tuntutan diluluskan boleh dibatalkan.',
+            ]);
+        }
+
+        if ((int) $claimRequest->user_id === (int) $request->user()->getAuthIdentifier()) {
+            throw ValidationException::withMessages([
+                'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan tuntutan sendiri.',
             ]);
         }
 
@@ -456,14 +470,14 @@ class ClaimRequestController extends Controller
                     ($claimRequest->review_notes
                         ? $claimRequest->review_notes."\n\n"
                         : '')
-                    .'Pembatalan HR/Kewangan: '.$validated['cancellation_notes'],
+                    .'Pembatalan Pengurus HR: '.$validated['cancellation_notes'],
                 ),
             ]);
             ClaimNotification::query()->create([
                 'user_id' => $claimRequest->user_id,
                 'claim_request_id' => $claimRequest->getKey(),
                 'title' => 'Kelulusan tuntutan dibatalkan',
-                'message' => 'HR/Kewangan membatalkan tuntutan yang sebelum ini diluluskan.',
+                'message' => 'Pengurus HR membatalkan tuntutan yang sebelum ini diluluskan.',
             ]);
 
             if ($run) {
@@ -502,7 +516,8 @@ class ClaimRequestController extends Controller
             $attachment->claim_request_id === $claimRequest->getKey(),
             404,
         );
-        $canManage = $request->user()->hasPermission('claims.manage');
+        $canManage = $request->user()->hasPermission('claims.manage')
+            || $request->user()->hasPermission('claims.approve');
         $canSupervise = $request->user()->hasPermission('claims.supervise')
             && ClaimApprovalAssignment::query()
                 ->where('department_id', $claimRequest->department_id)
@@ -525,6 +540,7 @@ class ClaimRequestController extends Controller
     {
         abort_unless(
             $request->user()->hasPermission('claims.manage')
+                || $request->user()->hasPermission('claims.approve')
                 || $request->user()->hasPermission('claims.supervise'),
             403,
         );
@@ -655,7 +671,16 @@ class ClaimRequestController extends Controller
                     $query->where('nama', 'like', "%{$filters['search']}%")
                         ->orWhere('employeeID', 'like', "%{$filters['search']}%");
                 })
-                ->pluck('id');
+                ->pluck('id')
+                ->concat(
+                    EmployeeRecord::query()
+                        ->whereIn('status', ['pending_activation', 'active'])
+                        ->where(function ($query) use ($filters) {
+                            $query->where('name', 'like', "%{$filters['search']}%")
+                                ->orWhere('employee_number', 'like', "%{$filters['search']}%");
+                        })
+                        ->pluck('directory_id'),
+                );
             $query->where(function ($query) use ($filters, $employeeIds) {
                 $query->whereIn('employee_id', $employeeIds)
                     ->orWhere('receipt_number', 'like', "%{$filters['search']}%")
@@ -670,11 +695,12 @@ class ClaimRequestController extends Controller
     {
         $user = $request->user();
         $canManage = $user->hasPermission('claims.manage');
+        $canApprove = $user->hasPermission('claims.approve');
         $canSupervise = $user->hasPermission('claims.supervise');
-        abort_unless($canManage || $canSupervise, 403);
+        abort_unless($canManage || $canApprove || $canSupervise, 403);
         $query = ClaimRequest::query();
 
-        if ($canManage) {
+        if ($canManage || $canApprove) {
             return $query;
         }
 
@@ -736,7 +762,7 @@ class ClaimRequestController extends Controller
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->whereIn('id', array_unique($employeeIds))
             ->get(['id', 'employeeID', 'nama'])
@@ -748,6 +774,18 @@ class ClaimRequestController extends Controller
                 ],
             ])
             ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', array_unique($employeeIds))
+            ->get()
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => [
+                    'employee_number' => $employee->employee_number,
+                    'employee_name' => $employee->name,
+                ],
+            ])
+            ->all();
+
+        return $legacy + $local;
     }
 
     /**

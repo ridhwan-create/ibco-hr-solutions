@@ -122,6 +122,7 @@ type Props = {
     permissions: {
         can_supervise: boolean;
         can_manage: boolean;
+        can_approve: boolean;
     };
 };
 
@@ -250,7 +251,7 @@ function ReviewDialog({
                             <SelectContent>
                                 <SelectItem value="approved">
                                     {mode === 'supervisor'
-                                        ? 'Sokong dan hantar kepada HR'
+                                        ? 'Sokong dan hantar kepada Pengurus HR'
                                         : 'Luluskan'}
                                 </SelectItem>
                                 <SelectItem value="rejected">Tolak</SelectItem>
@@ -452,7 +453,7 @@ export default function OvertimeRequests({
                             value: statistics.pending_supervisor,
                         },
                         {
-                            label: 'Menunggu HR',
+                            label: 'Menunggu Pengurus HR',
                             value: statistics.pending_hr,
                         },
                         {
@@ -579,7 +580,7 @@ export default function OvertimeRequests({
                                         request.status === 'pending' &&
                                         request.approval_stage === 'supervisor';
                                     const canHrReview =
-                                        permissions.can_manage &&
+                                        permissions.can_approve &&
                                         request.status === 'pending' &&
                                         request.approval_stage === 'hr';
 
@@ -711,7 +712,7 @@ export default function OvertimeRequests({
                                                             mode="hr"
                                                         />
                                                     )}
-                                                    {permissions.can_manage &&
+                                                    {permissions.can_approve &&
                                                         request.status ===
                                                             'approved' && (
                                                             <CancellationDialog

@@ -9,7 +9,7 @@ class ReviewOvertimeRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->hasPermission('overtime.manage') ?? false;
+        return $this->user()?->hasPermission('overtime.approve') ?? false;
     }
 
     /**

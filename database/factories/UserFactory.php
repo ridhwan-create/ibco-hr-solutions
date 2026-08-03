@@ -31,6 +31,10 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'role' => UserRole::Viewer,
+            'account_status' => 'active',
+            'activation_date' => null,
+            'must_change_password' => false,
+            'credentials_issued_at' => null,
             'remember_token' => Str::random(10),
             'two_factor_secret' => null,
             'two_factor_recovery_codes' => null,
@@ -59,6 +63,13 @@ class UserFactory extends Factory
     {
         return $this->state(fn (array $attributes) => [
             'role' => UserRole::HrAdmin,
+        ]);
+    }
+
+    public function hrManager(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'role' => UserRole::HrManager,
         ]);
     }
 

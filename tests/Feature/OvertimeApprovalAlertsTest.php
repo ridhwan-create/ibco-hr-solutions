@@ -39,6 +39,7 @@ test('approval centre separates overtime counts by actionable role', function ()
     $assignedSupervisor = User::factory()->supervisor()->create();
     $otherSupervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $superAdmin = User::factory()->superAdmin()->create();
     $type = OvertimeType::query()->where('code', 'WEEKDAY')->firstOrFail();
 
@@ -67,6 +68,13 @@ test('approval centre separates overtime counts by actionable role', function ()
     ]);
     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
         'enabled' => true,
+        'total' => 0,
+        'overtime_total' => 0,
+        'overtime_supervisor' => 0,
+        'overtime_hr' => 0,
+    ]);
+    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+        'enabled' => true,
         'total' => 1,
         'overtime_total' => 1,
         'overtime_supervisor' => 0,
@@ -74,10 +82,10 @@ test('approval centre separates overtime counts by actionable role', function ()
     ]);
     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
         'enabled' => true,
-        'total' => 3,
-        'overtime_total' => 3,
-        'overtime_supervisor' => 2,
-        'overtime_hr' => 1,
+        'total' => 0,
+        'overtime_total' => 0,
+        'overtime_supervisor' => 0,
+        'overtime_hr' => 0,
     ]);
     expect($alerts->summarizeFor($employee))->toMatchArray([
         'enabled' => false,

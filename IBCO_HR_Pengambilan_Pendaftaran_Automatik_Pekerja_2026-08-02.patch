@@ -1,0 +1,3914 @@
+diff --git a/app/Http/Controllers/AttendanceSettingsController.php b/app/Http/Controllers/AttendanceSettingsController.php
+index 40ae964485401461623159c66d39312b9036a38e..d17bdc9bf5934c6e11ff0dd9857b7bafa9c8cb81 100644
+--- a/app/Http/Controllers/AttendanceSettingsController.php
++++ b/app/Http/Controllers/AttendanceSettingsController.php
+@@ -5,6 +5,7 @@
+ use App\Enums\UserRole;
+ use App\Http\Requests\SaveEmployeeUserLinkRequest;
+ use App\Http\Requests\SaveOfficeLocationRequest;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeUserLink;
+ use App\Models\OfficeLocation;
+ use App\Models\User;
+@@ -25,6 +26,7 @@ public function index(): Response
+                 'user:id,name,email,role',
+                 'user.roleAssignments',
+                 'officeLocation:id,name',
++                'employeeRecord',
+             ])
+             ->latest()
+             ->get();
+@@ -36,6 +38,22 @@ public function index(): Response
+                 ->whereIn('id', $employeeIds)
+                 ->get(['id', 'employeeID', 'nama', 'rcd_enable'])
+                 ->keyBy(fn ($employee) => (string) $employee->id);
++        $localEmployees = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds)
++            ->get()
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => (object) [
++                    'id' => $employee->directory_id,
++                    'employeeID' => $employee->employee_number,
++                    'nama' => $employee->name,
++                    'rcd_enable' => in_array(
++                        $employee->status,
++                        ['pending_activation', 'active'],
++                        true,
++                    ),
++                ],
++            ]);
++        $employees = $employees->union($localEmployees);
+ 
+         return Inertia::render('GeoAttendance/Settings', [
+             'offices' => OfficeLocation::query()
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index ca9158fd8dd50f02185e055b264382954150e444..8c9503a7d15502f656d0f44d414d3f6d1cf881a1 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -45,6 +45,8 @@ class AuditTrailController extends Controller
+         'user.created' => 'Pengguna Sistem Ditambah',
+         'user.updated' => 'Pengguna Sistem Dikemas Kini',
+         'user.password.bulk_reset' => 'Kata Laluan Direset Secara Pukal',
++        'employee.registered_from_recruitment' => 'Calon Didaftarkan sebagai Pekerja',
++        'user.created_from_recruitment' => 'Akaun Pekerja Dicipta daripada Pengambilan',
+         'employee.profile_updated' => 'Profil Sendiri Dikemas Kini',
+         'leave.submitted' => 'Permohonan Cuti Dihantar',
+         'leave.supervisor_approved' => 'Permohonan Cuti Disokong Penyelia',
+diff --git a/app/Http/Controllers/ClaimRequestController.php b/app/Http/Controllers/ClaimRequestController.php
+index 57d38807fb55493cdc1156eb6d2d0521085ce769..4498dbfe5089f06d588a57d15e3e89623a074508 100644
+--- a/app/Http/Controllers/ClaimRequestController.php
++++ b/app/Http/Controllers/ClaimRequestController.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Models\EmployeeRecord;
+ use App\Http\Requests\ReviewClaimRequest;
+ use App\Models\ClaimApprovalAssignment;
+ use App\Models\ClaimAttachment;
+@@ -655,7 +656,16 @@ private function filteredQuery(Request $request, array $filters): Builder
+                     $query->where('nama', 'like', "%{$filters['search']}%")
+                         ->orWhere('employeeID', 'like', "%{$filters['search']}%");
+                 })
+-                ->pluck('id');
++                ->pluck('id')
++                ->concat(
++                    EmployeeRecord::query()
++                        ->whereIn('status', ['pending_activation', 'active'])
++                        ->where(function ($query) use ($filters) {
++                            $query->where('name', 'like', "%{$filters['search']}%")
++                                ->orWhere('employee_number', 'like', "%{$filters['search']}%");
++                        })
++                        ->pluck('directory_id'),
++                );
+             $query->where(function ($query) use ($filters, $employeeIds) {
+                 $query->whereIn('employee_id', $employeeIds)
+                     ->orWhere('receipt_number', 'like', "%{$filters['search']}%")
+@@ -736,7 +746,7 @@ private function employeeMap(array $employeeIds): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->whereIn('id', array_unique($employeeIds))
+             ->get(['id', 'employeeID', 'nama'])
+@@ -748,6 +758,18 @@ private function employeeMap(array $employeeIds): array
+                 ],
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', array_unique($employeeIds))
++            ->get()
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => [
++                    'employee_number' => $employee->employee_number,
++                    'employee_name' => $employee->name,
++                ],
++            ])
++            ->all();
++
++        return $legacy + $local;
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/ClaimSettingsController.php b/app/Http/Controllers/ClaimSettingsController.php
+index 0bbbddb55fa2b2e42511f7f92abd08ab010e9064..e5e8c2d10f7e73221e16a1d910136b5b29e26d9b 100644
+--- a/app/Http/Controllers/ClaimSettingsController.php
++++ b/app/Http/Controllers/ClaimSettingsController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Enums\UserRole;
++use App\Models\EmployeeRecord;
+ use App\Models\ClaimApprovalAssignment;
+ use App\Models\ClaimLimitOverride;
+ use App\Models\ClaimRequest;
+@@ -32,6 +33,20 @@ public function index(): Response
+             ->where('rcd_enable', 1)
+             ->orderBy('nama')
+             ->get(['id', 'employeeID as employee_number', 'nama as name']);
++        $employees = $employees
++            ->concat(
++                EmployeeRecord::query()
++                    ->whereIn('status', ['pending_activation', 'active'])
++                    ->orderBy('name')
++                    ->get()
++                    ->map(fn (EmployeeRecord $employee) => (object) [
++                        'id' => $employee->directory_id,
++                        'employee_number' => $employee->employee_number,
++                        'name' => $employee->name,
++                    ]),
++            )
++            ->sortBy('name')
++            ->values();
+         $employeeMap = $employees->keyBy('id');
+         $positions = DB::connection('ibco')
+             ->table('maklumatjawatan as position')
+@@ -362,6 +377,10 @@ public function saveLimitOverride(Request $request): RedirectResponse
+                 ->where('id', $validated['scope_id'])
+                 ->where('rcd_enable', 1)
+                 ->exists()
++                || EmployeeRecord::query()
++                    ->where('directory_id', $validated['scope_id'])
++                    ->whereIn('status', ['pending_activation', 'active'])
++                    ->exists()
+             : DB::connection('ibco')
+                 ->table('maklumatjawatan')
+                 ->where('id', $validated['scope_id'])
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 3cae0c0066942883f3ce96714bfd30b0e5532320..f58ef076a15891ae271562dbaeaa7a4ec97415b8 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -3,8 +3,9 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Enums\UserRole;
+-use App\Models\GeoAttendanceRecord;
+ use App\Models\ClaimRequest;
++use App\Models\EmployeeRecord;
++use App\Models\GeoAttendanceRecord;
+ use App\Models\PayrollRun;
+ use App\Models\PerformanceReview;
+ use App\Support\MonthlyHrReportBuilder;
+@@ -44,6 +45,12 @@ public function index(Request $request)
+             }
+         }
+ 
++        if (array_key_exists('pekerja', $statistics)) {
++            $statistics['pekerja'] += EmployeeRecord::query()
++                ->where('status', 'active')
++                ->count();
++        }
++
+         if ($user->hasPermission('payroll.view')) {
+             $statistics['payroll'] = PayrollRun::query()->count();
+         }
+@@ -73,6 +80,16 @@ public function index(Request $request)
+                 ->whereIn('id', $geoAttendance->pluck('employee_id'))
+                 ->get(['id', 'employeeID', 'nama'])
+                 ->keyBy(fn ($employee) => (string) $employee->id);
++            $localEmployees = EmployeeRecord::query()
++                ->whereIn('directory_id', $geoAttendance->pluck('employee_id'))
++                ->get()
++                ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                    (string) $employee->directory_id => (object) [
++                        'employeeID' => $employee->employee_number,
++                        'nama' => $employee->name,
++                    ],
++                ]);
++            $employees = $employees->union($localEmployees);
+ 
+             $recentAttendance = $geoAttendance->map(function (
+                 GeoAttendanceRecord $record,
+diff --git a/app/Http/Controllers/EmployeeClaimController.php b/app/Http/Controllers/EmployeeClaimController.php
+index dc617d00c2f87c6f32cac598039770372d22d749..23ce2a69a94716f81bf724e06d986bdabf900617 100644
+--- a/app/Http/Controllers/EmployeeClaimController.php
++++ b/app/Http/Controllers/EmployeeClaimController.php
+@@ -43,11 +43,17 @@ public function index(Request $request): Response
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'id' => $link->employee_id,
++                'employee_id' => $link->employeeRecord->employee_number,
++                'name' => $link->employeeRecord->name,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['id', 'employeeID as employee_id', 'nama as name']);
+         $position = $this->activePosition($link->employee_id);
+         $claims = ClaimRequest::query()
+             ->where('employee_id', $link->employee_id)
+@@ -136,11 +142,13 @@ public function store(StoreClaimRequest $request): RedirectResponse
+             ]);
+         }
+ 
+-        $employeeExists = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->exists();
++        $employeeExists = $link->employee_source === 'local'
++            ? $link->employeeRecord !== null
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->exists();
+ 
+         if (! $employeeExists) {
+             throw ValidationException::withMessages([
+@@ -373,6 +381,7 @@ public function readNotifications(Request $request): RedirectResponse
+     private function activeLink(Request $request): ?EmployeeUserLink
+     {
+         return EmployeeUserLink::query()
++            ->with('employeeRecord')
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+@@ -380,6 +389,18 @@ private function activeLink(Request $request): ?EmployeeUserLink
+ 
+     private function activePosition(int $employeeId): ?object
+     {
++        $local = \App\Models\EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->first(['id', 'department_id', 'position_name']);
++
++        if ($local) {
++            return (object) [
++                'id' => null,
++                'id_department' => $local->department_id,
++                'jawatan' => $local->position_name,
++            ];
++        }
++
+         return DB::connection('ibco')
+             ->table('maklumatjawatan')
+             ->where('id_pekerja', $employeeId)
+diff --git a/app/Http/Controllers/EmployeeLeaveController.php b/app/Http/Controllers/EmployeeLeaveController.php
+index 603c5ae0998986fcfdbab5115e6d8da5a91aaa57..92f3fb421ebc9b5020561ed3825edb33048e6908 100644
+--- a/app/Http/Controllers/EmployeeLeaveController.php
++++ b/app/Http/Controllers/EmployeeLeaveController.php
+@@ -45,11 +45,17 @@ public function index(Request $request): Response
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'id' => $link->employee_id,
++                'employee_id' => $link->employeeRecord->employee_number,
++                'name' => $link->employeeRecord->name,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['id', 'employeeID as employee_id', 'nama as name']);
+ 
+         $leaveTypes = LeaveType::query()
+             ->where('is_active', true)
+@@ -89,20 +95,24 @@ public function index(Request $request): Response
+             })
+             ->values();
+ 
+-        $leaveEntitlement = DB::connection('ibco')
+-            ->table('maklumatjawatan')
+-            ->where('id_pekerja', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->orderByDesc('id')
+-            ->value('jumlahcuti');
+-
+-        $legacyBalance = DB::connection('ibco')
+-            ->table('maklumatcuti')
+-            ->where('id_pekerja', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->where('tahun', (string) now()->year)
+-            ->orderByDesc('id')
+-            ->value('bakicuti');
++        $leaveEntitlement = $link->employee_source === 'local'
++            ? null
++            : DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->where('id_pekerja', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->orderByDesc('id')
++                ->value('jumlahcuti');
++
++        $legacyBalance = $link->employee_source === 'local'
++            ? null
++            : DB::connection('ibco')
++                ->table('maklumatcuti')
++                ->where('id_pekerja', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->where('tahun', (string) now()->year)
++                ->orderByDesc('id')
++                ->value('bakicuti');
+ 
+         $requests = EmployeeLeaveRequest::query()
+             ->where('employee_id', $link->employee_id)
+@@ -112,7 +122,9 @@ public function index(Request $request): Response
+             ->get()
+             ->map(fn (EmployeeLeaveRequest $leave) => $this->requestPayload($leave));
+ 
+-        $legacyLeave = DB::connection('ibco')
++        $legacyLeave = $link->employee_source === 'local'
++            ? collect()
++            : DB::connection('ibco')
+             ->table('maklumatcuti as leave')
+             ->leftJoin('xsenaraicuti as type', 'leave.jenis_cuti', '=', 'type.id')
+             ->leftJoin('xstatuscuti as status', 'leave.status_permohonan', '=', 'status.id')
+@@ -179,11 +191,13 @@ public function store(
+             ]);
+         }
+ 
+-        $employeeExists = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->exists();
++        $employeeExists = $link->employee_source === 'local'
++            ? $link->employeeRecord !== null
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->exists();
+ 
+         if (! $employeeExists) {
+             throw ValidationException::withMessages([
+@@ -518,6 +532,7 @@ private function emptySummary(): array
+     private function activeLink(Request $request): ?EmployeeUserLink
+     {
+         return EmployeeUserLink::query()
++            ->with('employeeRecord')
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+@@ -525,6 +540,14 @@ private function activeLink(Request $request): ?EmployeeUserLink
+ 
+     private function employeeDepartmentId(int $employeeId): ?int
+     {
++        $localDepartmentId = \App\Models\EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->value('department_id');
++
++        if ($localDepartmentId !== null) {
++            return (int) $localDepartmentId;
++        }
++
+         $departmentId = DB::connection('ibco')
+             ->table('maklumatjawatan')
+             ->where('id_pekerja', $employeeId)
+diff --git a/app/Http/Controllers/EmployeeOvertimeController.php b/app/Http/Controllers/EmployeeOvertimeController.php
+index ae7e3048d41e511ade35f53cbd879a1933c59364..9333789415c4eeda4aa0e26aa7c1fb8a771d6325 100644
+--- a/app/Http/Controllers/EmployeeOvertimeController.php
++++ b/app/Http/Controllers/EmployeeOvertimeController.php
+@@ -45,11 +45,17 @@ public function index(Request $request): Response
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'id' => $link->employee_id,
++                'employee_id' => $link->employeeRecord->employee_number,
++                'name' => $link->employeeRecord->name,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['id', 'employeeID as employee_id', 'nama as name']);
+         $requests = OvertimeRequest::query()
+             ->where('employee_id', $link->employee_id)
+             ->with([
+@@ -80,7 +86,9 @@ public function index(Request $request): Response
+                 'status' => $record->status,
+             ]);
+ 
+-        $legacyOvertime = DB::connection('ibco')
++        $legacyOvertime = $link->employee_source === 'local'
++            ? collect()
++            : DB::connection('ibco')
+             ->table('maklumatot as ot')
+             ->leftJoin('xjenisot as type', 'ot.jenis_ot', '=', 'type.id')
+             ->where('ot.id_pekerja', $link->employee_id)
+@@ -146,11 +154,13 @@ public function store(StoreOvertimeRequest $request): RedirectResponse
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['id']);
++        $employee = $link->employee_source === 'local'
++            ? $link->employeeRecord
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['id']);
+ 
+         if (! $employee) {
+             throw ValidationException::withMessages([
+@@ -218,12 +228,14 @@ public function store(StoreOvertimeRequest $request): RedirectResponse
+             ]);
+         }
+ 
+-        $departmentId = DB::connection('ibco')
+-            ->table('maklumatjawatan')
+-            ->where('id_pekerja', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->orderByDesc('id')
+-            ->value('id_department');
++        $departmentId = $link->employee_source === 'local'
++            ? $link->employeeRecord?->department_id
++            : DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->where('id_pekerja', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->orderByDesc('id')
++                ->value('id_department');
+         $hasSupervisor = $departmentId !== null
+             && OvertimeApprovalAssignment::query()
+                 ->where('department_id', $departmentId)
+@@ -419,6 +431,7 @@ public function readNotifications(Request $request): RedirectResponse
+     private function activeLink(Request $request): ?EmployeeUserLink
+     {
+         return EmployeeUserLink::query()
++            ->with('employeeRecord')
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+diff --git a/app/Http/Controllers/EmployeePerformanceController.php b/app/Http/Controllers/EmployeePerformanceController.php
+index eccdb2461f6cf29113d6ba484dd28f7a09a94654..8344bb0a610a384a6c276e26c047d829af802161 100644
+--- a/app/Http/Controllers/EmployeePerformanceController.php
++++ b/app/Http/Controllers/EmployeePerformanceController.php
+@@ -41,23 +41,33 @@ public function index(Request $request): Response
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja as employee')
+-            ->leftJoin('maklumatjawatan as position', function ($join) {
+-                $join->on('position.id_pekerja', '=', 'employee.id')
+-                    ->where('position.rcd_enable', 1);
+-            })
+-            ->leftJoin('xdepartment as department', 'department.id', '=', 'position.id_department')
+-            ->where('employee.id', $link->employee_id)
+-            ->where('employee.rcd_enable', 1)
+-            ->orderByDesc('position.id')
+-            ->first([
+-                'employee.id',
+-                'employee.employeeID as employee_number',
+-                'employee.nama as name',
+-                'position.jawatan as position_name',
+-                'department.description as department',
+-            ]);
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'id' => $link->employeeRecord->directory_id,
++                'employee_number' => $link->employeeRecord->employee_number,
++                'name' => $link->employeeRecord->name,
++                'position_name' => $link->employeeRecord->position_name,
++                'department' => $this->departmentName(
++                    $link->employeeRecord->department_id,
++                ),
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja as employee')
++                ->leftJoin('maklumatjawatan as position', function ($join) {
++                    $join->on('position.id_pekerja', '=', 'employee.id')
++                        ->where('position.rcd_enable', 1);
++                })
++                ->leftJoin('xdepartment as department', 'department.id', '=', 'position.id_department')
++                ->where('employee.id', $link->employee_id)
++                ->where('employee.rcd_enable', 1)
++                ->orderByDesc('position.id')
++                ->first([
++                    'employee.id',
++                    'employee.employeeID as employee_number',
++                    'employee.nama as name',
++                    'position.jawatan as position_name',
++                    'department.description as department',
++                ]);
+         $reviews = PerformanceReview::query()
+             ->where('employee_id', $link->employee_id)
+             ->with([
+@@ -323,14 +333,17 @@ public function downloadPdf(
+     ): HttpResponse {
+         $this->authorizeOwnReview($request, $review);
+         abort_unless($review->status === 'finalized', 404);
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $review->employee_id)
+-            ->first(['employeeID as employee_number', 'nama as name']);
+-        $department = DB::connection('ibco')
+-            ->table('xdepartment')
+-            ->where('id', $review->department_id)
+-            ->value('description');
++        $link = $this->activeLink($request);
++        $employee = $link?->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'employee_number' => $link->employeeRecord->employee_number,
++                'name' => $link->employeeRecord->name,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $review->employee_id)
++                ->first(['employeeID as employee_number', 'nama as name']);
++        $department = $this->departmentName($review->department_id);
+ 
+         return response(
+             $this->pdfRenderer->render(
+@@ -476,11 +489,24 @@ private function authorizeOwnReview(
+     private function activeLink(Request $request): ?EmployeeUserLink
+     {
+         return EmployeeUserLink::query()
++            ->with('employeeRecord')
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+     }
+ 
++    private function departmentName(?int $departmentId): ?string
++    {
++        if (! $departmentId) {
++            return null;
++        }
++
++        return DB::connection('ibco')
++            ->table('xdepartment')
++            ->where('id', $departmentId)
++            ->value('description');
++    }
++
+     /**
+      * @return array<string, int|float|null>
+      */
+diff --git a/app/Http/Controllers/EmployeeProfileController.php b/app/Http/Controllers/EmployeeProfileController.php
+index 9ace096cae06a4e576a142586d69e5f45ce9001a..f283d2587990ecf88c5dfcd94b8fa3cbe721c952 100644
+--- a/app/Http/Controllers/EmployeeProfileController.php
++++ b/app/Http/Controllers/EmployeeProfileController.php
+@@ -27,6 +27,10 @@ public function show(Request $request): Response
+             ]);
+         }
+ 
++        if ($link->employee_source === 'local' && $link->employeeRecord) {
++            return $this->showLocalProfile($request, $link);
++        }
++
+         $employee = DB::connection('ibco')
+             ->table('maklumatpekerja as p')
+             ->leftJoin('xjantina as gender', 'p.jantina', '=', 'gender.id')
+@@ -98,11 +102,17 @@ public function update(
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['alamat', 'notel', 'email']);
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'alamat' => null,
++                'notel' => $link->employeeRecord->phone,
++                'email' => $link->employeeRecord->official_email,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['alamat', 'notel', 'email']);
+ 
+         if (! $employee) {
+             throw ValidationException::withMessages([
+@@ -158,8 +168,55 @@ public function update(
+     private function activeLink(Request $request): ?EmployeeUserLink
+     {
+         return EmployeeUserLink::query()
++            ->with('employeeRecord')
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+     }
++
++    private function showLocalProfile(
++        Request $request,
++        EmployeeUserLink $link,
++    ): Response {
++        $employee = $link->employeeRecord;
++        $profile = EmployeePersonalProfile::query()
++            ->where('employee_id', $link->employee_id)
++            ->first();
++
++        return Inertia::render('EmployeeSelfService/Profile', [
++            'employee' => [
++                'id' => $employee->directory_id,
++                'employee_id' => $employee->employee_number,
++                'name' => $employee->name,
++                'nric' => $employee->identity_number,
++                'address' => null,
++                'phone' => $employee->phone,
++                'email' => $employee->official_email,
++                'birth_date' => null,
++                'nationality' => null,
++                'gender' => null,
++                'religion' => null,
++                'race' => null,
++                'marital_status' => null,
++                'employment_status' => $employee->status === 'active'
++                    ? 'Aktif'
++                    : 'Menunggu Tarikh Mula',
++            ],
++            'position' => [
++                'title' => $employee->position_name,
++                'department' => $employee->department_id
++                    ? 'Jabatan ID '.$employee->department_id
++                    : null,
++                'joined_at' => $employee->start_date?->toDateString(),
++                'leave_entitlement' => null,
++            ],
++            'contact' => [
++                'address' => $profile?->address,
++                'phone' => $profile?->phone ?? $employee->phone,
++                'email' => $profile?->email ?? $employee->official_email,
++                'is_updated_locally' => $profile !== null,
++                'updated_at' => $profile?->updated_at?->toIso8601String(),
++            ],
++        ]);
++    }
+ }
+diff --git a/app/Http/Controllers/EmployeeRosterController.php b/app/Http/Controllers/EmployeeRosterController.php
+index 3b000d244e50aeebe247ba4104898b85c929094d..63edd12e69b73ab0ce4801ed62a6f539f00998ca 100644
+--- a/app/Http/Controllers/EmployeeRosterController.php
++++ b/app/Http/Controllers/EmployeeRosterController.php
+@@ -27,7 +27,7 @@ public function index(Request $request): Response
+         $periodStart = CarbonImmutable::createFromFormat('Y-m', $month)
+             ->startOfMonth();
+         $link = EmployeeUserLink::query()
+-            ->with('officeLocation:id,name')
++            ->with(['officeLocation:id,name', 'employeeRecord'])
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+@@ -45,17 +45,25 @@ public function index(Request $request): Response
+             ]);
+         }
+ 
+-        $employee = DB::connection('ibco')
+-            ->table('maklumatpekerja')
+-            ->where('id', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->first(['id', 'employeeID', 'nama']);
+-        $departmentId = DB::connection('ibco')
+-            ->table('maklumatjawatan')
+-            ->where('id_pekerja', $link->employee_id)
+-            ->where('rcd_enable', 1)
+-            ->orderByDesc('id')
+-            ->value('id_department');
++        $employee = $link->employee_source === 'local' && $link->employeeRecord
++            ? (object) [
++                'id' => $link->employeeRecord->directory_id,
++                'employeeID' => $link->employeeRecord->employee_number,
++                'nama' => $link->employeeRecord->name,
++            ]
++            : DB::connection('ibco')
++                ->table('maklumatpekerja')
++                ->where('id', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->first(['id', 'employeeID', 'nama']);
++        $departmentId = $link->employee_source === 'local'
++            ? $link->employeeRecord?->department_id
++            : DB::connection('ibco')
++                ->table('maklumatjawatan')
++                ->where('id_pekerja', $link->employee_id)
++                ->where('rcd_enable', 1)
++                ->orderByDesc('id')
++                ->value('id_department');
+         $period = RosterPeriod::query()
+             ->whereDate('period_start', $periodStart)
+             ->whereIn('status', ['published', 'locked'])
+diff --git a/app/Http/Controllers/GeoAttendanceController.php b/app/Http/Controllers/GeoAttendanceController.php
+index c06bf06ce3d47b80d467ffe2384526c88de0a341..e44fa8b1ad09c2c1e66fd1eaf2c9f43726476fa5 100644
+--- a/app/Http/Controllers/GeoAttendanceController.php
++++ b/app/Http/Controllers/GeoAttendanceController.php
+@@ -6,6 +6,7 @@
+ use App\Http\Requests\SaveAttendanceAdjustmentRequest;
+ use App\Http\Requests\StoreManualAttendanceRequest;
+ use App\Models\AttendanceAdjustment;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeUserLink;
+ use App\Models\GeoAttendanceRecord;
+ use App\Models\OfficeLocation;
+@@ -31,18 +32,12 @@ public function __construct(
+     public function clockPage(Request $request): Response
+     {
+         $link = EmployeeUserLink::query()
+-            ->with('officeLocation')
++            ->with(['officeLocation', 'employeeRecord'])
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+ 
+-        $employee = $link
+-            ? DB::connection('ibco')
+-                ->table('maklumatpekerja')
+-                ->where('id', $link->employee_id)
+-                ->where('rcd_enable', 1)
+-                ->first(['id', 'employeeID', 'nama'])
+-            : null;
++        $employee = $link ? $this->employeeOrFail($link->employee_id) : null;
+ 
+         $today = now()->toDateString();
+         $todayRecord = $link
+@@ -342,7 +337,7 @@ public function index(Request $request): Response
+     public function storeManual(StoreManualAttendanceRequest $request): RedirectResponse
+     {
+         $validated = $request->validated();
+-        $this->legacyEmployeeOrFail((int) $validated['employee_id']);
++        $this->employeeOrFail((int) $validated['employee_id']);
+ 
+         $clockIn = Carbon::parse($validated['clock_in_at']);
+         $clockOut = isset($validated['clock_out_at'])
+@@ -503,7 +498,7 @@ public function adjust(
+     private function activeEmployeeLink(Request $request): EmployeeUserLink
+     {
+         $link = EmployeeUserLink::query()
+-            ->with('officeLocation')
++            ->with(['officeLocation', 'employeeRecord'])
+             ->where('user_id', $request->user()->getAuthIdentifier())
+             ->where('is_active', true)
+             ->first();
+@@ -514,7 +509,7 @@ private function activeEmployeeLink(Request $request): EmployeeUserLink
+             ]);
+         }
+ 
+-        $this->legacyEmployeeOrFail($link->employee_id);
++        $this->employeeOrFail($link->employee_id);
+ 
+         return $link;
+     }
+@@ -561,8 +556,21 @@ private function validatedLocation(
+         return compact('latitude', 'longitude', 'accuracy', 'distance');
+     }
+ 
+-    private function legacyEmployeeOrFail(int $employeeId): object
++    private function employeeOrFail(int $employeeId): object
+     {
++        $local = EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->first(['directory_id', 'employee_number', 'name']);
++
++        if ($local) {
++            return (object) [
++                'id' => $local->directory_id,
++                'employeeID' => $local->employee_number,
++                'nama' => $local->name,
++            ];
++        }
++
+         $employee = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->where('id', $employeeId)
+@@ -571,7 +579,7 @@ private function legacyEmployeeOrFail(int $employeeId): object
+ 
+         if (! $employee) {
+             throw ValidationException::withMessages([
+-                'employee_id' => 'Rekod pekerja aktif tidak ditemui dalam db_spp.',
++                'employee_id' => 'Rekod pekerja aktif tidak ditemui dalam IBCO HR Solutions atau db_spp.',
+             ]);
+         }
+ 
+@@ -587,7 +595,7 @@ private function matchingEmployeeIds(string $search): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacyIds = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->where('rcd_enable', 1)
+             ->where(function ($query) use ($search) {
+@@ -598,6 +606,18 @@ private function matchingEmployeeIds(string $search): array
+             ->pluck('id')
+             ->map(fn ($id) => (int) $id)
+             ->all();
++        $localIds = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->where(function (Builder $query) use ($search) {
++                $query->where('name', 'like', "%{$search}%")
++                    ->orWhere('employee_number', 'like', "%{$search}%")
++                    ->orWhere('identity_number', 'like', "%{$search}%");
++            })
++            ->pluck('directory_id')
++            ->map(fn ($id) => (int) $id)
++            ->all();
++
++        return array_values(array_unique([...$legacyIds, ...$localIds]));
+     }
+ 
+     /**
+@@ -612,7 +632,7 @@ private function employeeMap(array $employeeIds): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->whereIn('id', $ids)
+             ->get(['id', 'employeeID', 'nama'])
+@@ -624,6 +644,19 @@ private function employeeMap(array $employeeIds): array
+                 ],
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', $ids)
++            ->get(['directory_id', 'employee_number', 'name'])
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => [
++                    'id' => $employee->directory_id,
++                    'employee_id' => $employee->employee_number,
++                    'name' => $employee->name,
++                ],
++            ])
++            ->all();
++
++        return $legacy + $local;
+     }
+ 
+     /**
+@@ -631,7 +664,7 @@ private function employeeMap(array $employeeIds): array
+      */
+     private function employeeOptions(): array
+     {
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->where('rcd_enable', 1)
+             ->orderBy('nama')
+@@ -642,6 +675,21 @@ private function employeeOptions(): array
+                 'name' => $employee->nama,
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->orderBy('name')
++            ->get(['directory_id', 'employee_number', 'name'])
++            ->map(fn (EmployeeRecord $employee) => [
++                'id' => $employee->directory_id,
++                'employee_id' => $employee->employee_number,
++                'name' => $employee->name,
++            ])
++            ->all();
++
++        return collect([...$legacy, ...$local])
++            ->sortBy('name')
++            ->values()
++            ->all();
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/LeaveRequestController.php b/app/Http/Controllers/LeaveRequestController.php
+index b461593ef4c6d18b99608f8037d93e1153a2d31b..14c1ed6dad8d1577a2826c304fc3ce5c2e1650ce 100644
+--- a/app/Http/Controllers/LeaveRequestController.php
++++ b/app/Http/Controllers/LeaveRequestController.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Models\EmployeeRecord;
+ use App\Http\Requests\ReviewEmployeeLeaveRequest;
+ use App\Models\EmployeeLeaveRequest;
+ use App\Models\LeaveApprovalAssignment;
+@@ -532,6 +533,16 @@ private function matchingEmployeeIds(string $search): array
+             ->limit(250)
+             ->pluck('id')
+             ->map(fn ($id) => (int) $id)
++            ->concat(
++                EmployeeRecord::query()
++                    ->whereIn('status', ['pending_activation', 'active'])
++                    ->where(function ($query) use ($search) {
++                        $query->where('name', 'like', "%{$search}%")
++                            ->orWhere('employee_number', 'like', "%{$search}%");
++                    })
++                    ->pluck('directory_id'),
++            )
++            ->unique()
+             ->all();
+     }
+ 
+@@ -551,7 +562,7 @@ private function employeeMap(array $employeeIds): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->whereIn('id', $ids)
+             ->get(['id', 'employeeID as employee_id', 'nama as name'])
+@@ -563,6 +574,19 @@ private function employeeMap(array $employeeIds): array
+                 ],
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', $ids)
++            ->get()
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => [
++                    'id' => $employee->directory_id,
++                    'employee_id' => $employee->employee_number,
++                    'name' => $employee->name,
++                ],
++            ])
++            ->all();
++
++        return $legacy + $local;
+     }
+ 
+     private function csvValue(string $value): string
+diff --git a/app/Http/Controllers/LeaveSettingsController.php b/app/Http/Controllers/LeaveSettingsController.php
+index 1d2989ea6380613ed3b23b3c4a14a859ed6f2b9a..998cf246489e6d801ce7d86bbc04355b57bc42ca 100644
+--- a/app/Http/Controllers/LeaveSettingsController.php
++++ b/app/Http/Controllers/LeaveSettingsController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Enums\UserRole;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeLeaveRequest;
+ use App\Models\LeaveApprovalAssignment;
+ use App\Models\LeaveEntitlement;
+@@ -40,6 +41,21 @@ public function index(Request $request): Response
+             ->orderBy('nama')
+             ->limit(500)
+             ->get(['id', 'employeeID as employee_id', 'nama as name']);
++        $localEmployees = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
++                $query->where('name', 'like', "%{$search}%")
++                    ->orWhere('employee_number', 'like', "%{$search}%");
++            }))
++            ->limit(500)
++            ->get()
++            ->map(fn (EmployeeRecord $employee) => (object) [
++                'id' => $employee->directory_id,
++                'employee_id' => $employee->employee_number,
++                'name' => $employee->name,
++                'department_id' => $employee->department_id,
++            ]);
++        $employees = $employees->concat($localEmployees)->sortBy('name')->values();
+         $employeeIds = $employees->pluck('id');
+         $positions = $employeeIds->isEmpty()
+             ? collect()
+@@ -94,7 +110,7 @@ public function index(Request $request): Response
+                 'name' => $employee->name,
+                 'department_id' => isset($positions[(string) $employee->id])
+                     ? (int) $positions[(string) $employee->id]->id_department
+-                    : null,
++                    : ($employee->department_id ?? null),
+             ])->values(),
+             'entitlements' => $entitlements->map(function (
+                 LeaveEntitlement $entitlement,
+@@ -283,10 +299,14 @@ public function saveEntitlement(Request $request): RedirectResponse
+             ->where('id', $validated['employee_id'])
+             ->where('rcd_enable', 1)
+             ->exists();
++        $employeeExists = $employeeExists || EmployeeRecord::query()
++            ->where('directory_id', $validated['employee_id'])
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->exists();
+ 
+         if (! $employeeExists) {
+             throw ValidationException::withMessages([
+-                'employee_id' => 'Pekerja aktif tidak dijumpai dalam db_spp.',
++                'employee_id' => 'Rekod pekerja aktif tidak dijumpai.',
+             ]);
+         }
+ 
+diff --git a/app/Http/Controllers/MaklumatPekerjaController.php b/app/Http/Controllers/MaklumatPekerjaController.php
+index 037983eb7dfc97592e07b2e7c8a2a121b09808b7..d80370a766844b04d744af0e3da0ba8f0417738c 100644
+--- a/app/Http/Controllers/MaklumatPekerjaController.php
++++ b/app/Http/Controllers/MaklumatPekerjaController.php
+@@ -3,10 +3,12 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Http\Requests\SaveMaklumatPekerjaRequest;
++use App\Models\EmployeeRecord;
+ use App\Models\MaklumatPekerja;
+ use App\Support\AuditLogger;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
++use Illuminate\Pagination\LengthAwarePaginator;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Str;
+ use Inertia\Inertia;
+@@ -34,7 +36,7 @@ public function index(Request $request): Response
+     {
+         $search = $request->string('search')->trim()->toString();
+ 
+-        $records = DB::connection('ibco')->table('maklumatpekerja as p')
++        $legacyRecords = DB::connection('ibco')->table('maklumatpekerja as p')
+             ->leftJoin('xstatus as s', 'p.status', '=', 's.id')
+             ->where('p.rcd_enable', 1)
+             ->when($search !== '', function ($query) use ($search) {
+@@ -55,8 +57,58 @@ public function index(Request $request): Response
+                 's.description as status',
+             ])
+             ->orderBy('p.nama')
+-            ->paginate(15)
+-            ->withQueryString();
++            ->get()
++            ->map(fn ($employee) => [
++                'id' => (int) $employee->id,
++                'employee_id' => $employee->employee_id,
++                'nama' => $employee->nama,
++                'nric' => $employee->nric,
++                'no_telefon' => $employee->no_telefon,
++                'email' => $employee->email,
++                'status' => $employee->status,
++                'source' => 'db_spp',
++                '_can_edit' => true,
++                '_can_delete' => true,
++            ]);
++        $localRecords = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
++                $query->where('name', 'like', "%{$search}%")
++                    ->orWhere('employee_number', 'like', "%{$search}%")
++                    ->orWhere('identity_number', 'like', "%{$search}%")
++                    ->orWhere('official_email', 'like', "%{$search}%");
++            }))
++            ->get()
++            ->map(fn (EmployeeRecord $employee) => [
++                'id' => $employee->directory_id,
++                'employee_id' => $employee->employee_number,
++                'nama' => $employee->name,
++                'nric' => $employee->identity_number,
++                'no_telefon' => $employee->phone,
++                'email' => $employee->official_email,
++                'status' => $employee->status === 'active'
++                    ? 'Aktif'
++                    : 'Menunggu Tarikh Mula',
++                'source' => 'IBCO HR Solutions',
++                '_can_edit' => false,
++                '_can_delete' => false,
++            ]);
++        $combined = $legacyRecords
++            ->concat($localRecords)
++            ->sortBy(fn (array $employee) => Str::lower($employee['nama'] ?? ''))
++            ->values();
++        $page = LengthAwarePaginator::resolveCurrentPage();
++        $perPage = 15;
++        $records = new LengthAwarePaginator(
++            $combined->forPage($page, $perPage)->values(),
++            $combined->count(),
++            $perPage,
++            $page,
++            [
++                'path' => $request->url(),
++                'query' => $request->query(),
++            ],
++        );
+ 
+         return Inertia::render('MaklumatPekerja/Index', [
+             'records' => $records,
+@@ -69,6 +121,15 @@ public function index(Request $request): Response
+ 
+     public function show(Request $request, int $id): Response
+     {
++        $localEmployee = EmployeeRecord::query()
++            ->with(['officeLocation:id,name', 'manager:id,name'])
++            ->where('directory_id', $id)
++            ->first();
++
++        if ($localEmployee) {
++            return $this->showLocalEmployee($request, $localEmployee);
++        }
++
+         $connection = DB::connection('ibco');
+         $canViewPayroll = $request->user()->hasPermission('payroll.view');
+ 
+@@ -264,6 +325,113 @@ public function show(Request $request, int $id): Response
+             'canViewPayroll' => $canViewPayroll,
+             'canManage' => $request->user()->hasPermission('employees.manage'),
+             'canManagePositions' => $request->user()->hasPermission('positions.manage'),
++            'dataSource' => 'db_spp',
++        ]);
++    }
++
++    private function showLocalEmployee(
++        Request $request,
++        EmployeeRecord $employee,
++    ): Response {
++        $employeeId = $employee->directory_id;
++        $probationEnd = $employee->probation_months > 0
++            ? $employee->start_date?->addMonths($employee->probation_months)->toDateString()
++            : null;
++        $attendance = DB::table('geo_attendance_records')
++            ->where('employee_id', $employeeId)
++            ->latest('attendance_date')
++            ->latest('clock_in_at')
++            ->limit(5)
++            ->get();
++        $leave = DB::table('employee_leave_requests')
++            ->where('employee_id', $employeeId)
++            ->latest('start_date')
++            ->limit(5)
++            ->get();
++        $overtime = DB::table('overtime_requests')
++            ->where('employee_id', $employeeId)
++            ->latest('work_date')
++            ->limit(5)
++            ->get();
++
++        return Inertia::render('MaklumatPekerja/Show', [
++            'pekerja' => [
++                'id' => $employee->directory_id,
++                'employee_id' => $employee->employee_number,
++                'nama' => $employee->name,
++                'nric' => $employee->identity_number,
++                'alamat' => null,
++                'tarikh_lahir' => null,
++                'kewarganegaraan' => null,
++                'no_telefon' => $employee->phone,
++                'email' => $employee->official_email,
++                'jantina' => null,
++                'agama' => null,
++                'bangsa' => null,
++                'status_perkahwinan' => null,
++                'status' => $employee->status === 'active'
++                    ? 'Aktif'
++                    : 'Menunggu Tarikh Mula',
++            ],
++            'jawatan' => [
++                'id' => $employee->getKey(),
++                'jawatan' => $employee->position_name,
++                'jabatan' => $employee->department_id
++                    ? 'Jabatan ID '.$employee->department_id
++                    : null,
++                'tarikh_lapor_diri' => $employee->start_date?->toDateString(),
++                'tarikh_tamat_tempoh_cubaan' => $probationEnd,
++                'gaji_asas' => $employee->salary,
++                'bank' => null,
++                'no_akaun' => null,
++                'no_kwsp' => null,
++                'no_perkeso' => null,
++                'kelayakan_cuti' => null,
++            ],
++            'jawatanHistory' => [],
++            'statistics' => [
++                'kehadiran' => DB::table('geo_attendance_records')
++                    ->where('employee_id', $employeeId)
++                    ->where('status', 'active')
++                    ->count(),
++                'cuti' => DB::table('employee_leave_requests')
++                    ->where('employee_id', $employeeId)
++                    ->count(),
++                'kerja_lebih_masa' => DB::table('overtime_requests')
++                    ->where('employee_id', $employeeId)
++                    ->count(),
++                'payroll' => DB::table('payroll_entries')
++                    ->where('employee_id', $employeeId)
++                    ->count(),
++            ],
++            'recentAttendance' => $attendance->map(fn ($record) => [
++                'id' => $record->id,
++                'pilihan_jam' => null,
++                'waktu_masuk' => $record->clock_in_at,
++                'waktu_keluar' => $record->clock_out_at,
++                'catatan' => $record->notes,
++            ]),
++            'recentLeave' => $leave->map(fn ($record) => [
++                'id' => $record->id,
++                'jenis_cuti' => $record->leave_type_label,
++                'tarikh_mula' => $record->start_date,
++                'tarikh_tamat' => $record->end_date,
++                'bilangan_hari' => $record->requested_days,
++                'status_permohonan' => $record->status,
++            ]),
++            'recentOvertime' => $overtime->map(fn ($record) => [
++                'id' => $record->id,
++                'jenis_ot' => 'Kerja Lebih Masa',
++                'tarikh' => $record->work_date,
++                'waktu_masuk' => $record->start_at,
++                'waktu_keluar' => $record->end_at,
++                'catatan' => $record->reason,
++            ]),
++            'recentPayroll' => [],
++            'canViewPayroll' => $request->user()->hasPermission('payroll.view'),
++            'canManage' => false,
++            'canManagePositions' => false,
++            'dataSource' => 'IBCO HR Solutions',
+         ]);
+     }
+ 
+diff --git a/app/Http/Controllers/OnboardingController.php b/app/Http/Controllers/OnboardingController.php
+index ba1a7004a7861516a188d5981fb8ea11ae36b8ce..5444d0f1ef0ae399ffaa9b390ff1f1eee4d02746 100644
+--- a/app/Http/Controllers/OnboardingController.php
++++ b/app/Http/Controllers/OnboardingController.php
+@@ -3,16 +3,20 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Enums\UserRole;
++use App\Http\Requests\RegisterOnboardingEmployeeRequest;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeUserLink;
+ use App\Models\OfficeLocation;
+ use App\Models\OnboardingCase;
+ use App\Models\OnboardingTask;
++use App\Models\RecruitmentNotification;
+ use App\Models\User;
+ use App\Support\AuditLogger;
+ use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
+ use Illuminate\Validation\Rule;
+ use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
+@@ -28,8 +32,11 @@ public function index(Request $request): Response
+         $canManage = $request->user()->hasPermission('onboarding.manage');
+         $casesQuery = OnboardingCase::query()
+             ->with([
+-                'candidate.requisition:id,code,title,department_id,position_name',
++                'candidate.requisition:id,code,title,department_id,position_name,hiring_manager_user_id',
++                'offer:id,recruitment_candidate_id,position_name,department_id,employment_type,salary,start_date,probation_months,status',
+                 'template:id,name',
++                'employeeRecord:id,directory_id,employee_number,user_id,official_email,status,start_date,office_location_id',
++                'employeeRecord.officeLocation:id,name',
+                 'employeeUser:id,name,email',
+                 'manager:id,name,email',
+                 'buddy:id,name,email',
+@@ -116,12 +123,241 @@ public function index(Request $request): Response
+                     ->get(['id', 'employeeID as employee_number', 'nama as name'])
+                 : [],
+             'filters' => ['search' => $search, 'status' => $status],
++            'newEmployeeCredentials' => $request->session()->get('new_employee_credentials'),
+             'permissions' => [
+                 'can_manage' => $canManage,
+             ],
+         ]);
+     }
+ 
++    public function registerEmployee(
++        RegisterOnboardingEmployeeRequest $request,
++        OnboardingCase $onboardingCase,
++    ): RedirectResponse {
++        $validated = $request->validated();
++        $onboardingCase->loadMissing(['candidate.requisition', 'offer', 'employeeRecord']);
++        $candidate = $onboardingCase->candidate;
++        $offer = $onboardingCase->offer;
++
++        if (! $candidate || ! $offer || $offer->status !== 'accepted') {
++            throw ValidationException::withMessages([
++                'registration' => 'Pendaftaran hanya boleh dibuat selepas tawaran sah diterima.',
++            ]);
++        }
++
++        if (in_array($onboardingCase->status, ['completed', 'cancelled'], true)) {
++            throw ValidationException::withMessages([
++                'registration' => 'Kes onboarding yang selesai atau dibatalkan tidak boleh mendaftarkan pekerja.',
++            ]);
++        }
++
++        if (
++            $onboardingCase->employeeRecord
++            || $onboardingCase->employee_user_id
++            || $onboardingCase->legacy_employee_id
++        ) {
++            throw ValidationException::withMessages([
++                'registration' => 'Calon ini telah didaftarkan atau dipautkan kepada pekerja.',
++            ]);
++        }
++
++        $legacyDuplicate = DB::connection('ibco')
++            ->table('maklumatpekerja')
++            ->where('rcd_enable', 1)
++            ->where(function ($query) use ($validated) {
++                $query->whereRaw(
++                    "UPPER(REPLACE(REPLACE(nric, '-', ''), ' ', '')) = ?",
++                    [$validated['identity_number']],
++                )
++                    ->orWhere('employeeID', $validated['employee_number'])
++                    ->orWhere('email', $validated['official_email']);
++            })
++            ->first(['id', 'employeeID', 'nama', 'nric', 'email']);
++
++        if ($legacyDuplicate) {
++            throw ValidationException::withMessages([
++                'registration' => sprintf(
++                    'Rekod sepadan ditemui dalam db_spp (%s). Gunakan “Paut Pekerja Sedia Ada” untuk mengelakkan rekod berganda.',
++                    $legacyDuplicate->employeeID ?: 'ID '.$legacyDuplicate->id,
++                ),
++            ]);
++        }
++
++        $temporaryPassword = Str::password(16);
++        $activatesNow = ! $offer->start_date->isFuture();
++        $result = DB::transaction(function () use (
++            $request,
++            $onboardingCase,
++            $validated,
++            $temporaryPassword,
++            $activatesNow,
++        ) {
++            $case = OnboardingCase::query()
++                ->with(['candidate.requisition', 'offer', 'employeeRecord'])
++                ->lockForUpdate()
++                ->findOrFail($onboardingCase->getKey());
++
++            if (
++                $case->employeeRecord
++                || $case->employee_user_id
++                || $case->legacy_employee_id
++                || $case->offer?->status !== 'accepted'
++            ) {
++                throw ValidationException::withMessages([
++                    'registration' => 'Status calon telah berubah. Muat semula halaman sebelum mencuba semula.',
++                ]);
++            }
++
++            $candidate = $case->candidate;
++            $offer = $case->offer;
++            $managerId = $validated['manager_user_id']
++                ?? $case->manager_user_id
++                ?? $candidate?->requisition?->hiring_manager_user_id;
++            $accountStatus = $activatesNow ? 'active' : 'pending_activation';
++
++            $user = User::query()->create([
++                'name' => $candidate->name,
++                'email' => $validated['official_email'],
++                'password' => $temporaryPassword,
++                'role' => UserRole::Employee,
++                'account_status' => $accountStatus,
++                'activation_date' => $offer->start_date,
++                'must_change_password' => true,
++                'credentials_issued_at' => now(),
++            ]);
++            $user->forceFill(['email_verified_at' => now()])->save();
++            $user->syncRoles([UserRole::Employee]);
++
++            $employee = EmployeeRecord::query()->create([
++                'recruitment_candidate_id' => $candidate->getKey(),
++                'recruitment_offer_id' => $offer->getKey(),
++                'user_id' => $user->getKey(),
++                'employee_number' => $validated['employee_number'],
++                'name' => $candidate->name,
++                'identity_number' => $validated['identity_number'],
++                'personal_email' => strtolower($candidate->email),
++                'official_email' => $validated['official_email'],
++                'phone' => $candidate->phone,
++                'department_id' => $offer->department_id,
++                'position_name' => $offer->position_name,
++                'employment_type' => $offer->employment_type,
++                'salary' => $offer->salary,
++                'probation_months' => $offer->probation_months,
++                'start_date' => $offer->start_date,
++                'manager_user_id' => $managerId,
++                'office_location_id' => $validated['office_location_id'],
++                'status' => $accountStatus,
++                'confirmed_by' => $request->user()->getAuthIdentifier(),
++                'confirmed_at' => now(),
++                'activated_at' => $activatesNow ? now() : null,
++            ]);
++            $employee->forceFill([
++                'directory_id' => EmployeeRecord::DIRECTORY_ID_OFFSET + $employee->getKey(),
++            ])->save();
++
++            EmployeeUserLink::query()->create([
++                'user_id' => $user->getKey(),
++                'employee_id' => $employee->directory_id,
++                'employee_source' => 'local',
++                'employee_record_id' => $employee->getKey(),
++                'office_location_id' => $validated['office_location_id'],
++                'is_active' => true,
++                'created_by' => $request->user()->getAuthIdentifier(),
++                'updated_by' => $request->user()->getAuthIdentifier(),
++            ]);
++
++            $case->update([
++                'employee_record_id' => $employee->getKey(),
++                'employee_user_id' => $user->getKey(),
++                'manager_user_id' => $managerId,
++            ]);
++            $case->tasks()
++                ->where('assignee_role', 'employee')
++                ->whereNull('completed_at')
++                ->update(['assignee_user_id' => $user->getKey()]);
++            $case->tasks()
++                ->where('assignee_role', 'supervisor')
++                ->whereNull('completed_at')
++                ->update(['assignee_user_id' => $managerId]);
++            $candidate->update(['nric' => $validated['identity_number']]);
++
++            RecruitmentNotification::query()->create([
++                'user_id' => $user->getKey(),
++                'recruitment_candidate_id' => $candidate->getKey(),
++                'recruitment_requisition_id' => $candidate->recruitment_requisition_id,
++                'type' => 'employee_registered',
++                'title' => 'Akaun pekerja disediakan',
++                'message' => sprintf(
++                    'Akaun pekerja %s telah disediakan dan aktif mulai %s.',
++                    $employee->employee_number,
++                    $employee->start_date->format('d/m/Y'),
++                ),
++            ]);
++            if ($managerId) {
++                RecruitmentNotification::query()->create([
++                    'user_id' => $managerId,
++                    'recruitment_candidate_id' => $candidate->getKey(),
++                    'recruitment_requisition_id' => $candidate->recruitment_requisition_id,
++                    'type' => 'new_employee_registered',
++                    'title' => 'Pekerja baharu didaftarkan',
++                    'message' => sprintf(
++                        '%s (%s) telah didaftarkan dan dijadualkan mula pada %s.',
++                        $employee->name,
++                        $employee->employee_number,
++                        $employee->start_date->format('d/m/Y'),
++                    ),
++                ]);
++            }
++
++            AuditLogger::record(
++                $request,
++                'employee.registered_from_recruitment',
++                'employee_records',
++                $employee->getKey(),
++                newValues: [
++                    'candidate_id' => $candidate->getKey(),
++                    'offer_id' => $offer->getKey(),
++                    'employee_number' => $employee->employee_number,
++                    'directory_id' => $employee->directory_id,
++                    'user_id' => $user->getKey(),
++                    'office_location_id' => $employee->office_location_id,
++                    'activation_date' => $employee->start_date->toDateString(),
++                    'status' => $employee->status,
++                ],
++            );
++            AuditLogger::record(
++                $request,
++                'user.created_from_recruitment',
++                'users',
++                $user->getKey(),
++                newValues: [
++                    'employee_record_id' => $employee->getKey(),
++                    'role' => UserRole::Employee->value,
++                    'account_status' => $accountStatus,
++                    'activation_date' => $offer->start_date->toDateString(),
++                    'must_change_password' => true,
++                ],
++            );
++
++            return compact('employee', 'user');
++        });
++
++        return redirect()
++            ->route('onboarding.index')
++            ->with('new_employee_credentials', [
++                'employee_number' => $result['employee']->employee_number,
++                'name' => $result['employee']->name,
++                'email' => $result['user']->email,
++                'temporary_password' => $temporaryPassword,
++                'activation_date' => $result['employee']->start_date->toDateString(),
++                'account_status' => $result['user']->account_status,
++            ])
++            ->with('toast', [
++                'type' => 'success',
++                'message' => 'Calon berjaya didaftarkan sebagai pekerja tanpa kemasukan semula maklumat.',
++            ]);
++    }
++
+     public function updateCase(
+         Request $request,
+         OnboardingCase $onboardingCase,
+@@ -137,6 +373,9 @@ public function updateCase(
+             ->where('assignee_role', 'supervisor')
+             ->whereNull('completed_at')
+             ->update(['assignee_user_id' => $validated['manager_user_id'] ?? null]);
++        $onboardingCase->employeeRecord?->update([
++            'manager_user_id' => $validated['manager_user_id'] ?? null,
++        ]);
+         AuditLogger::record(
+             $request,
+             'onboarding.case_updated',
+@@ -156,6 +395,12 @@ public function linkEmployee(
+         Request $request,
+         OnboardingCase $onboardingCase,
+     ): RedirectResponse {
++        if ($onboardingCase->employee_record_id) {
++            throw ValidationException::withMessages([
++                'legacy_employee_id' => 'Calon ini telah didaftarkan sebagai pekerja IBCO dan tidak boleh dipautkan semula.',
++            ]);
++        }
++
+         $validated = $request->validate([
+             'legacy_employee_id' => ['required', 'integer', 'min:1'],
+             'employee_user_id' => ['required', 'integer', Rule::exists('users', 'id')],
+@@ -195,6 +440,8 @@ public function linkEmployee(
+                 ['user_id' => $validated['employee_user_id']],
+                 [
+                     'employee_id' => $validated['legacy_employee_id'],
++                    'employee_source' => 'legacy',
++                    'employee_record_id' => null,
+                     'office_location_id' => $validated['office_location_id'],
+                     'is_active' => true,
+                     'created_by' => $request->user()->getAuthIdentifier(),
+@@ -254,9 +501,15 @@ public function changeCaseStatus(
+         }
+ 
+         if ($action === 'complete') {
+-            if (! $onboardingCase->legacy_employee_id || ! $onboardingCase->employee_user_id) {
++            if (
++                (
++                    ! $onboardingCase->employee_record_id
++                    && ! $onboardingCase->legacy_employee_id
++                )
++                || ! $onboardingCase->employee_user_id
++            ) {
+                 throw ValidationException::withMessages([
+-                    'action' => 'Pautkan rekod pekerja dan akaun Employee sebelum melengkapkan onboarding.',
++                    'action' => 'Daftarkan calon sebagai pekerja atau pautkan pekerja sedia ada sebelum melengkapkan onboarding.',
+                 ]);
+             }
+ 
+@@ -356,7 +609,7 @@ public function export(Request $request): StreamedResponse
+                 'Tarikh Mula',
+                 'Status',
+                 'Kemajuan',
+-                'Pekerja db_spp',
++                'No. Pekerja',
+                 'Tugasan Lewat',
+             ]);
+             $query
+@@ -374,7 +627,8 @@ public function export(Request $request): StreamedResponse
+                             $tasks->count() > 0
+                                 ? round(($done / $tasks->count()) * 100).'%'
+                                 : '0%',
+-                            $case->legacy_employee_id,
++                            $case->employeeRecord?->employee_number
++                                ?? $case->legacy_employee_id,
+                             $tasks
+                                 ->whereIn('status', ['pending', 'in_progress'])
+                                 ->filter(fn ($task) => $task->due_date?->isPast())
+@@ -413,13 +667,45 @@ private function serializeCase(OnboardingCase $case): array
+                 'name' => $case->candidate?->name,
+                 'email' => $case->candidate?->email,
+                 'phone' => $case->candidate?->phone,
++                'identity_number' => $case->candidate?->nric,
+                 'position' => $case->candidate?->requisition?->title,
+                 'requisition_code' => $case->candidate?->requisition?->code,
+             ],
+             'template' => $case->template?->name,
+             'legacy_employee_id' => $case->legacy_employee_id,
++            'employee_record_id' => $case->employee_record_id,
+             'employee_user_id' => $case->employee_user_id,
+             'employee_user' => $case->employeeUser?->name,
++            'employee_record' => $case->employeeRecord
++                ? [
++                    'directory_id' => $case->employeeRecord->directory_id,
++                    'employee_number' => $case->employeeRecord->employee_number,
++                    'official_email' => $case->employeeRecord->official_email,
++                    'status' => $case->employeeRecord->status,
++                    'activation_date' => $case->employeeRecord->start_date?->toDateString(),
++                    'office' => $case->employeeRecord->officeLocation?->name,
++                ]
++                : null,
++            'offer' => $case->offer
++                ? [
++                    'position_name' => $case->offer->position_name,
++                    'department_id' => $case->offer->department_id,
++                    'employment_type' => $case->offer->employment_type,
++                    'salary' => (float) $case->offer->salary,
++                    'probation_months' => $case->offer->probation_months,
++                    'start_date' => $case->offer->start_date?->toDateString(),
++                    'status' => $case->offer->status,
++                ]
++                : null,
++            'registration_defaults' => [
++                'identity_number' => $case->candidate?->nric ?? '',
++                'employee_number' => sprintf(
++                    'IBCO-%s-%04d',
++                    $case->start_date?->format('Y') ?? now()->format('Y'),
++                    $case->candidate?->getKey() ?? $case->getKey(),
++                ),
++                'official_email' => strtolower($case->candidate?->email ?? ''),
++            ],
+             'manager_user_id' => $case->manager_user_id,
+             'manager' => $case->manager?->name,
+             'buddy_user_id' => $case->buddy_user_id,
+diff --git a/app/Http/Controllers/OvertimeRequestController.php b/app/Http/Controllers/OvertimeRequestController.php
+index d7130ce5137a2d5fd6f2165069eae587a573cb0f..62ec0ab4fe663738531fccbab2dd3069ef0bbb8b 100644
+--- a/app/Http/Controllers/OvertimeRequestController.php
++++ b/app/Http/Controllers/OvertimeRequestController.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Models\EmployeeRecord;
+ use App\Http\Requests\ReviewOvertimeRequest;
+ use App\Models\OvertimeApprovalAssignment;
+ use App\Models\OvertimeNotification;
+@@ -544,7 +545,7 @@ private function employeeMap(array $employeeIds): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->whereIn('id', $employeeIds)
+             ->get(['id', 'employeeID', 'nama'])
+@@ -556,6 +557,19 @@ private function employeeMap(array $employeeIds): array
+                 ],
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds)
++            ->get()
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => [
++                    'id' => $employee->directory_id,
++                    'employee_id' => $employee->employee_number,
++                    'name' => $employee->name,
++                ],
++            ])
++            ->all();
++
++        return $legacy + $local;
+     }
+ 
+     /**
+@@ -576,6 +590,16 @@ private function matchingEmployeeIds(string $search): array
+             })
+             ->pluck('id')
+             ->map(fn ($id) => (int) $id)
++            ->concat(
++                EmployeeRecord::query()
++                    ->whereIn('status', ['pending_activation', 'active'])
++                    ->where(function ($query) use ($search) {
++                        $query->where('name', 'like', "%{$search}%")
++                            ->orWhere('employee_number', 'like', "%{$search}%");
++                    })
++                    ->pluck('directory_id'),
++            )
++            ->unique()
+             ->all();
+     }
+ 
+diff --git a/app/Http/Controllers/PayrollSettingsController.php b/app/Http/Controllers/PayrollSettingsController.php
+index 4e6ab57df24905c6ece435f8e30f4fd23a59739e..01ba6cb704b350ce30a864bc2cf820eae64d77eb 100644
+--- a/app/Http/Controllers/PayrollSettingsController.php
++++ b/app/Http/Controllers/PayrollSettingsController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Models\EmployeePayrollComponent;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeSalaryProfile;
+ use App\Models\PayrollComponent;
+ use App\Models\PayrollSetting;
+@@ -10,7 +11,9 @@
+ use Carbon\Carbon;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
++use Illuminate\Pagination\LengthAwarePaginator;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
+ use Illuminate\Validation\Rule;
+ use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
+@@ -26,7 +29,7 @@ public function index(Request $request): Response
+             ->where('rcd_enable', 1)
+             ->selectRaw('id_pekerja, MAX(id) as job_id')
+             ->groupBy('id_pekerja');
+-        $employees = DB::connection('ibco')
++        $legacyEmployees = DB::connection('ibco')
+             ->table('maklumatpekerja as employee')
+             ->leftJoinSub($activeJobIds, 'active_job', function ($join) {
+                 $join->on('active_job.id_pekerja', '=', 'employee.id');
+@@ -48,8 +51,34 @@ public function index(Request $request): Response
+                 'job.salary as legacy_salary',
+             ])
+             ->orderBy('employee.nama')
+-            ->paginate(20)
+-            ->withQueryString();
++            ->get();
++        $localEmployees = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
++                $query->where('name', 'like', "%{$search}%")
++                    ->orWhere('employee_number', 'like', "%{$search}%")
++                    ->orWhere('position_name', 'like', "%{$search}%");
++            }))
++            ->get()
++            ->map(fn (EmployeeRecord $employee) => (object) [
++                'id' => $employee->directory_id,
++                'employee_number' => $employee->employee_number,
++                'employee_name' => $employee->name,
++                'position' => $employee->position_name,
++                'legacy_salary' => $employee->salary,
++            ]);
++        $combinedEmployees = $legacyEmployees
++            ->concat($localEmployees)
++            ->sortBy(fn ($employee) => Str::lower($employee->employee_name ?? ''))
++            ->values();
++        $page = LengthAwarePaginator::resolveCurrentPage();
++        $employees = new LengthAwarePaginator(
++            $combinedEmployees->forPage($page, 20)->values(),
++            $combinedEmployees->count(),
++            20,
++            $page,
++            ['path' => $request->url(), 'query' => $request->query()],
++        );
+         $employeeIds = collect($employees->items())->pluck('id')->all();
+         $profiles = EmployeeSalaryProfile::query()
+             ->whereIn('employee_id', $employeeIds)
+@@ -138,7 +167,9 @@ public function index(Request $request): Response
+                 'active_employees' => DB::connection('ibco')
+                     ->table('maklumatpekerja')
+                     ->where('rcd_enable', 1)
+-                    ->count(),
++                    ->count() + EmployeeRecord::query()
++                        ->where('status', 'active')
++                        ->count(),
+                 'configured_profiles' => EmployeeSalaryProfile::query()
+                     ->where('is_active', true)
+                     ->count(),
+@@ -494,6 +525,11 @@ private function ensureEmployeeExists(int $employeeId): void
+             ->where('rcd_enable', 1)
+             ->exists();
+ 
++        $exists = $exists || EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->exists();
++
+         if (! $exists) {
+             throw ValidationException::withMessages([
+                 'employee_id' => 'Rekod pekerja asal tidak aktif atau tidak dijumpai.',
+diff --git a/app/Http/Controllers/PerformanceReviewController.php b/app/Http/Controllers/PerformanceReviewController.php
+index c56efa642fad7f7e61dce3eafaabaaecfe398528..30e1e75bdd99e1e899586b90b299a91adf3378ab 100644
+--- a/app/Http/Controllers/PerformanceReviewController.php
++++ b/app/Http/Controllers/PerformanceReviewController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Models\EmployeeUserLink;
++use App\Models\EmployeeRecord;
+ use App\Models\PerformanceCycle;
+ use App\Models\PerformanceEvidence;
+ use App\Models\PerformanceImprovementPlan;
+@@ -57,6 +58,15 @@ public function index(Request $request): Response
+                         ->orWhere('employeeID', 'like', "%{$search}%");
+                 })
+                 ->pluck('id')
++                ->concat(
++                    EmployeeRecord::query()
++                        ->whereIn('status', ['pending_activation', 'active'])
++                        ->where(function ($query) use ($search) {
++                            $query->where('name', 'like', "%{$search}%")
++                                ->orWhere('employee_number', 'like', "%{$search}%");
++                        })
++                        ->pluck('directory_id'),
++                )
+             : collect();
+         $visibleBase = $this->visibleQuery($request);
+         $query = (clone $visibleBase)
+@@ -885,7 +895,7 @@ private function employeeSnapshot(int $employeeId): ?object
+      */
+     private function employeeSnapshots(array $employeeIds): Collection
+     {
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja as employee')
+             ->leftJoin('maklumatjawatan as position', function ($join) {
+                 $join->on('position.id_pekerja', '=', 'employee.id')
+@@ -903,6 +913,19 @@ private function employeeSnapshots(array $employeeIds): Collection
+             ])
+             ->unique('id')
+             ->values();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds)
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->get()
++            ->map(fn (EmployeeRecord $employee) => (object) [
++                'id' => $employee->directory_id,
++                'employee_number' => $employee->employee_number,
++                'name' => $employee->name,
++                'department_id' => $employee->department_id,
++                'position_name' => $employee->position_name,
++            ]);
++
++        return $legacy->concat($local)->values();
+     }
+ 
+     /**
+@@ -927,7 +950,7 @@ private function linkedEmployeeOptions(): Collection
+     {
+         $links = EmployeeUserLink::query()
+             ->where('is_active', true)
+-            ->with('user:id,name,email')
++            ->with(['user:id,name,email', 'employeeRecord'])
+             ->get()
+             ->keyBy('employee_id');
+ 
+diff --git a/app/Http/Controllers/RecruitmentController.php b/app/Http/Controllers/RecruitmentController.php
+index ea71a653325669b7defa20428d5a8638e46edf24..9c559ea5b2a71bcc3bd8038362f78277bce79e7f 100644
+--- a/app/Http/Controllers/RecruitmentController.php
++++ b/app/Http/Controllers/RecruitmentController.php
+@@ -209,6 +209,8 @@ public function show(Request $request, RecruitmentCandidate $candidate): Respons
+             'interviews.scorecards.panelUser:id,name,email',
+             'offers',
+             'onboardingCase.template:id,name',
++            'onboardingCase.employeeRecord:id,directory_id,employee_number,official_email,status,start_date,office_location_id',
++            'onboardingCase.employeeRecord.officeLocation:id,name',
+             'onboardingCase.employeeUser:id,name,email',
+             'onboardingCase.tasks.assignee:id,name,email',
+         ]);
+@@ -1359,8 +1361,19 @@ private function serializeOnboarding(OnboardingCase $case): array
+             'id' => $case->getKey(),
+             'template' => $case->template?->name,
+             'legacy_employee_id' => $case->legacy_employee_id,
++            'employee_record_id' => $case->employee_record_id,
+             'employee_user_id' => $case->employee_user_id,
+             'employee_user' => $case->employeeUser?->name,
++            'employee_record' => $case->employeeRecord
++                ? [
++                    'directory_id' => $case->employeeRecord->directory_id,
++                    'employee_number' => $case->employeeRecord->employee_number,
++                    'official_email' => $case->employeeRecord->official_email,
++                    'status' => $case->employeeRecord->status,
++                    'activation_date' => $case->employeeRecord->start_date?->toDateString(),
++                    'office' => $case->employeeRecord->officeLocation?->name,
++                ]
++                : null,
+             'manager_user_id' => $case->manager_user_id,
+             'buddy_user_id' => $case->buddy_user_id,
+             'start_date' => $case->start_date?->toDateString(),
+diff --git a/app/Http/Controllers/RosterController.php b/app/Http/Controllers/RosterController.php
+index 61ebd05d888b979dcc3da599f8ebce7ac034fd6b..8dd04d85e0613fa9ad637edd7f18f09446e99312 100644
+--- a/app/Http/Controllers/RosterController.php
++++ b/app/Http/Controllers/RosterController.php
+@@ -702,7 +702,7 @@ private function employeeDirectory(
+         bool $enforceVisibility = true,
+     ): array {
+         $links = EmployeeUserLink::query()
+-            ->with('user:id,name,email')
++            ->with(['user:id,name,email', 'employeeRecord'])
+             ->where('is_active', true)
+             ->get()
+             ->keyBy('employee_id');
+@@ -712,9 +712,12 @@ private function employeeDirectory(
+             return [];
+         }
+ 
++        $legacyEmployeeIds = $links
++            ->reject(fn (EmployeeUserLink $link) => $link->employee_source === 'local')
++            ->keys();
+         $positions = DB::connection('ibco')
+             ->table('maklumatjawatan')
+-            ->whereIn('id_pekerja', $employeeIds)
++            ->whereIn('id_pekerja', $legacyEmployeeIds)
+             ->where('rcd_enable', 1)
+             ->orderByDesc('id')
+             ->get(['id_pekerja', 'id_department'])
+@@ -723,6 +726,9 @@ private function employeeDirectory(
+         $departmentIds = $positions
+             ->pluck('id_department')
+             ->filter()
++            ->concat(
++                $links->pluck('employeeRecord.department_id')->filter(),
++            )
+             ->unique();
+         $departments = $departmentIds->isEmpty()
+             ? collect()
+@@ -737,9 +743,9 @@ private function employeeDirectory(
+             ? $this->supervisedDepartmentIds($request)
+             : null;
+ 
+-        return DB::connection('ibco')
++        $legacyEmployees = DB::connection('ibco')
+             ->table('maklumatpekerja')
+-            ->whereIn('id', $employeeIds)
++            ->whereIn('id', $legacyEmployeeIds)
+             ->where('rcd_enable', 1)
+             ->orderBy('nama')
+             ->get(['id', 'employeeID', 'nama'])
+@@ -768,7 +774,31 @@ private function employeeDirectory(
+                         : 'Tanpa Jabatan',
+                     'office_location_id' => $link?->office_location_id,
+                 ];
+-            })
++            });
++        $localEmployees = $links
++            ->filter(fn (EmployeeUserLink $link) => $link->employee_source === 'local'
++                && $link->employeeRecord !== null)
++            ->map(function (EmployeeUserLink $link) use ($departments) {
++                $employee = $link->employeeRecord;
++                $departmentId = $employee->department_id;
++
++                return [
++                    'employee_id' => $employee->directory_id,
++                    'employee_number' => $employee->employee_number,
++                    'name' => $employee->name,
++                    'user_id' => $link->user_id,
++                    'user_name' => $link->user?->name,
++                    'department_id' => $departmentId,
++                    'department_name' => $departmentId
++                        ? $departments->get((string) $departmentId)?->description
++                            ?? 'Tanpa Jabatan'
++                        : 'Tanpa Jabatan',
++                    'office_location_id' => $link->office_location_id,
++                ];
++            });
++
++        return $legacyEmployees
++            ->concat($localEmployees)
+             ->when(
+                 is_array($supervised),
+                 fn (Collection $employees) => $employees->whereIn(
+diff --git a/app/Http/Controllers/ScheduleSettingsController.php b/app/Http/Controllers/ScheduleSettingsController.php
+index 826aadc811c279ae3167777bbf270f05586f0d3a..05eb43ca746b48a8a08a7686003f22312c70a5c0 100644
+--- a/app/Http/Controllers/ScheduleSettingsController.php
++++ b/app/Http/Controllers/ScheduleSettingsController.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use App\Models\EmployeeRecord;
+ use App\Models\OfficeLocation;
+ use App\Models\ScheduleAssignment;
+ use App\Models\ShiftTemplate;
+@@ -35,6 +36,17 @@ public function index(): Response
+                 ->whereIn('id', $employeeIds)
+                 ->get(['id', 'employeeID', 'nama'])
+                 ->keyBy(fn ($employee) => (string) $employee->id);
++        $localEmployees = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds)
++            ->get()
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => (object) [
++                    'id' => $employee->directory_id,
++                    'employeeID' => $employee->employee_number,
++                    'nama' => $employee->name,
++                ],
++            ]);
++        $employees = $employees->union($localEmployees);
+         $departments = DB::connection('ibco')
+             ->table('xdepartment')
+             ->where('rcd_enable', 1)
+@@ -101,7 +113,20 @@ function (ScheduleAssignment $assignment) use (
+                     'id' => (int) $employee->id,
+                     'employee_id' => $employee->employeeID,
+                     'name' => $employee->nama,
+-                ]),
++                ])
++                ->concat(
++                    EmployeeRecord::query()
++                        ->whereIn('status', ['pending_activation', 'active'])
++                        ->orderBy('name')
++                        ->get()
++                        ->map(fn (EmployeeRecord $employee) => [
++                            'id' => $employee->directory_id,
++                            'employee_id' => $employee->employee_number,
++                            'name' => $employee->name,
++                        ]),
++                )
++                ->sortBy('name')
++                ->values(),
+             'departmentOptions' => $departments->map(fn ($department) => [
+                 'id' => (int) $department->id,
+                 'name' => $department->description,
+@@ -368,7 +393,11 @@ private function assertLegacyScopeExists(array $validated): void
+                 ->table('maklumatpekerja')
+                 ->where('id', $validated['employee_id'])
+                 ->where('rcd_enable', 1)
+-                ->exists(),
++                ->exists()
++                || EmployeeRecord::query()
++                    ->where('directory_id', $validated['employee_id'])
++                    ->whereIn('status', ['pending_activation', 'active'])
++                    ->exists(),
+             'department' => DB::connection('ibco')
+                 ->table('xdepartment')
+                 ->where('id', $validated['department_id'])
+diff --git a/app/Http/Controllers/Settings/SecurityController.php b/app/Http/Controllers/Settings/SecurityController.php
+index d2800f80b46c26202d7450c994be2528729339fc..cd6c2a26852b289ab572cabfee818e0b982f5d88 100644
+--- a/app/Http/Controllers/Settings/SecurityController.php
++++ b/app/Http/Controllers/Settings/SecurityController.php
+@@ -57,6 +57,7 @@ public function update(PasswordUpdateRequest $request): RedirectResponse
+     {
+         $request->user()->update([
+             'password' => $request->password,
++            'must_change_password' => false,
+         ]);
+ 
+         Inertia::flash('toast', ['type' => 'success', 'message' => __('Password updated.')]);
+diff --git a/app/Http/Controllers/StatutorySettingsController.php b/app/Http/Controllers/StatutorySettingsController.php
+index 62e4fca8e8bfe3939dafdeb6da62d0deb0ac0a4a..e2613f14610f02bb3e205dbcaac08adbbfe55994 100644
+--- a/app/Http/Controllers/StatutorySettingsController.php
++++ b/app/Http/Controllers/StatutorySettingsController.php
+@@ -3,13 +3,16 @@
+ namespace App\Http\Controllers;
+ 
+ use App\Models\EmployeeStatutoryProfile;
++use App\Models\EmployeeRecord;
+ use App\Models\PayrollSetting;
+ use App\Models\StatutorySetting;
+ use App\Support\AuditLogger;
+ use Carbon\Carbon;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
++use Illuminate\Pagination\LengthAwarePaginator;
+ use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
+ use Illuminate\Validation\Rule;
+ use Illuminate\Validation\ValidationException;
+ use Inertia\Inertia;
+@@ -25,7 +28,7 @@ public function index(Request $request): Response
+             ->where('rcd_enable', 1)
+             ->selectRaw('id_pekerja, MAX(id) as job_id')
+             ->groupBy('id_pekerja');
+-        $employees = DB::connection('ibco')
++        $legacyEmployees = DB::connection('ibco')
+             ->table('maklumatpekerja as employee')
+             ->leftJoinSub($activeJobs, 'active_job', function ($join) {
+                 $join->on('active_job.id_pekerja', '=', 'employee.id');
+@@ -50,8 +53,37 @@ public function index(Request $request): Response
+                 'job.nosocso as legacy_socso_number',
+             ])
+             ->orderBy('employee.nama')
+-            ->paginate(20)
+-            ->withQueryString();
++            ->get();
++        $localEmployees = EmployeeRecord::query()
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
++                $query->where('name', 'like', "%{$search}%")
++                    ->orWhere('employee_number', 'like', "%{$search}%")
++                    ->orWhere('position_name', 'like', "%{$search}%");
++            }))
++            ->get()
++            ->map(fn (EmployeeRecord $employee) => (object) [
++                'id' => $employee->directory_id,
++                'employee_number' => $employee->employee_number,
++                'employee_name' => $employee->name,
++                'birth_date' => null,
++                'nationality' => null,
++                'position' => $employee->position_name,
++                'legacy_epf_number' => null,
++                'legacy_socso_number' => null,
++            ]);
++        $combinedEmployees = $legacyEmployees
++            ->concat($localEmployees)
++            ->sortBy(fn ($employee) => Str::lower($employee->employee_name ?? ''))
++            ->values();
++        $page = LengthAwarePaginator::resolveCurrentPage();
++        $employees = new LengthAwarePaginator(
++            $combinedEmployees->forPage($page, 20)->values(),
++            $combinedEmployees->count(),
++            20,
++            $page,
++            ['path' => $request->url(), 'query' => $request->query()],
++        );
+         $profiles = EmployeeStatutoryProfile::query()
+             ->whereIn(
+                 'employee_id',
+@@ -110,7 +142,9 @@ public function index(Request $request): Response
+                 'active_employees' => DB::connection('ibco')
+                     ->table('maklumatpekerja')
+                     ->where('rcd_enable', 1)
+-                    ->count(),
++                    ->count() + EmployeeRecord::query()
++                        ->where('status', 'active')
++                        ->count(),
+                 'configured_profiles' => EmployeeStatutoryProfile::query()
+                     ->where('is_active', true)
+                     ->count(),
+@@ -317,6 +351,11 @@ private function ensureEmployeeExists(int $employeeId): void
+             ->where('rcd_enable', 1)
+             ->exists();
+ 
++        $exists = $exists || EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->exists();
++
+         if (! $exists) {
+             throw ValidationException::withMessages([
+                 'employee_id' => 'Rekod pekerja asal tidak aktif atau tidak dijumpai.',
+diff --git a/app/Http/Controllers/TrainingController.php b/app/Http/Controllers/TrainingController.php
+index 0e28a7776ff32c11ced98c8098b7fae3b9279caa..d3586a023c0b0f5f624a5dddcfdceb0fa6f12f3e 100644
+--- a/app/Http/Controllers/TrainingController.php
++++ b/app/Http/Controllers/TrainingController.php
+@@ -6,6 +6,7 @@
+ use App\Models\CompetencyRequirement;
+ use App\Models\DevelopmentPlan;
+ use App\Models\EmployeeCompetency;
++use App\Models\EmployeeRecord;
+ use App\Models\TrainingApprovalAssignment;
+ use App\Models\TrainingAttachment;
+ use App\Models\TrainingBudget;
+@@ -56,7 +57,15 @@ public function index(Request $request): Response
+                     ->where(fn ($query) => $query
+                         ->where('nama', 'like', "%{$search}%")
+                         ->orWhere('employeeID', 'like', "%{$search}%"))
+-                    ->pluck('id');
++                    ->pluck('id')
++                    ->concat(
++                        EmployeeRecord::query()
++                            ->whereIn('status', ['pending_activation', 'active'])
++                            ->where(fn ($query) => $query
++                                ->where('name', 'like', "%{$search}%")
++                                ->orWhere('employee_number', 'like', "%{$search}%"))
++                            ->pluck('directory_id'),
++                    );
+                 $query->where(fn (Builder $query) => $query
+                     ->where('request_number', 'like', "%{$search}%")
+                     ->orWhere('course_title', 'like', "%{$search}%")
+diff --git a/app/Http/Controllers/UserManagementController.php b/app/Http/Controllers/UserManagementController.php
+index 3a8b39798ae730645715f482fddafe73bb696e1a..8d61687269db9a81ac7c1aed0d3963da719bb01e 100644
+--- a/app/Http/Controllers/UserManagementController.php
++++ b/app/Http/Controllers/UserManagementController.php
+@@ -29,7 +29,10 @@ public function index(Request $request): Response
+                 'roleAssignments',
+                 'employeeLink' => fn ($query) => $query
+                     ->where('is_active', true)
+-                    ->with('officeLocation:id,name'),
++                    ->with([
++                        'officeLocation:id,name',
++                        'employeeRecord:id,directory_id,employee_number,name',
++                    ]),
+             ])
+             ->when($search !== '', function ($query) use ($search) {
+                 $query->where(function ($query) use ($search) {
+@@ -41,7 +44,9 @@ public function index(Request $request): Response
+             ->paginate(15)
+             ->withQueryString();
+         $employeeIds = $users->getCollection()
+-            ->pluck('employeeLink.employee_id')
++            ->pluck('employeeLink')
++            ->filter(fn (?EmployeeUserLink $link) => $link?->employee_source !== 'local')
++            ->pluck('employee_id')
+             ->filter()
+             ->unique()
+             ->values();
+@@ -55,9 +60,9 @@ public function index(Request $request): Response
+ 
+         $users->through(function (User $user) use ($employees, $request) {
+             $link = $user->employeeLink;
+-            $employee = $link
+-                ? ($employees[(string) $link->employee_id] ?? null)
+-                : null;
++            $employee = $link?->employee_source === 'local'
++                ? $link->employeeRecord
++                : ($link ? ($employees[(string) $link->employee_id] ?? null) : null);
+ 
+             return [
+                 'id' => $user->id,
+@@ -73,9 +78,9 @@ public function index(Request $request): Response
+                 'is_current_user' => $user->is($request->user()),
+                 'employee' => $employee
+                     ? [
+-                        'id' => (int) $employee->id,
+-                        'employee_id' => $employee->employeeID,
+-                        'name' => $employee->nama,
++                        'id' => (int) ($employee->directory_id ?? $employee->id),
++                        'employee_id' => $employee->employee_number ?? $employee->employeeID,
++                        'name' => $employee->name ?? $employee->nama,
+                         'office' => $link?->officeLocation?->name,
+                     ]
+                     : null,
+diff --git a/app/Http/Middleware/EnsurePasswordChanged.php b/app/Http/Middleware/EnsurePasswordChanged.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..64bbaf9844ab4ca0e4e35685608f648aadaf0329
+--- /dev/null
++++ b/app/Http/Middleware/EnsurePasswordChanged.php
+@@ -0,0 +1,35 @@
++<?php
++
++namespace App\Http\Middleware;
++
++use Closure;
++use Illuminate\Http\Request;
++use Symfony\Component\HttpFoundation\Response;
++
++class EnsurePasswordChanged
++{
++    public function handle(Request $request, Closure $next): Response
++    {
++        $user = $request->user();
++
++        if (
++            $user?->must_change_password
++            && ! $request->routeIs(
++                'security.edit',
++                'user-password.update',
++                'password.confirm',
++                'password.confirmation',
++                'logout',
++            )
++        ) {
++            return redirect()
++                ->route('security.edit')
++                ->with('toast', [
++                    'type' => 'warning',
++                    'message' => 'Sila tukar kata laluan sementara sebelum meneruskan.',
++                ]);
++        }
++
++        return $next($request);
++    }
++}
+diff --git a/app/Http/Requests/RegisterOnboardingEmployeeRequest.php b/app/Http/Requests/RegisterOnboardingEmployeeRequest.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee7cf25db7df8dc287d4fa45978c49aa3fe10906
+--- /dev/null
++++ b/app/Http/Requests/RegisterOnboardingEmployeeRequest.php
+@@ -0,0 +1,88 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class RegisterOnboardingEmployeeRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user()?->hasPermission('onboarding.manage') ?? false;
++    }
++
++    /**
++     * @return array<string, array<int, mixed>>
++     */
++    public function rules(): array
++    {
++        return [
++            'identity_number' => [
++                'required',
++                'string',
++                'min:6',
++                'max:40',
++                Rule::unique('employee_records', 'identity_number'),
++            ],
++            'employee_number' => [
++                'required',
++                'string',
++                'max:30',
++                'regex:/^[A-Za-z0-9][A-Za-z0-9\/_-]*$/',
++                Rule::unique('employee_records', 'employee_number'),
++            ],
++            'official_email' => [
++                'required',
++                'email:rfc',
++                'max:255',
++                Rule::unique('users', 'email'),
++                Rule::unique('employee_records', 'official_email'),
++            ],
++            'office_location_id' => [
++                'required',
++                'integer',
++                Rule::exists('office_locations', 'id')->where('is_active', true),
++            ],
++            'manager_user_id' => ['nullable', 'integer', Rule::exists('users', 'id')],
++            'confirmed' => ['accepted'],
++        ];
++    }
++
++    /**
++     * @return array<string, string>
++     */
++    public function messages(): array
++    {
++        return [
++            'identity_number.required' => 'Nombor pengenalan calon wajib disahkan.',
++            'identity_number.unique' => 'Nombor pengenalan ini telah didaftarkan sebagai pekerja.',
++            'employee_number.required' => 'Nombor pekerja wajib diisi.',
++            'employee_number.regex' => 'Nombor pekerja hanya boleh mengandungi huruf, nombor, garis condong, sempang atau garis bawah.',
++            'employee_number.unique' => 'Nombor pekerja ini telah digunakan.',
++            'official_email.required' => 'E-mel log masuk rasmi wajib diisi.',
++            'official_email.email' => 'Sila masukkan alamat e-mel rasmi yang sah.',
++            'official_email.unique' => 'Alamat e-mel ini telah digunakan oleh akaun lain.',
++            'office_location_id.required' => 'Sila pilih lokasi pejabat.',
++            'office_location_id.exists' => 'Lokasi pejabat yang dipilih tidak aktif.',
++            'confirmed.accepted' => 'Sila sahkan bahawa maklumat pekerja telah disemak.',
++        ];
++    }
++
++    protected function prepareForValidation(): void
++    {
++        $identity = $this->input('identity_number');
++        $employeeNumber = $this->input('employee_number');
++        $email = $this->input('official_email');
++
++        $this->merge([
++            'identity_number' => is_string($identity)
++                ? strtoupper(preg_replace('/[\s-]+/', '', trim($identity)))
++                : $identity,
++            'employee_number' => is_string($employeeNumber)
++                ? strtoupper(trim($employeeNumber))
++                : $employeeNumber,
++            'official_email' => is_string($email) ? strtolower(trim($email)) : $email,
++        ]);
++    }
++}
+diff --git a/app/Models/EmployeeRecord.php b/app/Models/EmployeeRecord.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..819825191b00eb47ec9937c53725553fa37dd630
+--- /dev/null
++++ b/app/Models/EmployeeRecord.php
+@@ -0,0 +1,97 @@
++<?php
++
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++use Illuminate\Database\Eloquent\Relations\HasOne;
++
++class EmployeeRecord extends Model
++{
++    public const DIRECTORY_ID_OFFSET = 7_000_000_000_000_000;
++
++    protected $fillable = [
++        'directory_id',
++        'recruitment_candidate_id',
++        'recruitment_offer_id',
++        'user_id',
++        'employee_number',
++        'name',
++        'identity_number',
++        'personal_email',
++        'official_email',
++        'phone',
++        'department_id',
++        'position_name',
++        'employment_type',
++        'salary',
++        'probation_months',
++        'start_date',
++        'manager_user_id',
++        'office_location_id',
++        'status',
++        'confirmed_by',
++        'confirmed_at',
++        'activated_at',
++    ];
++
++    protected function casts(): array
++    {
++        return [
++            'directory_id' => 'integer',
++            'department_id' => 'integer',
++            'salary' => 'decimal:2',
++            'probation_months' => 'integer',
++            'start_date' => 'date',
++            'confirmed_at' => 'datetime',
++            'activated_at' => 'datetime',
++        ];
++    }
++
++    public function candidate(): BelongsTo
++    {
++        return $this->belongsTo(RecruitmentCandidate::class, 'recruitment_candidate_id');
++    }
++
++    public function offer(): BelongsTo
++    {
++        return $this->belongsTo(RecruitmentOffer::class, 'recruitment_offer_id');
++    }
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function manager(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'manager_user_id');
++    }
++
++    public function officeLocation(): BelongsTo
++    {
++        return $this->belongsTo(OfficeLocation::class);
++    }
++
++    public function employeeLink(): HasOne
++    {
++        return $this->hasOne(EmployeeUserLink::class);
++    }
++
++    public function onboardingCase(): HasOne
++    {
++        return $this->hasOne(OnboardingCase::class);
++    }
++
++    public function activate(): void
++    {
++        if ($this->status !== 'pending_activation' || $this->start_date?->isFuture()) {
++            return;
++        }
++
++        $this->forceFill([
++            'status' => 'active',
++            'activated_at' => $this->activated_at ?? now(),
++        ])->save();
++    }
++}
+diff --git a/app/Models/EmployeeUserLink.php b/app/Models/EmployeeUserLink.php
+index 16d4380c873d514249ccd1d507cfea89f9e79f2f..13c723382340c1b543c92b1e6182af5b0eb3d26d 100644
+--- a/app/Models/EmployeeUserLink.php
++++ b/app/Models/EmployeeUserLink.php
+@@ -10,6 +10,8 @@ class EmployeeUserLink extends Model
+     protected $fillable = [
+         'user_id',
+         'employee_id',
++        'employee_source',
++        'employee_record_id',
+         'office_location_id',
+         'is_active',
+         'created_by',
+@@ -20,6 +22,7 @@ protected function casts(): array
+     {
+         return [
+             'employee_id' => 'integer',
++            'employee_record_id' => 'integer',
+             'is_active' => 'boolean',
+         ];
+     }
+@@ -33,4 +36,9 @@ public function officeLocation(): BelongsTo
+     {
+         return $this->belongsTo(OfficeLocation::class);
+     }
++
++    public function employeeRecord(): BelongsTo
++    {
++        return $this->belongsTo(EmployeeRecord::class);
++    }
+ }
+diff --git a/app/Models/OnboardingCase.php b/app/Models/OnboardingCase.php
+index d520acb61012ede510bf51c02576be92f7dbdbac..8e0409c11d7d31d2fc8cc6dd840c21e7fff98e57 100644
+--- a/app/Models/OnboardingCase.php
++++ b/app/Models/OnboardingCase.php
+@@ -13,6 +13,7 @@ class OnboardingCase extends Model
+         'recruitment_offer_id',
+         'onboarding_template_id',
+         'legacy_employee_id',
++        'employee_record_id',
+         'employee_user_id',
+         'manager_user_id',
+         'buddy_user_id',
+@@ -54,6 +55,11 @@ public function employeeUser(): BelongsTo
+         return $this->belongsTo(User::class, 'employee_user_id');
+     }
+ 
++    public function employeeRecord(): BelongsTo
++    {
++        return $this->belongsTo(EmployeeRecord::class);
++    }
++
+     public function manager(): BelongsTo
+     {
+         return $this->belongsTo(User::class, 'manager_user_id');
+diff --git a/app/Models/RecruitmentCandidate.php b/app/Models/RecruitmentCandidate.php
+index 8fc4b1d807a45bdb3812da23af51fea92534ff8b..89fbf70154f4a6ebdc4236bb7206a942d3215c2a 100644
+--- a/app/Models/RecruitmentCandidate.php
++++ b/app/Models/RecruitmentCandidate.php
+@@ -82,4 +82,9 @@ public function onboardingCase(): HasOne
+     {
+         return $this->hasOne(OnboardingCase::class);
+     }
++
++    public function employeeRecord(): HasOne
++    {
++        return $this->hasOne(EmployeeRecord::class);
++    }
+ }
+diff --git a/app/Models/User.php b/app/Models/User.php
+index 65cd8f870c95578db2836e4fdd24ee3006503989..8e17fae56216e9ba14ad2419c7f7bfbf24efc932 100644
+--- a/app/Models/User.php
++++ b/app/Models/User.php
+@@ -17,7 +17,16 @@
+ use Laravel\Fortify\PasskeyAuthenticatable;
+ use Laravel\Fortify\TwoFactorAuthenticatable;
+ 
+-#[Fillable(['name', 'email', 'password', 'role'])]
++#[Fillable([
++    'name',
++    'email',
++    'password',
++    'role',
++    'account_status',
++    'activation_date',
++    'must_change_password',
++    'credentials_issued_at',
++])]
+ #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
+ class User extends Authenticatable implements PasskeyUser
+ {
+@@ -161,6 +170,27 @@ public function employeeLink(): HasOne
+         return $this->hasOne(EmployeeUserLink::class);
+     }
+ 
++    public function employeeRecord(): HasOne
++    {
++        return $this->hasOne(EmployeeRecord::class);
++    }
++
++    public function activateIfDue(): bool
++    {
++        if (
++            $this->account_status !== 'pending_activation'
++            || ! $this->activation_date
++            || $this->activation_date->isFuture()
++        ) {
++            return $this->account_status === 'active';
++        }
++
++        $this->forceFill(['account_status' => 'active'])->save();
++        $this->employeeRecord?->activate();
++
++        return true;
++    }
++
+     public function roleAssignments(): HasMany
+     {
+         return $this->hasMany(UserRoleAssignment::class);
+@@ -272,6 +302,9 @@ protected function casts(): array
+             'email_verified_at' => 'datetime',
+             'password' => 'hashed',
+             'role' => UserRole::class,
++            'activation_date' => 'date',
++            'must_change_password' => 'boolean',
++            'credentials_issued_at' => 'datetime',
+             'two_factor_confirmed_at' => 'datetime',
+         ];
+     }
+diff --git a/app/Providers/FortifyServiceProvider.php b/app/Providers/FortifyServiceProvider.php
+index 0215f0cc72265693a4a6e3b59e04ef6e88c33f3e..85f909a0a8f2d817e168a3819fd3abcbc1ec1512 100644
+--- a/app/Providers/FortifyServiceProvider.php
++++ b/app/Providers/FortifyServiceProvider.php
+@@ -4,9 +4,11 @@
+ 
+ use App\Actions\Fortify\CreateNewUser;
+ use App\Actions\Fortify\ResetUserPassword;
++use App\Models\User;
+ use Illuminate\Cache\RateLimiting\Limit;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\RateLimiter;
++use Illuminate\Support\Facades\Hash;
+ use Illuminate\Support\ServiceProvider;
+ use Illuminate\Support\Str;
+ use Illuminate\Validation\Rules\Password;
+@@ -41,6 +43,17 @@ private function configureActions(): void
+     {
+         Fortify::resetUserPasswordsUsing(ResetUserPassword::class);
+         Fortify::createUsersUsing(CreateNewUser::class);
++        Fortify::authenticateUsing(function (Request $request): ?User {
++            $user = User::query()
++                ->where('email', Str::lower((string) $request->input('email')))
++                ->first();
++
++            if (! $user || ! Hash::check((string) $request->input('password'), $user->password)) {
++                return null;
++            }
++
++            return $user->activateIfDue() ? $user : null;
++        });
+     }
+ 
+     /**
+diff --git a/app/Support/LeaveApprovalAlerts.php b/app/Support/LeaveApprovalAlerts.php
+index 9a550b5cb897803cc93cdb3bf7318f7a827b5468..4e72e936713e664e9f025f775eb427fa148adf97 100644
+--- a/app/Support/LeaveApprovalAlerts.php
++++ b/app/Support/LeaveApprovalAlerts.php
+@@ -48,6 +48,7 @@ class LeaveApprovalAlerts
+      *     recruitment_approval: int,
+      *     recruitment_interview: int,
+      *     onboarding_total: int,
++     *     onboarding_registration: int,
+      *     onboarding_overdue: int,
+      *     training_total: int,
+      *     training_supervisor: int,
+@@ -90,6 +91,7 @@ public function summarizeFor(?User $user): array
+             'recruitment_approval' => 0,
+             'recruitment_interview' => 0,
+             'onboarding_total' => 0,
++            'onboarding_registration' => 0,
+             'onboarding_overdue' => 0,
+             'training_total' => 0,
+             'training_supervisor' => 0,
+@@ -253,6 +255,17 @@ public function summarizeFor(?User $user): array
+                 ->count()
+             : 0;
+         $onboardingReady = Schema::hasTable('onboarding_tasks');
++        $onboardingRegistration = $onboardingReady
++            && $canManageOnboarding
++            && Schema::hasColumn('onboarding_cases', 'employee_record_id')
++            ? \App\Models\OnboardingCase::query()
++                ->whereIn('status', ['pending', 'active'])
++                ->whereNull('employee_record_id')
++                ->whereNull('legacy_employee_id')
++                ->whereNull('employee_user_id')
++                ->whereHas('offer', fn (Builder $query) => $query->where('status', 'accepted'))
++                ->count()
++            : 0;
+         $onboardingOverdue = $onboardingReady && $canManageOnboarding
+             ? OnboardingTask::query()
+                 ->whereIn('status', ['pending', 'in_progress'])
+@@ -362,7 +375,7 @@ public function summarizeFor(?User $user): array
+         $claimTotal = $claimSupervisor + $claimFinance;
+         $performanceTotal = $performanceSupervisor + $performanceHr;
+         $recruitmentTotal = $recruitmentApproval + $recruitmentInterview;
+-        $onboardingTotal = $onboardingOverdue;
++        $onboardingTotal = $onboardingRegistration + $onboardingOverdue;
+         $trainingTotal = $trainingSupervisor + $trainingHr;
+         $documentTotal = $documentApproval + $documentExpiring;
+         $disciplineTotal = $disciplineTriage + $disciplineInvestigation
+@@ -381,7 +394,7 @@ public function summarizeFor(?User $user): array
+                 + $documentApproval + $disciplineInvestigation
+                 + $separationSupervisor + $separationClearance,
+             'hr' => $leaveHr + $overtimeHr + $claimFinance + $performanceHr
+-                + $recruitmentApproval + $onboardingOverdue + $trainingHr
++                + $recruitmentApproval + $onboardingTotal + $trainingHr
+                 + $documentExpiring + $disciplineTriage + $disciplineDecision
+                 + $separationHr + $separationFinalReview,
+             'leave_total' => $leaveTotal,
+@@ -400,6 +413,7 @@ public function summarizeFor(?User $user): array
+             'recruitment_approval' => $recruitmentApproval,
+             'recruitment_interview' => $recruitmentInterview,
+             'onboarding_total' => $onboardingTotal,
++            'onboarding_registration' => $onboardingRegistration,
+             'onboarding_overdue' => $onboardingOverdue,
+             'training_total' => $trainingTotal,
+             'training_supervisor' => $trainingSupervisor,
+diff --git a/app/Support/PayrollCalculator.php b/app/Support/PayrollCalculator.php
+index b6140bc35eb1f30f00f560a7b95632d2a50cc9d5..d43bd59272ec6c9a8c2ea4f40c869fd21ef2dcbf 100644
+--- a/app/Support/PayrollCalculator.php
++++ b/app/Support/PayrollCalculator.php
+@@ -5,6 +5,7 @@
+ use App\Models\EmployeeLeaveRequest;
+ use App\Models\ClaimRequest;
+ use App\Models\EmployeePayrollComponent;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeSalaryProfile;
+ use App\Models\OvertimeRequest;
+ use App\Models\PayrollEntry;
+@@ -478,7 +479,7 @@ private function employeeMap(Collection $employeeIds): array
+             return [];
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja')
+             ->whereIn('id', $employeeIds->all())
+             ->where('rcd_enable', 1)
+@@ -491,6 +492,19 @@ private function employeeMap(Collection $employeeIds): array
+                 ],
+             ])
+             ->all();
++        $local = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds->all())
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->get(['directory_id', 'employee_number', 'name'])
++            ->mapWithKeys(fn (EmployeeRecord $employee) => [
++                (string) $employee->directory_id => [
++                    'employee_number' => $employee->employee_number,
++                    'employee_name' => $employee->name,
++                ],
++            ])
++            ->all();
++
++        return $legacy + $local;
+     }
+ 
+     private function unpaidDaysInPeriod(
+diff --git a/app/Support/TrainingEmployeeResolver.php b/app/Support/TrainingEmployeeResolver.php
+index e8238a427db6ece981a13afe7e363a376c1c769b..9baa6ca5fc7f4da5e0f377ec2ca2f3828ca406ab 100644
+--- a/app/Support/TrainingEmployeeResolver.php
++++ b/app/Support/TrainingEmployeeResolver.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Support;
+ 
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeUserLink;
+ use App\Models\User;
+ use Illuminate\Support\Collection;
+@@ -35,7 +36,7 @@ public function forEmployees(array $employeeIds): Collection
+             return collect();
+         }
+ 
+-        return DB::connection('ibco')
++        $legacy = DB::connection('ibco')
+             ->table('maklumatpekerja as employee')
+             ->leftJoin('maklumatjawatan as position', function ($join) {
+                 $join->on('position.id_pekerja', '=', 'employee.id')
+@@ -55,6 +56,26 @@ public function forEmployees(array $employeeIds): Collection
+             ])
+             ->unique('id')
+             ->values();
++        $localRecords = EmployeeRecord::query()
++            ->whereIn('directory_id', $employeeIds)
++            ->whereIn('status', ['pending_activation', 'active'])
++            ->get();
++        $departmentNames = DB::connection('ibco')
++            ->table('xdepartment')
++            ->whereIn('id', $localRecords->pluck('department_id')->filter())
++            ->pluck('description', 'id');
++        $local = $localRecords
++            ->map(fn (EmployeeRecord $employee) => (object) [
++                'id' => $employee->directory_id,
++                'employee_number' => $employee->employee_number,
++                'name' => $employee->name,
++                'department_id' => $employee->department_id,
++                'department_name' => $departmentNames[$employee->department_id]
++                    ?? null,
++                'position_name' => $employee->position_name,
++            ]);
++
++        return $legacy->concat($local)->unique('id')->values();
+     }
+ 
+     /**
+diff --git a/app/Support/WorkScheduleResolver.php b/app/Support/WorkScheduleResolver.php
+index 95669fad253994425cb1d3e223ccc5b7c662e8b2..47cfa3af293315fdbba7e0ac40bd8abb256de484 100644
+--- a/app/Support/WorkScheduleResolver.php
++++ b/app/Support/WorkScheduleResolver.php
+@@ -2,6 +2,7 @@
+ 
+ namespace App\Support;
+ 
++use App\Models\EmployeeRecord;
+ use App\Models\PublicHoliday;
+ use App\Models\RosterEntry;
+ use App\Models\ScheduleAssignment;
+@@ -424,6 +425,14 @@ private function selectAssignment(
+ 
+     private function departmentId(int $employeeId): ?int
+     {
++        $localDepartmentId = EmployeeRecord::query()
++            ->where('directory_id', $employeeId)
++            ->value('department_id');
++
++        if ($localDepartmentId !== null) {
++            return (int) $localDepartmentId;
++        }
++
+         $departmentId = DB::connection('ibco')
+             ->table('maklumatjawatan')
+             ->where('id_pekerja', $employeeId)
+diff --git a/bootstrap/app.php b/bootstrap/app.php
+index 3eb7e0f3193dcb89ce8765cb459a718990d8206b..dfd5bd48224e1b92dcb68c9f55521387de0e069f 100644
+--- a/bootstrap/app.php
++++ b/bootstrap/app.php
+@@ -1,6 +1,7 @@
+ <?php
+ 
+ use App\Http\Middleware\EnsureUserHasPermission;
++use App\Http\Middleware\EnsurePasswordChanged;
+ use App\Http\Middleware\HandleAppearance;
+ use App\Http\Middleware\HandleInertiaRequests;
+ use Illuminate\Foundation\Application;
+@@ -22,6 +23,7 @@
+         ]);
+ 
+         $middleware->web(append: [
++            EnsurePasswordChanged::class,
+             HandleAppearance::class,
+             HandleInertiaRequests::class,
+             AddLinkHeadersForPreloadedAssets::class,
+diff --git a/database/factories/UserFactory.php b/database/factories/UserFactory.php
+index 5da1f9c2788448e9a82d09324f6b1c9253c2c234..07de00b4cdf189e456cef9bb22faf9d688e08224 100644
+--- a/database/factories/UserFactory.php
++++ b/database/factories/UserFactory.php
+@@ -31,6 +31,10 @@ public function definition(): array
+             'email_verified_at' => now(),
+             'password' => static::$password ??= Hash::make('password'),
+             'role' => UserRole::Viewer,
++            'account_status' => 'active',
++            'activation_date' => null,
++            'must_change_password' => false,
++            'credentials_issued_at' => null,
+             'remember_token' => Str::random(10),
+             'two_factor_secret' => null,
+             'two_factor_recovery_codes' => null,
+diff --git a/database/migrations/2026_08_02_090000_add_automatic_employee_registration.php b/database/migrations/2026_08_02_090000_add_automatic_employee_registration.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..488feab5805e4651146b144e50782dd16bb98bd0
+--- /dev/null
++++ b/database/migrations/2026_08_02_090000_add_automatic_employee_registration.php
+@@ -0,0 +1,93 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::create('employee_records', function (Blueprint $table) {
++            $table->id();
++            $table->unsignedBigInteger('directory_id')->nullable()->unique();
++            $table->foreignId('recruitment_candidate_id')
++                ->unique()
++                ->constrained('recruitment_candidates')
++                ->restrictOnDelete();
++            $table->foreignId('recruitment_offer_id')
++                ->unique()
++                ->constrained('recruitment_offers')
++                ->restrictOnDelete();
++            $table->foreignId('user_id')->nullable()->unique()->constrained()->nullOnDelete();
++            $table->string('employee_number', 30)->unique();
++            $table->string('name');
++            $table->string('identity_number', 40)->unique();
++            $table->string('personal_email')->nullable();
++            $table->string('official_email')->unique();
++            $table->string('phone', 30)->nullable();
++            $table->unsignedBigInteger('department_id')->nullable()->index();
++            $table->string('position_name', 150);
++            $table->string('employment_type', 30);
++            $table->decimal('salary', 12, 2);
++            $table->unsignedTinyInteger('probation_months')->default(0);
++            $table->date('start_date')->index();
++            $table->foreignId('manager_user_id')->nullable()->constrained('users')->nullOnDelete();
++            $table->foreignId('office_location_id')->constrained()->restrictOnDelete();
++            $table->string('status', 30)->default('pending_activation')->index();
++            $table->foreignId('confirmed_by')->nullable()->constrained('users')->nullOnDelete();
++            $table->timestamp('confirmed_at')->nullable();
++            $table->timestamp('activated_at')->nullable();
++            $table->timestamps();
++
++            $table->index(['status', 'start_date']);
++        });
++
++        Schema::table('employee_user_links', function (Blueprint $table) {
++            $table->string('employee_source', 20)->default('legacy')->index();
++            $table->foreignId('employee_record_id')
++                ->nullable()
++                ->unique()
++                ->constrained('employee_records')
++                ->nullOnDelete();
++        });
++
++        Schema::table('onboarding_cases', function (Blueprint $table) {
++            $table->foreignId('employee_record_id')
++                ->nullable()
++                ->unique()
++                ->constrained('employee_records')
++                ->nullOnDelete();
++        });
++
++        Schema::table('users', function (Blueprint $table) {
++            $table->string('account_status', 30)->default('active')->index();
++            $table->date('activation_date')->nullable()->index();
++            $table->boolean('must_change_password')->default(false);
++            $table->timestamp('credentials_issued_at')->nullable();
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->dropColumn([
++                'account_status',
++                'activation_date',
++                'must_change_password',
++                'credentials_issued_at',
++            ]);
++        });
++
++        Schema::table('onboarding_cases', function (Blueprint $table) {
++            $table->dropConstrainedForeignId('employee_record_id');
++        });
++
++        Schema::table('employee_user_links', function (Blueprint $table) {
++            $table->dropConstrainedForeignId('employee_record_id');
++            $table->dropColumn('employee_source');
++        });
++
++        Schema::dropIfExists('employee_records');
++    }
++};
+diff --git a/resources/js/components/leave-approval-notifications.tsx b/resources/js/components/leave-approval-notifications.tsx
+index 7b6910eae276b6405a3a3ef5efcdbea701024f25..c153ed188ebfe35bc046457b5457f7fe40514f3f 100644
+--- a/resources/js/components/leave-approval-notifications.tsx
++++ b/resources/js/components/leave-approval-notifications.tsx
+@@ -97,6 +97,7 @@ export function LeaveApprovalNotifications() {
+         recruitment_approval: 0,
+         recruitment_interview: 0,
+         onboarding_total: 0,
++        onboarding_registration: 0,
+         onboarding_overdue: 0,
+         training_total: 0,
+         training_supervisor: 0,
+@@ -245,12 +246,12 @@ export function LeaveApprovalNotifications() {
+                             count={alerts.recruitment_total}
+                         />
+                         <AlertLink
+-                            href="/onboarding?status=active"
++                            href="/onboarding"
+                             icon={
+                                 <ListChecks className="size-5 text-cyan-600" />
+                             }
+                             title="Onboarding"
+-                            description={`${alerts.onboarding_overdue} tugasan lewat`}
++                            description={`${alerts.onboarding_registration} pendaftaran pekerja · ${alerts.onboarding_overdue} tugasan lewat`}
+                             count={alerts.onboarding_total}
+                         />
+                         <AlertLink
+diff --git a/resources/js/components/records-index.tsx b/resources/js/components/records-index.tsx
+index 46c440349626664e95aba6616570c5a9f971ffbf..7797c4a30c51b203b2f3d2b1dbded012bfa3a54e 100644
+--- a/resources/js/components/records-index.tsx
++++ b/resources/js/components/records-index.tsx
+@@ -43,6 +43,7 @@ export type RecordPageConfig = {
+     deleteRoutePath?: string;
+     entityLabel?: string;
+     searchPlaceholder: string;
++    dataSourceLabel?: string;
+     columns: RecordColumn[];
+ };
+ 
+@@ -132,6 +133,8 @@ function RecordActions({
+     const recordName = String(
+         record.nama ?? record.employee_id ?? `${config.entityLabel} ini`,
+     );
++    const canEdit = canManage && record._can_edit !== false;
++    const canDelete = canManage && record._can_delete !== false;
+ 
+     const deactivate = () => {
+         if (!config.deleteRoutePath) {
+@@ -168,7 +171,7 @@ function RecordActions({
+                 </Button>
+             )}
+ 
+-            {canManage && config.editRoutePath && (
++            {canEdit && config.editRoutePath && (
+                 <Button asChild variant="outline" size="sm">
+                     <Link href={`${config.editRoutePath}/${recordId}/edit`}>
+                         <Pencil />
+@@ -177,7 +180,7 @@ function RecordActions({
+                 </Button>
+             )}
+ 
+-            {canManage && config.deleteRoutePath && (
++            {canDelete && config.deleteRoutePath && (
+                 <>
+                     <Button
+                         type="button"
+@@ -303,7 +306,7 @@ export default function RecordsIndex({
+                             className="gap-1.5 font-normal"
+                         >
+                             <Database className="size-3.5" />
+-                            Sumber data: db_spp
++                            Sumber data: {config.dataSourceLabel ?? 'db_spp'}
+                         </Badge>
+                     </div>
+ 
+diff --git a/resources/js/pages/MaklumatPekerja/Index.tsx b/resources/js/pages/MaklumatPekerja/Index.tsx
+index 463231045147d3db65a89d93d62a24dc046397b2..43a17c0e827e304fbd35b3ddef8bcb75b8c00958 100644
+--- a/resources/js/pages/MaklumatPekerja/Index.tsx
++++ b/resources/js/pages/MaklumatPekerja/Index.tsx
+@@ -14,6 +14,7 @@ const config: RecordPageConfig = {
+     deleteRoutePath: '/pekerja',
+     entityLabel: 'pekerja',
+     searchPlaceholder: 'Cari nama, ID, NRIC atau e-mel...',
++    dataSourceLabel: 'IBCO HR Solutions + db_spp',
+     columns: [
+         { key: 'employee_id', label: 'ID Pekerja' },
+         { key: 'nama', label: 'Nama' },
+@@ -21,6 +22,7 @@ const config: RecordPageConfig = {
+         { key: 'no_telefon', label: 'No. Telefon' },
+         { key: 'email', label: 'E-mel' },
+         { key: 'status', label: 'Status', type: 'badge' },
++        { key: 'source', label: 'Sumber Rekod', type: 'badge' },
+     ],
+ };
+ 
+diff --git a/resources/js/pages/MaklumatPekerja/Show.tsx b/resources/js/pages/MaklumatPekerja/Show.tsx
+index 6632c15c40aba4e27e2e279d9603d1ee492d23fc..35025d2d08c802584dcae477752204c59302dfc5 100644
+--- a/resources/js/pages/MaklumatPekerja/Show.tsx
++++ b/resources/js/pages/MaklumatPekerja/Show.tsx
+@@ -125,6 +125,7 @@ type EmployeeProfileProps = {
+     canViewPayroll: boolean;
+     canManage: boolean;
+     canManagePositions: boolean;
++    dataSource: string;
+ };
+ 
+ type InformationItemProps = {
+@@ -295,6 +296,7 @@ export default function EmployeeProfile({
+     canViewPayroll,
+     canManage,
+     canManagePositions,
++    dataSource,
+ }: EmployeeProfileProps) {
+     const employeeSearch = encodeURIComponent(
+         pekerja.employee_id || pekerja.nama || '',
+@@ -387,7 +389,7 @@ export default function EmployeeProfile({
+                                 className="gap-1.5 font-normal"
+                             >
+                                 <Database className="size-3.5" />
+-                                Sumber data: db_spp
++                                Sumber data: {dataSource}
+                             </Badge>
+                             <Badge variant="outline" className="font-normal">
+                                 {canManage
+diff --git a/resources/js/pages/Onboarding/Index.tsx b/resources/js/pages/Onboarding/Index.tsx
+index 6052b99a60700d6367aa966a9525c53c68916fe3..ba953dc95657712bf2b2ca23ddb355c5ab3d00d0 100644
+--- a/resources/js/pages/Onboarding/Index.tsx
++++ b/resources/js/pages/Onboarding/Index.tsx
+@@ -1,12 +1,16 @@
+ import { Head, Link, router, useForm } from '@inertiajs/react';
+ import {
+     CheckCircle2,
++    Copy,
+     Download,
++    KeyRound,
+     Link2,
+     Pencil,
+     Play,
+     RotateCcw,
+     Search,
++    ShieldCheck,
++    UserPlus,
+     UserRoundCheck,
+     XCircle,
+ } from 'lucide-react';
+@@ -65,13 +69,37 @@ type OnboardingCase = {
+         name: string;
+         email: string;
+         phone: string;
++        identity_number: string | null;
+         position: string;
+         requisition_code: string;
+     };
+     template: string | null;
+     legacy_employee_id: number | null;
++    employee_record_id: number | null;
+     employee_user_id: number | null;
+     employee_user: string | null;
++    employee_record: {
++        directory_id: number;
++        employee_number: string;
++        official_email: string;
++        status: string;
++        activation_date: string;
++        office: string | null;
++    } | null;
++    offer: {
++        position_name: string;
++        department_id: number | null;
++        employment_type: string;
++        salary: number;
++        probation_months: number;
++        start_date: string;
++        status: string;
++    } | null;
++    registration_defaults: {
++        identity_number: string;
++        employee_number: string;
++        official_email: string;
++    };
+     manager_user_id: number | null;
+     manager: string | null;
+     buddy_user_id: number | null;
+@@ -106,6 +134,14 @@ type Props = {
+         name: string;
+     }[];
+     filters: { search: string; status: string };
++    newEmployeeCredentials: {
++        employee_number: string;
++        name: string;
++        email: string;
++        temporary_password: string;
++        activation_date: string;
++        account_status: string;
++    } | null;
+     permissions: { can_manage: boolean };
+ };
+ 
+@@ -267,7 +303,7 @@ function LinkEmployeeDialog({
+             <DialogTrigger asChild>
+                 <Button size="sm" variant="outline">
+                     <Link2 />
+-                    Paut Pekerja
++                    Paut Pekerja Sedia Ada
+                 </Button>
+             </DialogTrigger>
+             <DialogContent className="max-h-[90vh] overflow-y-auto">
+@@ -368,6 +404,312 @@ function LinkEmployeeDialog({
+     );
+ }
+ 
++function RegisterEmployeeDialog({
++    item,
++    users,
++    officeLocations,
++}: {
++    item: OnboardingCase;
++    users: Props['users'];
++    officeLocations: Props['officeLocations'];
++}) {
++    const [open, setOpen] = useState(false);
++    const form = useForm({
++        identity_number: item.registration_defaults.identity_number,
++        employee_number: item.registration_defaults.employee_number,
++        official_email: item.registration_defaults.official_email,
++        office_location_id: '',
++        manager_user_id: item.manager_user_id
++            ? String(item.manager_user_id)
++            : '',
++        confirmed: false,
++    });
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        form.post(`/onboarding/${item.id}/daftar-pekerja`, {
++            preserveScroll: true,
++            onSuccess: () => setOpen(false),
++        });
++    };
++    const money = new Intl.NumberFormat('ms-MY', {
++        style: 'currency',
++        currency: 'MYR',
++    }).format(item.offer?.salary ?? 0);
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button size="sm">
++                    <UserPlus />
++                    Sahkan & Daftar sebagai Pekerja
++                </Button>
++            </DialogTrigger>
++            <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
++                <DialogHeader>
++                    <DialogTitle>Sahkan & Daftar sebagai Pekerja</DialogTitle>
++                    <DialogDescription>
++                        Maklumat calon dan tawaran telah diisi secara automatik.
++                        Semak butiran di bawah sebelum mencipta rekod pekerja
++                        dan akaun Employee.
++                    </DialogDescription>
++                </DialogHeader>
++                <form onSubmit={submit} className="space-y-5">
++                    <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 sm:grid-cols-2">
++                        {[
++                            ['Nama', item.candidate.name],
++                            ['Jawatan', item.offer?.position_name],
++                            ['Jenis Pekerjaan', item.offer?.employment_type],
++                            ['Gaji Bulanan', money],
++                            ['Tarikh Mula', item.offer?.start_date],
++                            [
++                                'Tempoh Percubaan',
++                                `${item.offer?.probation_months ?? 0} bulan`,
++                            ],
++                        ].map(([label, value]) => (
++                            <div key={label}>
++                                <p className="text-xs text-muted-foreground">
++                                    {label}
++                                </p>
++                                <p className="font-medium">{value || '—'}</p>
++                            </div>
++                        ))}
++                    </div>
++
++                    <div className="grid gap-4 sm:grid-cols-2">
++                        <div className="space-y-2">
++                            <Label>Nombor Pengenalan</Label>
++                            <Input
++                                value={form.data.identity_number}
++                                onChange={(event) =>
++                                    form.setData(
++                                        'identity_number',
++                                        event.target.value,
++                                    )
++                                }
++                                placeholder="No. kad pengenalan / pasport"
++                            />
++                            <InputError message={form.errors.identity_number} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Nombor Pekerja</Label>
++                            <Input
++                                value={form.data.employee_number}
++                                onChange={(event) =>
++                                    form.setData(
++                                        'employee_number',
++                                        event.target.value,
++                                    )
++                                }
++                            />
++                            <InputError message={form.errors.employee_number} />
++                        </div>
++                        <div className="space-y-2 sm:col-span-2">
++                            <Label>E-mel Log Masuk Rasmi</Label>
++                            <Input
++                                type="email"
++                                value={form.data.official_email}
++                                onChange={(event) =>
++                                    form.setData(
++                                        'official_email',
++                                        event.target.value,
++                                    )
++                                }
++                            />
++                            <InputError message={form.errors.official_email} />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Lokasi Pejabat</Label>
++                            <Select
++                                value={
++                                    form.data.office_location_id || undefined
++                                }
++                                onValueChange={(value) =>
++                                    form.setData('office_location_id', value)
++                                }
++                            >
++                                <SelectTrigger>
++                                    <SelectValue placeholder="Pilih lokasi" />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    {officeLocations.map((office) => (
++                                        <SelectItem
++                                            key={office.id}
++                                            value={String(office.id)}
++                                        >
++                                            {office.name}
++                                        </SelectItem>
++                                    ))}
++                                </SelectContent>
++                            </Select>
++                            <InputError
++                                message={form.errors.office_location_id}
++                            />
++                        </div>
++                        <div className="space-y-2">
++                            <Label>Penyelia</Label>
++                            <Select
++                                value={form.data.manager_user_id || 'none'}
++                                onValueChange={(value) =>
++                                    form.setData(
++                                        'manager_user_id',
++                                        value === 'none' ? '' : value,
++                                    )
++                                }
++                            >
++                                <SelectTrigger>
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    <SelectItem value="none">
++                                        Belum ditetapkan
++                                    </SelectItem>
++                                    {users.map((user) => (
++                                        <SelectItem
++                                            key={user.id}
++                                            value={String(user.id)}
++                                        >
++                                            {user.name}
++                                        </SelectItem>
++                                    ))}
++                                </SelectContent>
++                            </Select>
++                        </div>
++                    </div>
++
++                    <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 text-sm">
++                        <div className="flex gap-3">
++                            <ShieldCheck className="mt-0.5 size-5 shrink-0 text-blue-600" />
++                            <div>
++                                <p className="font-medium">
++                                    Kawalan pendaftaran automatik
++                                </p>
++                                <p className="mt-1 text-muted-foreground">
++                                    Sistem akan menyemak rekod pendua, mencipta
++                                    rekod pekerja dan akaun Employee, memautkan
++                                    lokasi serta tugasan onboarding, kemudian
++                                    mengaktifkan akaun pada {item.start_date}.
++                                    Tiada data akan ditulis ke db_spp.
++                                </p>
++                            </div>
++                        </div>
++                    </div>
++
++                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
++                        <input
++                            type="checkbox"
++                            checked={form.data.confirmed}
++                            onChange={(event) =>
++                                form.setData('confirmed', event.target.checked)
++                            }
++                            className="mt-1 size-4"
++                        />
++                        <span className="text-sm">
++                            Saya mengesahkan maklumat calon, tawaran, tarikh
++                            mula, lokasi dan penyelia telah disemak.
++                        </span>
++                    </label>
++                    <InputError message={form.errors.confirmed} />
++                    <InputError
++                        message={
++                            (form.errors as Record<string, string>).registration
++                        }
++                    />
++
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button type="button" variant="outline">
++                                Batal
++                            </Button>
++                        </DialogClose>
++                        <Button
++                            disabled={form.processing || !form.data.confirmed}
++                        >
++                            <UserPlus />
++                            {form.processing
++                                ? 'Sedang Mendaftar...'
++                                : 'Sahkan & Daftar'}
++                        </Button>
++                    </DialogFooter>
++                </form>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
++function EmployeeCredentialsDialog({
++    credentials,
++}: {
++    credentials: NonNullable<Props['newEmployeeCredentials']>;
++}) {
++    const [open, setOpen] = useState(true);
++    const copyCredentials = async () => {
++        await navigator.clipboard.writeText(
++            `Nama: ${credentials.name}\nNo. pekerja: ${credentials.employee_number}\nE-mel: ${credentials.email}\nKata laluan sementara: ${credentials.temporary_password}\nTarikh aktif: ${credentials.activation_date}`,
++        );
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogContent>
++                <DialogHeader>
++                    <DialogTitle>Pendaftaran Pekerja Berjaya</DialogTitle>
++                    <DialogDescription>
++                        Simpan atau serahkan kelayakan sementara ini melalui
++                        saluran yang selamat. Kata laluan tidak akan dipaparkan
++                        semula selepas dialog ditutup.
++                    </DialogDescription>
++                </DialogHeader>
++                <div className="space-y-3 rounded-lg border bg-muted/30 p-4 text-sm">
++                    {[
++                        ['Nama', credentials.name],
++                        ['No. Pekerja', credentials.employee_number],
++                        ['E-mel', credentials.email],
++                        [
++                            'Kata Laluan Sementara',
++                            credentials.temporary_password,
++                        ],
++                        ['Tarikh Aktif', credentials.activation_date],
++                        [
++                            'Status Akaun',
++                            credentials.account_status === 'active'
++                                ? 'Aktif'
++                                : 'Menunggu Tarikh Mula',
++                        ],
++                    ].map(([label, value]) => (
++                        <div
++                            key={label}
++                            className="grid grid-cols-[9rem_1fr] gap-3"
++                        >
++                            <span className="text-muted-foreground">
++                                {label}
++                            </span>
++                            <strong className="break-all">{value}</strong>
++                        </div>
++                    ))}
++                </div>
++                <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
++                    <KeyRound className="mt-0.5 size-5 shrink-0 text-amber-600" />
++                    Pekerja wajib menukar kata laluan sementara pada log masuk
++                    pertama.
++                </div>
++                <DialogFooter>
++                    <Button
++                        type="button"
++                        variant="outline"
++                        onClick={copyCredentials}
++                    >
++                        <Copy />
++                        Salin Kelayakan
++                    </Button>
++                    <Button type="button" onClick={() => setOpen(false)}>
++                        Selesai
++                    </Button>
++                </DialogFooter>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
+ function TaskDialog({
+     item,
+     task,
+@@ -560,6 +902,7 @@ export default function OnboardingIndex({
+     officeLocations,
+     legacyEmployees,
+     filters,
++    newEmployeeCredentials,
+     permissions,
+ }: Props) {
+     const [search, setSearch] = useState(filters.search ?? '');
+@@ -582,6 +925,11 @@ export default function OnboardingIndex({
+     return (
+         <>
+             <Head title="Pusat Onboarding" />
++            {newEmployeeCredentials && (
++                <EmployeeCredentialsDialog
++                    credentials={newEmployeeCredentials}
++                />
++            )}
+             <div className="space-y-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+                     <div>
+@@ -732,18 +1080,33 @@ export default function OnboardingIndex({
+                                                         item={item}
+                                                         users={users}
+                                                     />
+-                                                    <LinkEmployeeDialog
+-                                                        item={item}
+-                                                        employees={
+-                                                            legacyEmployees
+-                                                        }
+-                                                        employeeUsers={
+-                                                            employeeUsers
+-                                                        }
+-                                                        officeLocations={
+-                                                            officeLocations
+-                                                        }
+-                                                    />
++                                                    {!item.employee_record_id &&
++                                                        !item.legacy_employee_id &&
++                                                        !item.employee_user_id &&
++                                                        item.offer?.status ===
++                                                            'accepted' && (
++                                                            <RegisterEmployeeDialog
++                                                                item={item}
++                                                                users={users}
++                                                                officeLocations={
++                                                                    officeLocations
++                                                                }
++                                                            />
++                                                        )}
++                                                    {!item.employee_record_id && (
++                                                        <LinkEmployeeDialog
++                                                            item={item}
++                                                            employees={
++                                                                legacyEmployees
++                                                            }
++                                                            employeeUsers={
++                                                                employeeUsers
++                                                            }
++                                                            officeLocations={
++                                                                officeLocations
++                                                            }
++                                                        />
++                                                    )}
+                                                     <CaseActions item={item} />
+                                                 </>
+                                             )}
+@@ -774,15 +1137,20 @@ export default function OnboardingIndex({
+                                         </div>
+                                         <div className="rounded-lg border p-3 text-sm">
+                                             <p className="text-muted-foreground">
+-                                                Pautan pekerja
++                                                Rekod pekerja
+                                             </p>
+                                             <p className="font-medium">
+-                                                {item.employee_user ??
+-                                                    'Belum dipautkan'}
++                                                {item.employee_record
++                                                    ?.employee_number ??
++                                                    item.employee_user ??
++                                                    'Belum didaftarkan'}
+                                             </p>
+                                             <p className="text-xs text-muted-foreground">
+-                                                db_spp ID:{' '}
+-                                                {item.legacy_employee_id ?? '—'}
++                                                {item.employee_record
++                                                    ? `${item.employee_record.status === 'active' ? 'Aktif' : 'Aktif mulai'} ${item.employee_record.activation_date} · ${item.employee_record.office ?? 'Lokasi belum ditetapkan'}`
++                                                    : item.legacy_employee_id
++                                                      ? `db_spp ID: ${item.legacy_employee_id}`
++                                                      : 'Menunggu pengesahan HR'}
+                                             </p>
+                                         </div>
+                                     </div>
+diff --git a/resources/js/pages/Recruitment/Show.tsx b/resources/js/pages/Recruitment/Show.tsx
+index 76beac13be6c7a3759f82d1d573767a1c57799f7..d1ebcfcea606fa4c3b678cbcb5bdf9da5ac7b2a3 100644
+--- a/resources/js/pages/Recruitment/Show.tsx
++++ b/resources/js/pages/Recruitment/Show.tsx
+@@ -150,8 +150,17 @@ type Candidate = {
+         id: number;
+         template: string | null;
+         legacy_employee_id: number | null;
++        employee_record_id: number | null;
+         employee_user_id: number | null;
+         employee_user: string | null;
++        employee_record: {
++            directory_id: number;
++            employee_number: string;
++            official_email: string;
++            status: string;
++            activation_date: string;
++            office: string | null;
++        } | null;
+         manager_user_id: number | null;
+         buddy_user_id: number | null;
+         start_date: string;
+@@ -1683,6 +1692,66 @@ export default function RecruitmentShow({
+                                             }}
+                                         />
+                                     </div>
++                                    <div className="rounded-lg border bg-muted/30 p-4 text-sm">
++                                        {candidate.onboarding
++                                            .employee_record ? (
++                                            <div className="grid gap-3 sm:grid-cols-2">
++                                                {[
++                                                    [
++                                                        'No. Pekerja',
++                                                        candidate.onboarding
++                                                            .employee_record
++                                                            .employee_number,
++                                                    ],
++                                                    [
++                                                        'E-mel Rasmi',
++                                                        candidate.onboarding
++                                                            .employee_record
++                                                            .official_email,
++                                                    ],
++                                                    [
++                                                        'Lokasi',
++                                                        candidate.onboarding
++                                                            .employee_record
++                                                            .office,
++                                                    ],
++                                                    [
++                                                        'Status Akaun',
++                                                        candidate.onboarding
++                                                            .employee_record
++                                                            .status === 'active'
++                                                            ? 'Aktif'
++                                                            : `Aktif mulai ${candidate.onboarding.employee_record.activation_date}`,
++                                                    ],
++                                                ].map(([label, value]) => (
++                                                    <div key={label}>
++                                                        <p className="text-xs text-muted-foreground">
++                                                            {label}
++                                                        </p>
++                                                        <p className="font-medium">
++                                                            {value || '—'}
++                                                        </p>
++                                                    </div>
++                                                ))}
++                                            </div>
++                                        ) : candidate.onboarding
++                                              .legacy_employee_id ? (
++                                            <p>
++                                                Dipautkan kepada pekerja sedia
++                                                ada db_spp ID:{' '}
++                                                {
++                                                    candidate.onboarding
++                                                        .legacy_employee_id
++                                                }
++                                            </p>
++                                        ) : (
++                                            <p className="text-muted-foreground">
++                                                Menunggu HR menggunakan tindakan
++                                                “Sahkan & Daftar sebagai
++                                                Pekerja” di Pusat Onboarding.
++                                            </p>
++                                        )}
++                                    </div>
+                                 </CardContent>
+                             </Card>
+                         )}
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index e8292c38733ede20abed588a6f59c59825922d04..bd397e23b294571f2806d988284edcbb436caf03 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -132,6 +132,7 @@ export type LeaveApprovalAlerts = {
+     recruitment_approval: number;
+     recruitment_interview: number;
+     onboarding_total: number;
++    onboarding_registration: number;
+     onboarding_overdue: number;
+     training_total: number;
+     training_supervisor: number;
+diff --git a/routes/console.php b/routes/console.php
+index 3c9adf1af8430da566d123514630bcc30c9c1345..92420b5f9570e4457401bce0cb65bb042bcaf827 100644
+--- a/routes/console.php
++++ b/routes/console.php
+@@ -1,8 +1,26 @@
+ <?php
+ 
++use App\Models\EmployeeRecord;
+ use Illuminate\Foundation\Inspiring;
+ use Illuminate\Support\Facades\Artisan;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schedule;
+ 
+ Artisan::command('inspire', function () {
+     $this->comment(Inspiring::quote());
+ })->purpose('Display an inspiring quote');
++
++Schedule::call(function (): void {
++    EmployeeRecord::query()
++        ->with('user')
++        ->where('status', 'pending_activation')
++        ->whereDate('start_date', '<=', today())
++        ->chunkById(100, function ($employees): void {
++            foreach ($employees as $employee) {
++                DB::transaction(function () use ($employee): void {
++                    $employee->activate();
++                    $employee->user?->forceFill(['account_status' => 'active'])->save();
++                });
++            }
++        });
++})->dailyAt('00:05')->name('activate-due-employees')->withoutOverlapping();
+diff --git a/routes/web.php b/routes/web.php
+index 5fee6cef4169094e7c0f7a2ed5580ea5baece3fc..b1b6cec79e0d8ce067a72b5455f18eb9a1d57403 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -547,6 +547,9 @@
+         Route::put('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'linkEmployee'])
+             ->whereNumber('onboardingCase')
+             ->name('onboarding.link-employee');
++        Route::post('onboarding/{onboardingCase}/daftar-pekerja', [OnboardingController::class, 'registerEmployee'])
++            ->whereNumber('onboardingCase')
++            ->name('onboarding.register-employee');
+         Route::patch('onboarding/{onboardingCase}/status', [OnboardingController::class, 'changeCaseStatus'])
+             ->whereNumber('onboardingCase')
+             ->name('onboarding.status');
+diff --git a/tests/Feature/RecruitmentOnboardingTest.php b/tests/Feature/RecruitmentOnboardingTest.php
+index a3461f7a1370eb9c2f8833ec23572eac0c9d8bf9..57f7b2abf6f317c821a52402e02347286bda6695 100644
+--- a/tests/Feature/RecruitmentOnboardingTest.php
++++ b/tests/Feature/RecruitmentOnboardingTest.php
+@@ -1,6 +1,7 @@
+ <?php
+ 
+ use App\Models\AuditLog;
++use App\Models\EmployeeRecord;
+ use App\Models\EmployeeUserLink;
+ use App\Models\OfficeLocation;
+ use App\Models\OnboardingCase;
+@@ -18,6 +19,7 @@
+ use Illuminate\Support\Carbon;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Facades\Event;
++use Illuminate\Support\Facades\Hash;
+ use Illuminate\Support\Facades\Schema;
+ use Illuminate\Support\Facades\Storage;
+ use Inertia\Testing\AssertableInertia as Assert;
+@@ -58,6 +60,8 @@
+         $table->increments('id');
+         $table->string('employeeID', 30)->nullable();
+         $table->string('nama')->nullable();
++        $table->string('nric', 40)->nullable();
++        $table->string('email')->nullable();
+         $table->boolean('rcd_enable')->default(true);
+     });
+     DB::connection('ibco')->table('xdepartment')->insert([
+@@ -331,6 +335,189 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+     ))->toBeTrue();
+ });
+ 
++test('accepted candidate is registered automatically without writing to legacy database', function () {
++    $hr = User::factory()->hrAdmin()->create();
++    $manager = User::factory()->supervisor()->create();
++    $requisition = createPublishedRequisition($hr, $manager);
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.139,
++        'longitude' => 101.6869,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++    $candidate = RecruitmentCandidate::query()->create([
++        'recruitment_requisition_id' => $requisition->getKey(),
++        'candidate_number' => 'CAN-202607-0099',
++        'name' => 'Nur Pekerja Automatik',
++        'email' => 'nur.candidate@example.com',
++        'phone' => '0123456789',
++        'nric' => '900101101234',
++        'source' => 'job_portal',
++        'stage' => 'hired',
++        'owner_user_id' => $hr->getKey(),
++        'applied_at' => now(),
++        'hired_at' => now(),
++    ]);
++    $offer = RecruitmentOffer::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'offer_number' => 'OFF-202607-0099',
++        'position_name' => 'Eksekutif Teknologi Maklumat',
++        'department_id' => 1,
++        'employment_type' => 'permanent',
++        'salary' => 4600,
++        'start_date' => '2026-09-01',
++        'probation_months' => 3,
++        'expiry_date' => '2026-08-15',
++        'status' => 'accepted',
++        'created_by' => $hr->getKey(),
++        'approved_by' => $hr->getKey(),
++        'responded_at' => now(),
++    ]);
++    $onboarding = OnboardingCase::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'recruitment_offer_id' => $offer->getKey(),
++        'manager_user_id' => $manager->getKey(),
++        'start_date' => '2026-09-01',
++        'status' => 'pending',
++        'created_by' => $hr->getKey(),
++    ]);
++    $task = $onboarding->tasks()->create([
++        'title' => 'Lengkapkan maklumat pekerja',
++        'category' => 'employee',
++        'assignee_role' => 'employee',
++        'due_date' => '2026-09-01',
++        'is_required' => true,
++        'status' => 'pending',
++        'sort_order' => 1,
++    ]);
++    $legacyQueries = [];
++    Event::listen(QueryExecuted::class, function (QueryExecuted $event) use (
++        &$legacyQueries,
++    ) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(ltrim($event->sql));
++        }
++    });
++
++    $response = $this->actingAs($hr)
++        ->post(route('onboarding.register-employee', $onboarding), [
++            'identity_number' => '900101-10-1234',
++            'employee_number' => 'IBCO-2026-0099',
++            'official_email' => 'nur.employee@ibco.test',
++            'office_location_id' => $office->getKey(),
++            'manager_user_id' => $manager->getKey(),
++            'confirmed' => true,
++        ]);
++
++    $response
++        ->assertRedirect(route('onboarding.index'))
++        ->assertSessionDoesntHaveErrors()
++        ->assertSessionHas('new_employee_credentials');
++    $employee = EmployeeRecord::query()->firstOrFail();
++    $employeeUser = User::query()->where('email', 'nur.employee@ibco.test')->firstOrFail();
++    $credentials = session('new_employee_credentials');
++
++    expect($employee->employee_number)->toBe('IBCO-2026-0099')
++        ->and($employee->identity_number)->toBe('900101101234')
++        ->and($employee->directory_id)->toBe(EmployeeRecord::DIRECTORY_ID_OFFSET + $employee->getKey())
++        ->and($employee->status)->toBe('pending_activation')
++        ->and($employeeUser->hasRole('employee'))->toBeTrue()
++        ->and($employeeUser->account_status)->toBe('pending_activation')
++        ->and($employeeUser->must_change_password)->toBeTrue()
++        ->and(Hash::check($credentials['temporary_password'], $employeeUser->password))->toBeTrue()
++        ->and($onboarding->fresh()->employee_record_id)->toBe($employee->getKey())
++        ->and($onboarding->fresh()->employee_user_id)->toBe($employeeUser->getKey())
++        ->and($task->fresh()->assignee_user_id)->toBe($employeeUser->getKey());
++    expect(EmployeeUserLink::query()
++        ->where('user_id', $employeeUser->getKey())
++        ->where('employee_id', $employee->directory_id)
++        ->where('employee_source', 'local')
++        ->where('employee_record_id', $employee->getKey())
++        ->exists())->toBeTrue();
++    expect(AuditLog::query()
++        ->where('action', 'employee.registered_from_recruitment')
++        ->exists())->toBeTrue();
++    expect($legacyQueries)->not->toBeEmpty();
++    expect(collect($legacyQueries)->every(
++        fn (string $sql) => str_starts_with($sql, 'select'),
++    ))->toBeTrue();
++
++    Carbon::setTestNow('2026-09-01 00:10:00');
++    expect($employeeUser->fresh()->activateIfDue())->toBeTrue()
++        ->and($employeeUser->fresh()->account_status)->toBe('active')
++        ->and($employee->fresh()->status)->toBe('active');
++});
++
++test('automatic registration blocks matching legacy employee and directs HR to link existing record', function () {
++    $hr = User::factory()->hrAdmin()->create();
++    $manager = User::factory()->supervisor()->create();
++    $requisition = createPublishedRequisition($hr, $manager);
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO HQ',
++        'latitude' => 3.139,
++        'longitude' => 101.6869,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++    DB::connection('ibco')->table('maklumatpekerja')->insert([
++        'employeeID' => 'IBCO-LEGACY-01',
++        'nama' => 'Pekerja Sedia Ada',
++        'nric' => '880101101111',
++        'email' => 'legacy@ibco.test',
++        'rcd_enable' => 1,
++    ]);
++    $candidate = RecruitmentCandidate::query()->create([
++        'recruitment_requisition_id' => $requisition->getKey(),
++        'candidate_number' => 'CAN-DUPLICATE-01',
++        'name' => 'Pekerja Sedia Ada',
++        'email' => 'legacy@ibco.test',
++        'phone' => '0120000000',
++        'nric' => '880101101111',
++        'source' => 'direct',
++        'stage' => 'hired',
++        'applied_at' => now(),
++        'hired_at' => now(),
++    ]);
++    $offer = RecruitmentOffer::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'offer_number' => 'OFF-DUPLICATE-01',
++        'position_name' => 'Eksekutif Teknologi Maklumat',
++        'employment_type' => 'permanent',
++        'salary' => 4500,
++        'start_date' => '2026-09-01',
++        'probation_months' => 3,
++        'expiry_date' => '2026-08-15',
++        'status' => 'accepted',
++        'created_by' => $hr->getKey(),
++    ]);
++    $onboarding = OnboardingCase::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'recruitment_offer_id' => $offer->getKey(),
++        'start_date' => '2026-09-01',
++        'status' => 'pending',
++        'created_by' => $hr->getKey(),
++    ]);
++
++    $this->actingAs($hr)
++        ->from(route('onboarding.index'))
++        ->post(route('onboarding.register-employee', $onboarding), [
++            'identity_number' => '880101101111',
++            'employee_number' => 'IBCO-2026-0100',
++            'official_email' => 'new.login@ibco.test',
++            'office_location_id' => $office->getKey(),
++            'confirmed' => true,
++        ])
++        ->assertRedirect(route('onboarding.index'))
++        ->assertSessionHasErrors('registration');
++
++    expect(EmployeeRecord::query()->count())->toBe(0)
++        ->and(User::query()->where('email', 'new.login@ibco.test')->exists())->toBeFalse();
++});
++
+ test('candidate documents and profiles are restricted to assigned recruitment users', function () {
+     $hr = User::factory()->hrAdmin()->create();
+     $manager = User::factory()->supervisor()->create();

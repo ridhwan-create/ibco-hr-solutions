@@ -17,7 +17,16 @@ use Laravel\Fortify\Contracts\PasskeyUser;
 use Laravel\Fortify\PasskeyAuthenticatable;
 use Laravel\Fortify\TwoFactorAuthenticatable;
 
-#[Fillable(['name', 'email', 'password', 'role'])]
+#[Fillable([
+    'name',
+    'email',
+    'password',
+    'role',
+    'account_status',
+    'activation_date',
+    'must_change_password',
+    'credentials_issued_at',
+])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements PasskeyUser
 {
@@ -161,6 +170,27 @@ class User extends Authenticatable implements PasskeyUser
         return $this->hasOne(EmployeeUserLink::class);
     }
 
+    public function employeeRecord(): HasOne
+    {
+        return $this->hasOne(EmployeeRecord::class);
+    }
+
+    public function activateIfDue(): bool
+    {
+        if (
+            $this->account_status !== 'pending_activation'
+            || ! $this->activation_date
+            || $this->activation_date->isFuture()
+        ) {
+            return $this->account_status === 'active';
+        }
+
+        $this->forceFill(['account_status' => 'active'])->save();
+        $this->employeeRecord?->activate();
+
+        return true;
+    }
+
     public function roleAssignments(): HasMany
     {
         return $this->hasMany(UserRoleAssignment::class);
@@ -191,6 +221,76 @@ class User extends Authenticatable implements PasskeyUser
         return $this->hasMany(PerformanceNotification::class);
     }
 
+    public function recruitmentNotifications(): HasMany
+    {
+        return $this->hasMany(RecruitmentNotification::class);
+    }
+
+    public function onboardingCases(): HasMany
+    {
+        return $this->hasMany(OnboardingCase::class, 'employee_user_id');
+    }
+
+    public function trainingRequests(): HasMany
+    {
+        return $this->hasMany(TrainingRequest::class, 'employee_user_id');
+    }
+
+    public function trainingNotifications(): HasMany
+    {
+        return $this->hasMany(TrainingNotification::class);
+    }
+
+    public function hrDocuments(): HasMany
+    {
+        return $this->hasMany(HrDocument::class, 'employee_user_id');
+    }
+
+    public function hrDocumentNotifications(): HasMany
+    {
+        return $this->hasMany(HrDocumentNotification::class);
+    }
+
+    public function disciplineComplaints(): HasMany
+    {
+        return $this->hasMany(DisciplineCase::class, 'complainant_user_id');
+    }
+
+    public function disciplineCasesAsSubject(): HasMany
+    {
+        return $this->hasMany(DisciplineCase::class, 'subject_user_id');
+    }
+
+    public function disciplineNotifications(): HasMany
+    {
+        return $this->hasMany(DisciplineNotification::class);
+    }
+
+    public function separationCases(): HasMany
+    {
+        return $this->hasMany(SeparationCase::class, 'employee_user_id');
+    }
+
+    public function assignedClearanceTasks(): HasMany
+    {
+        return $this->hasMany(ClearanceTask::class, 'assigned_user_id');
+    }
+
+    public function separationNotifications(): HasMany
+    {
+        return $this->hasMany(SeparationNotification::class);
+    }
+
+    public function competencies(): HasMany
+    {
+        return $this->hasMany(EmployeeCompetency::class, 'employee_user_id');
+    }
+
+    public function developmentPlans(): HasMany
+    {
+        return $this->hasMany(DevelopmentPlan::class, 'employee_user_id');
+    }
+
     /**
      * Get the attributes that should be cast.
      *
@@ -202,6 +302,9 @@ class User extends Authenticatable implements PasskeyUser
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'role' => UserRole::class,
+            'activation_date' => 'date',
+            'must_change_password' => 'boolean',
+            'credentials_issued_at' => 'datetime',
             'two_factor_confirmed_at' => 'datetime',
         ];
     }

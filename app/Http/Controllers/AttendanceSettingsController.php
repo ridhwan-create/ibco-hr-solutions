@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Enums\UserRole;
 use App\Http\Requests\SaveEmployeeUserLinkRequest;
 use App\Http\Requests\SaveOfficeLocationRequest;
+use App\Models\EmployeeRecord;
 use App\Models\EmployeeUserLink;
 use App\Models\OfficeLocation;
 use App\Models\User;
@@ -25,6 +26,7 @@ class AttendanceSettingsController extends Controller
                 'user:id,name,email,role',
                 'user.roleAssignments',
                 'officeLocation:id,name',
+                'employeeRecord',
             ])
             ->latest()
             ->get();
@@ -36,6 +38,22 @@ class AttendanceSettingsController extends Controller
                 ->whereIn('id', $employeeIds)
                 ->get(['id', 'employeeID', 'nama', 'rcd_enable'])
                 ->keyBy(fn ($employee) => (string) $employee->id);
+        $localEmployees = EmployeeRecord::query()
+            ->whereIn('directory_id', $employeeIds)
+            ->get()
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => (object) [
+                    'id' => $employee->directory_id,
+                    'employeeID' => $employee->employee_number,
+                    'nama' => $employee->name,
+                    'rcd_enable' => in_array(
+                        $employee->status,
+                        ['pending_activation', 'active'],
+                        true,
+                    ),
+                ],
+            ]);
+        $employees = $employees->union($localEmployees);
 
         return Inertia::render('GeoAttendance/Settings', [
             'offices' => OfficeLocation::query()

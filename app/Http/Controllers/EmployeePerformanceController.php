@@ -41,23 +41,33 @@ class EmployeePerformanceController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja as employee')
-            ->leftJoin('maklumatjawatan as position', function ($join) {
-                $join->on('position.id_pekerja', '=', 'employee.id')
-                    ->where('position.rcd_enable', 1);
-            })
-            ->leftJoin('xdepartment as department', 'department.id', '=', 'position.id_department')
-            ->where('employee.id', $link->employee_id)
-            ->where('employee.rcd_enable', 1)
-            ->orderByDesc('position.id')
-            ->first([
-                'employee.id',
-                'employee.employeeID as employee_number',
-                'employee.nama as name',
-                'position.jawatan as position_name',
-                'department.description as department',
-            ]);
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'id' => $link->employeeRecord->directory_id,
+                'employee_number' => $link->employeeRecord->employee_number,
+                'name' => $link->employeeRecord->name,
+                'position_name' => $link->employeeRecord->position_name,
+                'department' => $this->departmentName(
+                    $link->employeeRecord->department_id,
+                ),
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja as employee')
+                ->leftJoin('maklumatjawatan as position', function ($join) {
+                    $join->on('position.id_pekerja', '=', 'employee.id')
+                        ->where('position.rcd_enable', 1);
+                })
+                ->leftJoin('xdepartment as department', 'department.id', '=', 'position.id_department')
+                ->where('employee.id', $link->employee_id)
+                ->where('employee.rcd_enable', 1)
+                ->orderByDesc('position.id')
+                ->first([
+                    'employee.id',
+                    'employee.employeeID as employee_number',
+                    'employee.nama as name',
+                    'position.jawatan as position_name',
+                    'department.description as department',
+                ]);
         $reviews = PerformanceReview::query()
             ->where('employee_id', $link->employee_id)
             ->with([
@@ -323,14 +333,17 @@ class EmployeePerformanceController extends Controller
     ): HttpResponse {
         $this->authorizeOwnReview($request, $review);
         abort_unless($review->status === 'finalized', 404);
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $review->employee_id)
-            ->first(['employeeID as employee_number', 'nama as name']);
-        $department = DB::connection('ibco')
-            ->table('xdepartment')
-            ->where('id', $review->department_id)
-            ->value('description');
+        $link = $this->activeLink($request);
+        $employee = $link?->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'employee_number' => $link->employeeRecord->employee_number,
+                'name' => $link->employeeRecord->name,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $review->employee_id)
+                ->first(['employeeID as employee_number', 'nama as name']);
+        $department = $this->departmentName($review->department_id);
 
         return response(
             $this->pdfRenderer->render(
@@ -476,9 +489,22 @@ class EmployeePerformanceController extends Controller
     private function activeLink(Request $request): ?EmployeeUserLink
     {
         return EmployeeUserLink::query()
+            ->with('employeeRecord')
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
+    }
+
+    private function departmentName(?int $departmentId): ?string
+    {
+        if (! $departmentId) {
+            return null;
+        }
+
+        return DB::connection('ibco')
+            ->table('xdepartment')
+            ->where('id', $departmentId)
+            ->value('description');
     }
 
     /**

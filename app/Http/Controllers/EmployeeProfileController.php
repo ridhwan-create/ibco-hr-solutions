@@ -27,6 +27,10 @@ class EmployeeProfileController extends Controller
             ]);
         }
 
+        if ($link->employee_source === 'local' && $link->employeeRecord) {
+            return $this->showLocalProfile($request, $link);
+        }
+
         $employee = DB::connection('ibco')
             ->table('maklumatpekerja as p')
             ->leftJoin('xjantina as gender', 'p.jantina', '=', 'gender.id')
@@ -98,11 +102,17 @@ class EmployeeProfileController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['alamat', 'notel', 'email']);
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'alamat' => null,
+                'notel' => $link->employeeRecord->phone,
+                'email' => $link->employeeRecord->official_email,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['alamat', 'notel', 'email']);
 
         if (! $employee) {
             throw ValidationException::withMessages([
@@ -158,8 +168,55 @@ class EmployeeProfileController extends Controller
     private function activeLink(Request $request): ?EmployeeUserLink
     {
         return EmployeeUserLink::query()
+            ->with('employeeRecord')
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
+    }
+
+    private function showLocalProfile(
+        Request $request,
+        EmployeeUserLink $link,
+    ): Response {
+        $employee = $link->employeeRecord;
+        $profile = EmployeePersonalProfile::query()
+            ->where('employee_id', $link->employee_id)
+            ->first();
+
+        return Inertia::render('EmployeeSelfService/Profile', [
+            'employee' => [
+                'id' => $employee->directory_id,
+                'employee_id' => $employee->employee_number,
+                'name' => $employee->name,
+                'nric' => $employee->identity_number,
+                'address' => null,
+                'phone' => $employee->phone,
+                'email' => $employee->official_email,
+                'birth_date' => null,
+                'nationality' => null,
+                'gender' => null,
+                'religion' => null,
+                'race' => null,
+                'marital_status' => null,
+                'employment_status' => $employee->status === 'active'
+                    ? 'Aktif'
+                    : 'Menunggu Tarikh Mula',
+            ],
+            'position' => [
+                'title' => $employee->position_name,
+                'department' => $employee->department_id
+                    ? 'Jabatan ID '.$employee->department_id
+                    : null,
+                'joined_at' => $employee->start_date?->toDateString(),
+                'leave_entitlement' => null,
+            ],
+            'contact' => [
+                'address' => $profile?->address,
+                'phone' => $profile?->phone ?? $employee->phone,
+                'email' => $profile?->email ?? $employee->official_email,
+                'is_updated_locally' => $profile !== null,
+                'updated_at' => $profile?->updated_at?->toIso8601String(),
+            ],
+        ]);
     }
 }

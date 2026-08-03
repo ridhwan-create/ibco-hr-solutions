@@ -118,6 +118,7 @@ test('overtime follows supervisor then hr and retains approved payroll input', f
     $employeeUser = User::factory()->employee()->create();
     $supervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $employeeId = createOvertimeEmployee($employeeUser);
     $link = EmployeeUserLink::query()
         ->where('user_id', $employeeUser->getKey())
@@ -168,7 +169,7 @@ test('overtime follows supervisor then hr and retains approved payroll input', f
 
     expect($overtime->fresh()->approval_stage)->toBe('hr');
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($hrManager)
         ->patch(route('overtime-requests.review', $overtime), [
             'status' => 'approved',
             'approved_minutes' => 90,

@@ -4,9 +4,15 @@ import {
     CalendarDays,
     CheckCircle2,
     ChevronRight,
+    ClipboardCheck,
     Clock3,
+    Files,
+    GraduationCap,
+    ListChecks,
     ReceiptText,
+    ShieldAlert,
     Target,
+    UserPlus,
 } from 'lucide-react';
 import { useEffect } from 'react';
 import { Button } from '@/components/ui/button';
@@ -87,6 +93,27 @@ export function LeaveApprovalNotifications() {
         performance_total: 0,
         performance_supervisor: 0,
         performance_hr: 0,
+        recruitment_total: 0,
+        recruitment_approval: 0,
+        recruitment_interview: 0,
+        onboarding_total: 0,
+        onboarding_registration: 0,
+        onboarding_overdue: 0,
+        training_total: 0,
+        training_supervisor: 0,
+        training_hr: 0,
+        document_total: 0,
+        document_approval: 0,
+        document_expiring: 0,
+        discipline_total: 0,
+        discipline_triage: 0,
+        discipline_investigation: 0,
+        discipline_decision: 0,
+        separation_total: 0,
+        separation_supervisor: 0,
+        separation_hr: 0,
+        separation_clearance: 0,
+        separation_final_review: 0,
     };
 
     useEffect(() => {
@@ -108,8 +135,8 @@ export function LeaveApprovalNotifications() {
 
     const triggerLabel =
         alerts.total > 0
-            ? `${alerts.total} permohonan menunggu tindakan`
-            : 'Tiada permohonan menunggu tindakan';
+            ? `${alerts.total} rekod menunggu tindakan`
+            : 'Tiada rekod menunggu tindakan';
 
     return (
         <DropdownMenu>
@@ -148,8 +175,9 @@ export function LeaveApprovalNotifications() {
                             Pusat Kelulusan
                         </span>
                         <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
-                            Cuti, OT, tuntutan dan prestasi · dikemas kini
-                            setiap minit
+                            Cuti, OT, tuntutan, prestasi, pengambilan,
+                            onboarding, latihan, dokumen, disiplin dan clearance
+                            · dikemas kini setiap minit
                         </span>
                     </span>
                     {alerts.total > 0 && (
@@ -210,11 +238,61 @@ export function LeaveApprovalNotifications() {
                             description={`${alerts.performance_supervisor} penyelia · ${alerts.performance_hr} HR`}
                             count={alerts.performance_total}
                         />
+                        <AlertLink
+                            href="/pengambilan"
+                            icon={<UserPlus className="size-5 text-pink-600" />}
+                            title="Pengambilan & Temu Duga"
+                            description={`${alerts.recruitment_approval} kelulusan · ${alerts.recruitment_interview} scorecard`}
+                            count={alerts.recruitment_total}
+                        />
+                        <AlertLink
+                            href="/onboarding"
+                            icon={
+                                <ListChecks className="size-5 text-cyan-600" />
+                            }
+                            title="Onboarding"
+                            description={`${alerts.onboarding_registration} pendaftaran pekerja · ${alerts.onboarding_overdue} tugasan lewat`}
+                            count={alerts.onboarding_total}
+                        />
+                        <AlertLink
+                            href="/latihan-kompetensi?status=pending"
+                            icon={
+                                <GraduationCap className="size-5 text-indigo-600" />
+                            }
+                            title="Latihan & Kompetensi"
+                            description={`${alerts.training_supervisor} penyelia · ${alerts.training_hr} HR`}
+                            count={alerts.training_total}
+                        />
+                        <AlertLink
+                            href="/dokumen-hr"
+                            icon={<Files className="size-5 text-rose-600" />}
+                            title="Dokumen & Surat HR"
+                            description={`${alerts.document_approval} kelulusan · ${alerts.document_expiring} hampir tamat`}
+                            count={alerts.document_total}
+                        />
+                        <AlertLink
+                            href="/disiplin-aduan"
+                            icon={
+                                <ShieldAlert className="size-5 text-red-600" />
+                            }
+                            title="Disiplin & Aduan"
+                            description={`${alerts.discipline_triage} triage · ${alerts.discipline_investigation} siasatan · ${alerts.discipline_decision} keputusan`}
+                            count={alerts.discipline_total}
+                        />
+                        <AlertLink
+                            href="/berhenti-clearance"
+                            icon={
+                                <ClipboardCheck className="size-5 text-orange-600" />
+                            }
+                            title="Berhenti & Clearance"
+                            description={`${alerts.separation_supervisor} penyelia · ${alerts.separation_hr} HR · ${alerts.separation_clearance} tugasan · ${alerts.separation_final_review} akhir`}
+                            count={alerts.separation_total}
+                        />
                     </div>
                 )}
 
                 <DropdownMenuSeparator />
-                <div className="grid grid-cols-2 gap-1">
+                <div className="grid grid-cols-2 gap-1 sm:grid-cols-3">
                     <DropdownMenuItem asChild>
                         <Link
                             href="/permohonan-cuti"
@@ -245,6 +323,46 @@ export function LeaveApprovalNotifications() {
                             className="flex cursor-pointer justify-center text-xs font-medium"
                         >
                             Prestasi
+                        </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link
+                            href="/pengambilan"
+                            className="flex cursor-pointer justify-center text-xs font-medium"
+                        >
+                            Pengambilan
+                        </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link
+                            href="/onboarding"
+                            className="flex cursor-pointer justify-center text-xs font-medium"
+                        >
+                            Onboarding
+                        </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link
+                            href="/latihan-kompetensi"
+                            className="flex cursor-pointer justify-center text-xs font-medium"
+                        >
+                            Latihan
+                        </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link
+                            href="/disiplin-aduan"
+                            className="flex cursor-pointer justify-center text-xs font-medium"
+                        >
+                            Disiplin
+                        </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link
+                            href="/berhenti-clearance"
+                            className="flex cursor-pointer justify-center text-xs font-medium"
+                        >
+                            Clearance
                         </Link>
                     </DropdownMenuItem>
                 </div>

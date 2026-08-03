@@ -128,7 +128,7 @@ test('claim follows supervisor and finance then enters payroll without statutory
     $employee = User::factory()->employee()->create();
     $supervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
-    $approver = User::factory()->superAdmin()->create();
+    $approver = User::factory()->hrManager()->create();
     $employeeId = createClaimEmployee($employee);
     $type = ClaimType::query()->where('code', 'MEDICAL')->firstOrFail();
     ClaimApprovalAssignment::query()->create([
@@ -155,7 +155,7 @@ test('claim follows supervisor and finance then enters payroll without statutory
         ->assertSessionDoesntHaveErrors();
     expect($claim->fresh()->approval_stage)->toBe('finance');
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($approver)
         ->patch(route('claim-requests.review', $claim), [
             'status' => 'approved',
             'approved_amount' => 200,

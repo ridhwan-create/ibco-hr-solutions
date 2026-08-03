@@ -190,6 +190,7 @@ test('complete appraisal workflow calculates weighted scores and final rating', 
     $employee = User::factory()->employee()->create();
     $supervisor = User::factory()->supervisor()->create();
     $hr = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $employeeId = createPerformanceEmployee($employee);
     [$cycle] = createPerformanceCycleAndTemplate($hr);
     PerformanceSupervisorAssignment::query()->create([
@@ -274,7 +275,7 @@ test('complete appraisal workflow calculates weighted scores and final rating', 
     expect((float) $review->fresh()->moderated_score)->toBe(4.6);
     expect($review->fresh()->final_rating)->toBe('Sangat Cemerlang');
 
-    $this->actingAs($hr)
+    $this->actingAs($hrManager)
         ->patch(route('performance.finalize', $review))
         ->assertRedirect()
         ->assertSessionDoesntHaveErrors();

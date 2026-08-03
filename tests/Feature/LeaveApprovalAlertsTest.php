@@ -38,6 +38,7 @@ test('leave approval badges only count requests actionable by each role', functi
     $assignedSupervisor = User::factory()->supervisor()->create();
     $otherSupervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $superAdmin = User::factory()->superAdmin()->create();
     $leaveType = LeaveType::query()->where('code', 'ANNUAL')->firstOrFail();
 
@@ -73,15 +74,21 @@ test('leave approval badges only count requests actionable by each role', functi
     ]);
     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
         'enabled' => true,
+        'total' => 0,
+        'supervisor' => 0,
+        'hr' => 0,
+    ]);
+    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+        'enabled' => true,
         'total' => 1,
         'supervisor' => 0,
         'hr' => 1,
     ]);
     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
         'enabled' => true,
-        'total' => 3,
-        'supervisor' => 2,
-        'hr' => 1,
+        'total' => 0,
+        'supervisor' => 0,
+        'hr' => 0,
     ]);
     expect($alerts->summarizeFor($employee))->toMatchArray([
         'enabled' => false,

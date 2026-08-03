@@ -42,9 +42,14 @@ class AuditTrailController extends Controller
         'employee_link.created' => 'Pautan Pekerja Ditambah',
         'employee_link.updated' => 'Pautan Pekerja Dikemas Kini',
         'employee_link.deactivated' => 'Pautan Pekerja Dinyahaktifkan',
+        'employee_link.deactivated_from_onboarding_correction' => 'Pautan Akaun Dinyahaktifkan daripada Pembetulan Onboarding',
         'user.created' => 'Pengguna Sistem Ditambah',
         'user.updated' => 'Pengguna Sistem Dikemas Kini',
         'user.password.bulk_reset' => 'Kata Laluan Direset Secara Pukal',
+        'employee.registered_from_recruitment' => 'Calon Didaftarkan sebagai Pekerja',
+        'user.created_from_recruitment' => 'Akaun Pekerja Dicipta daripada Pengambilan',
+        'onboarding.employee_linked' => 'Pekerja Sedia Ada Dipautkan kepada Onboarding',
+        'onboarding.employee_unlinked' => 'Pautan Pekerja Onboarding Dibatalkan',
         'employee.profile_updated' => 'Profil Sendiri Dikemas Kini',
         'leave.submitted' => 'Permohonan Cuti Dihantar',
         'leave.supervisor_approved' => 'Permohonan Cuti Disokong Penyelia',
@@ -133,6 +138,24 @@ class AuditTrailController extends Controller
         'performance_pip.updated' => 'PIP Dikemas Kini',
         'performance_pip.checkin_added' => 'Semakan PIP Direkodkan',
         'performance_report.exported' => 'Laporan Prestasi Dieksport',
+        'document_template.created' => 'Template Dokumen Ditambah',
+        'document_template.updated' => 'Template Dokumen Dikemas Kini',
+        'document_template.activated' => 'Template Dokumen Diaktifkan',
+        'document_template.deactivated' => 'Template Dokumen Dinyahaktifkan',
+        'document_sequence.created' => 'Siri Dokumen Ditambah',
+        'document_sequence.updated' => 'Siri Dokumen Dikemas Kini',
+        'hr_document.created' => 'Draf Dokumen HR Dijana',
+        'hr_document.updated' => 'Draf Dokumen HR Dikemas Kini',
+        'hr_document.submitted' => 'Dokumen HR Dihantar untuk Kelulusan',
+        'hr_document.approved' => 'Dokumen HR Diluluskan',
+        'hr_document.rejected' => 'Dokumen HR Ditolak',
+        'hr_document.issued' => 'Dokumen HR Dikeluarkan',
+        'hr_document.acknowledged' => 'Dokumen HR Diperakui Pekerja',
+        'hr_document.voided' => 'Dokumen HR Dibatalkan',
+        'hr_document.renewal_created' => 'Pembaharuan Dokumen HR Dijana',
+        'hr_document.attachment_uploaded' => 'Lampiran Dokumen HR Dimuat Naik',
+        'hr_document.attachment_deleted' => 'Lampiran Dokumen HR Dibuang',
+        'hr_document.report_exported' => 'Laporan Dokumen HR Dieksport',
         'payroll.generated' => 'Payroll Dijana',
         'payroll.recalculated' => 'Payroll Dikira Semula',
         'payroll.manual_item_added' => 'Pelarasan Payroll Ditambah',
@@ -166,6 +189,7 @@ class AuditTrailController extends Controller
         'geo_attendance_records',
         'office_locations',
         'employee_user_links',
+        'onboarding_cases',
         'users',
         'employee_personal_profiles',
         'employee_leave_requests',
@@ -192,6 +216,10 @@ class AuditTrailController extends Controller
         'performance_evidence',
         'performance_improvement_plans',
         'performance_pip_checkins',
+        'document_templates',
+        'document_sequences',
+        'hr_documents',
+        'hr_document_attachments',
         'payroll_runs',
         'payroll_entry_items',
         'payroll_settings',
@@ -466,6 +494,8 @@ class AuditTrailController extends Controller
                     + ($actionCounts['attendance.cancelled'] ?? 0)
                     + ($actionCounts['office.deactivated'] ?? 0)
                     + ($actionCounts['employee_link.deactivated'] ?? 0)
+                    + ($actionCounts['employee_link.deactivated_from_onboarding_correction'] ?? 0)
+                    + ($actionCounts['onboarding.employee_unlinked'] ?? 0)
                     + ($actionCounts['leave.cancelled'] ?? 0)
                     + ($actionCounts['leave.approved_cancelled'] ?? 0)
                     + ($actionCounts['leave_type.deactivated'] ?? 0)

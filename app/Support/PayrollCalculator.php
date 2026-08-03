@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\EmployeeLeaveRequest;
 use App\Models\ClaimRequest;
 use App\Models\EmployeePayrollComponent;
+use App\Models\EmployeeRecord;
 use App\Models\EmployeeSalaryProfile;
 use App\Models\OvertimeRequest;
 use App\Models\PayrollEntry;
@@ -478,7 +479,7 @@ class PayrollCalculator
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->whereIn('id', $employeeIds->all())
             ->where('rcd_enable', 1)
@@ -491,6 +492,19 @@ class PayrollCalculator
                 ],
             ])
             ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', $employeeIds->all())
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->get(['directory_id', 'employee_number', 'name'])
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => [
+                    'employee_number' => $employee->employee_number,
+                    'employee_name' => $employee->name,
+                ],
+            ])
+            ->all();
+
+        return $legacy + $local;
     }
 
     private function unpaidDaysInPeriod(

@@ -92,12 +92,14 @@ const permissionLabels: Record<Permission, string> = {
     'employee.profile.update': 'Kemas Kini Profil Sendiri',
     'leave.view': 'Cuti Asal',
     'leave.manage': 'Urus Permohonan Cuti',
+    'leave.approve': 'Kelulusan Akhir Cuti',
     'leave.supervise': 'Semakan Penyelia',
     'leave.settings': 'Tetapan Cuti',
     'leave.self': 'Cuti Sendiri',
     'leave.apply': 'Mohon Cuti',
     'overtime.view': 'OT Asal',
     'overtime.manage': 'Urus Permohonan OT',
+    'overtime.approve': 'Kelulusan Akhir OT',
     'overtime.supervise': 'Semakan Penyelia OT',
     'overtime.settings': 'Tetapan OT',
     'overtime.self': 'OT Sendiri',
@@ -116,8 +118,48 @@ const permissionLabels: Record<Permission, string> = {
     'performance.finalize': 'Muktamad Penilaian',
     'performance.settings': 'Tetapan Prestasi',
     'performance.self': 'Prestasi Sendiri',
+    'recruitment.view': 'Pengambilan',
+    'recruitment.manage': 'Urus Pengambilan',
+    'recruitment.approve': 'Lulus Kekosongan & Tawaran',
+    'recruitment.interview': 'Panel Temu Duga',
+    'recruitment.settings': 'Tetapan Pengambilan',
+    'onboarding.view': 'Onboarding',
+    'onboarding.manage': 'Urus Onboarding',
+    'onboarding.approve': 'Daftar & Selesaikan Onboarding',
+    'onboarding.self': 'Onboarding Sendiri',
+    'training.view': 'Latihan & Kompetensi',
+    'training.manage': 'Urus Latihan',
+    'training.approve': 'Kelulusan Akhir Latihan',
+    'training.supervise': 'Semakan Penyelia Latihan',
+    'training.settings': 'Tetapan Latihan',
+    'training.self': 'Latihan Sendiri',
+    'training.apply': 'Mohon Latihan',
+    'competency.view': 'Matriks Kompetensi',
+    'competency.assess': 'Nilai Kompetensi',
+    'competency.self': 'Kompetensi Sendiri',
+    'documents.view': 'Dokumen & Surat HR',
+    'documents.manage': 'Urus Dokumen HR',
+    'documents.approve': 'Lulus Dokumen HR',
+    'documents.settings': 'Tetapan Dokumen HR',
+    'documents.self': 'Dokumen Sendiri',
+    'discipline.view': 'Disiplin & Aduan',
+    'discipline.manage': 'Triage & Urus Kes Disiplin',
+    'discipline.investigate': 'Siasatan Disiplin',
+    'discipline.approve': 'Keputusan & Rayuan Tatatertib',
+    'discipline.settings': 'Tetapan Disiplin',
+    'discipline.self': 'Aduan & Kes Sendiri',
+    'discipline.apply': 'Hantar Aduan Sulit',
+    'separation.view': 'Berhenti & Clearance',
+    'separation.manage': 'Urus Pengakhiran & Clearance',
+    'separation.supervise': 'Semakan Penyelia Pengakhiran',
+    'separation.approve': 'Kelulusan HR & Final Settlement',
+    'separation.clearance': 'Laksana Tugasan Clearance',
+    'separation.settings': 'Tetapan Clearance',
+    'separation.self': 'Pengakhiran & Clearance Sendiri',
+    'separation.apply': 'Hantar Notis Berhenti',
     'claims.view': 'Tuntutan',
     'claims.manage': 'Urus Tuntutan',
+    'claims.approve': 'Kelulusan Akhir Tuntutan',
     'claims.supervise': 'Semakan Penyelia Tuntutan',
     'claims.settings': 'Tetapan Tuntutan',
     'claims.self': 'Tuntutan Sendiri',
@@ -135,6 +177,8 @@ const permissionLabels: Record<Permission, string> = {
 const roleStyles: Record<UserRole, string> = {
     super_admin:
         'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    hr_manager:
+        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
     hr_admin:
         'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
     supervisor:
@@ -300,7 +344,9 @@ export default function UserManagement({
                                 <div className="rounded-lg bg-primary/10 p-2.5 text-primary">
                                     {role.value === 'super_admin' ? (
                                         <ShieldCheck className="size-5" />
-                                    ) : role.value === 'hr_admin' ? (
+                                    ) : ['hr_manager', 'hr_admin'].includes(
+                                          role.value,
+                                      ) ? (
                                         <UserCog className="size-5" />
                                     ) : (
                                         <UsersRound className="size-5" />

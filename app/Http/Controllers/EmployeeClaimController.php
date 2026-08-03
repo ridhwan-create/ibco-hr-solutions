@@ -43,11 +43,17 @@ class EmployeeClaimController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'id' => $link->employee_id,
+                'employee_id' => $link->employeeRecord->employee_number,
+                'name' => $link->employeeRecord->name,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['id', 'employeeID as employee_id', 'nama as name']);
         $position = $this->activePosition($link->employee_id);
         $claims = ClaimRequest::query()
             ->where('employee_id', $link->employee_id)
@@ -136,11 +142,13 @@ class EmployeeClaimController extends Controller
             ]);
         }
 
-        $employeeExists = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->exists();
+        $employeeExists = $link->employee_source === 'local'
+            ? $link->employeeRecord !== null
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->exists();
 
         if (! $employeeExists) {
             throw ValidationException::withMessages([
@@ -373,6 +381,7 @@ class EmployeeClaimController extends Controller
     private function activeLink(Request $request): ?EmployeeUserLink
     {
         return EmployeeUserLink::query()
+            ->with('employeeRecord')
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
@@ -380,6 +389,18 @@ class EmployeeClaimController extends Controller
 
     private function activePosition(int $employeeId): ?object
     {
+        $local = \App\Models\EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->first(['id', 'department_id', 'position_name']);
+
+        if ($local) {
+            return (object) [
+                'id' => null,
+                'id_department' => $local->department_id,
+                'jawatan' => $local->position_name,
+            ];
+        }
+
         return DB::connection('ibco')
             ->table('maklumatjawatan')
             ->where('id_pekerja', $employeeId)

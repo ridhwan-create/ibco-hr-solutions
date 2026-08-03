@@ -34,6 +34,7 @@ test('approval centre separates claim counts by actionable role', function () {
     $assignedSupervisor = User::factory()->supervisor()->create();
     $otherSupervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $superAdmin = User::factory()->superAdmin()->create();
     $type = ClaimType::query()->where('code', 'TRAVEL')->firstOrFail();
 
@@ -62,6 +63,13 @@ test('approval centre separates claim counts by actionable role', function () {
     ]);
     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
         'enabled' => true,
+        'total' => 0,
+        'claim_total' => 0,
+        'claim_supervisor' => 0,
+        'claim_finance' => 0,
+    ]);
+    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+        'enabled' => true,
         'total' => 1,
         'claim_total' => 1,
         'claim_supervisor' => 0,
@@ -69,10 +77,10 @@ test('approval centre separates claim counts by actionable role', function () {
     ]);
     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
         'enabled' => true,
-        'total' => 3,
-        'claim_total' => 3,
-        'claim_supervisor' => 2,
-        'claim_finance' => 1,
+        'total' => 0,
+        'claim_total' => 0,
+        'claim_supervisor' => 0,
+        'claim_finance' => 0,
     ]);
     expect($alerts->summarizeFor($employee))->toMatchArray([
         'enabled' => false,

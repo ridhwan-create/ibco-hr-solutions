@@ -449,6 +449,15 @@ class PayrollRunController extends Controller
                 ->lockForUpdate()
                 ->findOrFail($payrollRun->getKey());
             $this->ensureStatus($locked, 'hr_reviewed');
+            if (in_array(
+                (int) $request->user()->getAuthIdentifier(),
+                array_filter([(int) $locked->generated_by, (int) $locked->reviewed_by]),
+                true,
+            )) {
+                throw ValidationException::withMessages([
+                    'notes' => 'Penyedia atau penyemak payroll tidak boleh meluluskan payroll yang sama.',
+                ]);
+            }
             $locked->update([
                 'status' => 'approved',
                 'approved_at' => now(),

@@ -160,6 +160,7 @@ test('hr can configure shift templates and effective department assignments', fu
 
 test('hr can generate publish and lock a monthly roster without writing to db_spp', function () {
     $admin = User::factory()->superAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $employeeUser = User::factory()->employee()->create();
     $office = createRosterOffice();
     $employeeId = createRosterEmployee(
@@ -196,7 +197,7 @@ test('hr can generate publish and lock a monthly roster without writing to db_sp
             ->value('day_type'),
     )->toBe('rest_day');
 
-    $this->actingAs($admin)
+    $this->actingAs($hrManager)
         ->patch(route('rosters.publish', $period))
         ->assertRedirect()
         ->assertSessionDoesntHaveErrors();
@@ -210,7 +211,7 @@ test('hr can generate publish and lock a monthly roster without writing to db_sp
             ->where('summary.workdays', 21)
             ->has('entries', 31));
 
-    $this->actingAs($admin)
+    $this->actingAs($hrManager)
         ->patch(route('rosters.lock', $period))
         ->assertRedirect()
         ->assertSessionDoesntHaveErrors();
@@ -232,6 +233,7 @@ test('hr can generate publish and lock a monthly roster without writing to db_sp
 
 test('night roster drives late and overnight attendance calculations', function () {
     $admin = User::factory()->superAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $employeeUser = User::factory()->employee()->create();
     $office = createRosterOffice();
     $employeeId = createRosterEmployee(
@@ -255,7 +257,7 @@ test('night roster drives late and overnight attendance calculations', function 
         ->post(route('rosters.generate'), ['month' => '2026-08'])
         ->assertSessionDoesntHaveErrors();
     $period = RosterPeriod::query()->sole();
-    $this->actingAs($admin)
+    $this->actingAs($hrManager)
         ->patch(route('rosters.publish', $period))
         ->assertSessionDoesntHaveErrors();
 
@@ -308,6 +310,7 @@ test('night roster drives late and overnight attendance calculations', function 
 
 test('supervisor can approve a shift swap before the roster is locked', function () {
     $admin = User::factory()->superAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $supervisor = User::factory()->supervisor()->create();
     $requester = User::factory()->employee()->create();
     $target = User::factory()->employee()->create();
@@ -356,7 +359,7 @@ test('supervisor can approve a shift swap before the roster is locked', function
         'break_minutes' => 45,
         'source' => 'manual',
     ]);
-    $this->actingAs($admin)
+    $this->actingAs($hrManager)
         ->patch(route('rosters.publish', $period))
         ->assertSessionDoesntHaveErrors();
 

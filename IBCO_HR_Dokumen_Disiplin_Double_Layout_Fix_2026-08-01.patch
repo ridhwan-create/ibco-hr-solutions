@@ -1,0 +1,210 @@
+--- a/resources/js/pages/HrDocuments/Index.tsx
++++ b/resources/js/pages/HrDocuments/Index.tsx
+@@ -57,7 +57,6 @@
+     TableHeader,
+     TableRow,
+ } from '@/components/ui/table';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Template = {
+     id: number;
+@@ -1091,9 +1090,7 @@
+     };
+ 
+     return (
+-        <AppLayout
+-            breadcrumbs={[{ title: 'Dokumen & Surat HR', href: '/dokumen-hr' }]}
+-        >
++        <>
+             <Head title="Dokumen & Surat HR" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -1442,10 +1439,14 @@
+                     </CardContent>
+                 </Card>
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
+ 
++HrDocuments.layout = {
++    breadcrumbs: [{ title: 'Dokumen & Surat HR', href: '/dokumen-hr' }],
++};
++
+ function StatCard({
+     label,
+     value,
+--- a/resources/js/pages/DocumentSettings/Index.tsx
++++ b/resources/js/pages/DocumentSettings/Index.tsx
+@@ -48,7 +48,6 @@
+     TableHeader,
+     TableRow,
+ } from '@/components/ui/table';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Approver = { id: number; name: string; email: string };
+ 
+@@ -565,11 +564,7 @@
+     systemVariables,
+ }: Props) {
+     return (
+-        <AppLayout
+-            breadcrumbs={[
+-                { title: 'Tetapan Dokumen', href: '/tetapan-dokumen' },
+-            ]}
+-        >
++        <>
+             <Head title="Tetapan Dokumen" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -775,6 +770,10 @@
+                     </CardContent>
+                 </Card>
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
++
++DocumentSettings.layout = {
++    breadcrumbs: [{ title: 'Tetapan Dokumen', href: '/tetapan-dokumen' }],
++};
+--- a/resources/js/pages/EmployeeSelfService/Documents.tsx
++++ b/resources/js/pages/EmployeeSelfService/Documents.tsx
+@@ -17,7 +17,6 @@
+     CardHeader,
+     CardTitle,
+ } from '@/components/ui/card';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Attachment = {
+     id: number;
+@@ -144,9 +143,7 @@
+     };
+ 
+     return (
+-        <AppLayout
+-            breadcrumbs={[{ title: 'Dokumen Saya', href: '/dokumen-saya' }]}
+-        >
++        <>
+             <Head title="Dokumen Saya" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -367,10 +364,14 @@
+                     </Card>
+                 )}
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
+ 
++Documents.layout = {
++    breadcrumbs: [{ title: 'Dokumen Saya', href: '/dokumen-saya' }],
++};
++
+ function StatCard({
+     title,
+     value,
+--- a/resources/js/pages/Discipline/Index.tsx
++++ b/resources/js/pages/Discipline/Index.tsx
+@@ -34,7 +34,6 @@
+ } from '@/components/ui/select';
+ import { Separator } from '@/components/ui/separator';
+ import { Textarea } from '@/components/ui/textarea';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Category = {
+     id: number;
+@@ -1616,11 +1615,7 @@
+         );
+ 
+     return (
+-        <AppLayout
+-            breadcrumbs={[
+-                { title: 'Disiplin & Aduan', href: '/disiplin-aduan' },
+-            ]}
+-        >
++        <>
+             <Head title="Disiplin & Aduan" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -1946,6 +1941,10 @@
+                     </p>
+                 </div>
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
++
++DisciplineIndex.layout = {
++    breadcrumbs: [{ title: 'Disiplin & Aduan', href: '/disiplin-aduan' }],
++};
+--- a/resources/js/pages/DisciplineSettings/Index.tsx
++++ b/resources/js/pages/DisciplineSettings/Index.tsx
+@@ -30,7 +30,6 @@
+     SelectValue,
+ } from '@/components/ui/select';
+ import { Textarea } from '@/components/ui/textarea';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Category = {
+     id: number;
+@@ -259,11 +258,7 @@
+     const [open, setOpen] = useState(false);
+ 
+     return (
+-        <AppLayout
+-            breadcrumbs={[
+-                { title: 'Tetapan Disiplin', href: '/tetapan-disiplin' },
+-            ]}
+-        >
++        <>
+             <Head title="Tetapan Disiplin" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -403,6 +398,10 @@
+                     ))}
+                 </div>
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
++
++DisciplineSettings.layout = {
++    breadcrumbs: [{ title: 'Tetapan Disiplin', href: '/tetapan-disiplin' }],
++};
+--- a/resources/js/pages/EmployeeSelfService/Complaints.tsx
++++ b/resources/js/pages/EmployeeSelfService/Complaints.tsx
+@@ -32,7 +32,6 @@
+ } from '@/components/ui/select';
+ import { Separator } from '@/components/ui/separator';
+ import { Textarea } from '@/components/ui/textarea';
+-import AppLayout from '@/layouts/app-layout';
+ 
+ type Category = {
+     id: number;
+@@ -677,7 +676,7 @@
+     };
+ 
+     return (
+-        <AppLayout breadcrumbs={[{ title: 'Aduan Saya', href: '/aduan-saya' }]}>
++        <>
+             <Head title="Aduan Saya" />
+             <div className="flex flex-col gap-6 p-4 md:p-6">
+                 <div className="flex flex-wrap items-start justify-between gap-3">
+@@ -1007,6 +1006,10 @@
+                     </p>
+                 </div>
+             </div>
+-        </AppLayout>
++        </>
+     );
+ }
++
++Complaints.layout = {
++    breadcrumbs: [{ title: 'Aduan Saya', href: '/aduan-saya' }],
++};

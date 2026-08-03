@@ -76,7 +76,7 @@ function createStatutoryEmployee(string $number = 'EMP-STAT-001'): int
 
 test('statutory contributions are snapshotted and employee can download only own finalized payslip', function () {
     $hr = User::factory()->hrAdmin()->create();
-    $approver = User::factory()->superAdmin()->create();
+    $approver = User::factory()->hrManager()->create();
     $employeeUser = User::factory()->employee()->create();
     $otherEmployee = User::factory()->employee()->create();
     $employeeId = createStatutoryEmployee();

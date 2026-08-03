@@ -14,6 +14,7 @@ const config: RecordPageConfig = {
     deleteRoutePath: '/pekerja',
     entityLabel: 'pekerja',
     searchPlaceholder: 'Cari nama, ID, NRIC atau e-mel...',
+    dataSourceLabel: 'IBCO HR Solutions + db_spp',
     columns: [
         { key: 'employee_id', label: 'ID Pekerja' },
         { key: 'nama', label: 'Nama' },
@@ -21,6 +22,7 @@ const config: RecordPageConfig = {
         { key: 'no_telefon', label: 'No. Telefon' },
         { key: 'email', label: 'E-mel' },
         { key: 'status', label: 'Status', type: 'badge' },
+        { key: 'source', label: 'Sumber Rekod', type: 'badge' },
     ],
 };
 

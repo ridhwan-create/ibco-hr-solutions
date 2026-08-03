@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Enums\UserRole;
+use App\Models\EmployeeRecord;
 use App\Models\EmployeeLeaveRequest;
 use App\Models\LeaveApprovalAssignment;
 use App\Models\LeaveEntitlement;
@@ -40,6 +41,21 @@ class LeaveSettingsController extends Controller
             ->orderBy('nama')
             ->limit(500)
             ->get(['id', 'employeeID as employee_id', 'nama as name']);
+        $localEmployees = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                $query->where('name', 'like', "%{$search}%")
+                    ->orWhere('employee_number', 'like', "%{$search}%");
+            }))
+            ->limit(500)
+            ->get()
+            ->map(fn (EmployeeRecord $employee) => (object) [
+                'id' => $employee->directory_id,
+                'employee_id' => $employee->employee_number,
+                'name' => $employee->name,
+                'department_id' => $employee->department_id,
+            ]);
+        $employees = $employees->concat($localEmployees)->sortBy('name')->values();
         $employeeIds = $employees->pluck('id');
         $positions = $employeeIds->isEmpty()
             ? collect()
@@ -94,7 +110,7 @@ class LeaveSettingsController extends Controller
                 'name' => $employee->name,
                 'department_id' => isset($positions[(string) $employee->id])
                     ? (int) $positions[(string) $employee->id]->id_department
-                    : null,
+                    : ($employee->department_id ?? null),
             ])->values(),
             'entitlements' => $entitlements->map(function (
                 LeaveEntitlement $entitlement,
@@ -283,10 +299,14 @@ class LeaveSettingsController extends Controller
             ->where('id', $validated['employee_id'])
             ->where('rcd_enable', 1)
             ->exists();
+        $employeeExists = $employeeExists || EmployeeRecord::query()
+            ->where('directory_id', $validated['employee_id'])
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->exists();
 
         if (! $employeeExists) {
             throw ValidationException::withMessages([
-                'employee_id' => 'Pekerja aktif tidak dijumpai dalam db_spp.',
+                'employee_id' => 'Rekod pekerja aktif tidak dijumpai.',
             ]);
         }
 

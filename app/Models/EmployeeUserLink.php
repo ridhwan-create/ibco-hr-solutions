@@ -10,6 +10,8 @@ class EmployeeUserLink extends Model
     protected $fillable = [
         'user_id',
         'employee_id',
+        'employee_source',
+        'employee_record_id',
         'office_location_id',
         'is_active',
         'created_by',
@@ -20,6 +22,7 @@ class EmployeeUserLink extends Model
     {
         return [
             'employee_id' => 'integer',
+            'employee_record_id' => 'integer',
             'is_active' => 'boolean',
         ];
     }
@@ -32,5 +35,10 @@ class EmployeeUserLink extends Model
     public function officeLocation(): BelongsTo
     {
         return $this->belongsTo(OfficeLocation::class);
+    }
+
+    public function employeeRecord(): BelongsTo
+    {
+        return $this->belongsTo(EmployeeRecord::class);
     }
 }

@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\SaveMaklumatPekerjaRequest;
+use App\Models\EmployeeRecord;
 use App\Models\MaklumatPekerja;
 use App\Support\AuditLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
@@ -34,7 +36,7 @@ class MaklumatPekerjaController extends Controller
     {
         $search = $request->string('search')->trim()->toString();
 
-        $records = DB::connection('ibco')->table('maklumatpekerja as p')
+        $legacyRecords = DB::connection('ibco')->table('maklumatpekerja as p')
             ->leftJoin('xstatus as s', 'p.status', '=', 's.id')
             ->where('p.rcd_enable', 1)
             ->when($search !== '', function ($query) use ($search) {
@@ -55,8 +57,58 @@ class MaklumatPekerjaController extends Controller
                 's.description as status',
             ])
             ->orderBy('p.nama')
-            ->paginate(15)
-            ->withQueryString();
+            ->get()
+            ->map(fn ($employee) => [
+                'id' => (int) $employee->id,
+                'employee_id' => $employee->employee_id,
+                'nama' => $employee->nama,
+                'nric' => $employee->nric,
+                'no_telefon' => $employee->no_telefon,
+                'email' => $employee->email,
+                'status' => $employee->status,
+                'source' => 'db_spp',
+                '_can_edit' => true,
+                '_can_delete' => true,
+            ]);
+        $localRecords = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                $query->where('name', 'like', "%{$search}%")
+                    ->orWhere('employee_number', 'like', "%{$search}%")
+                    ->orWhere('identity_number', 'like', "%{$search}%")
+                    ->orWhere('official_email', 'like', "%{$search}%");
+            }))
+            ->get()
+            ->map(fn (EmployeeRecord $employee) => [
+                'id' => $employee->directory_id,
+                'employee_id' => $employee->employee_number,
+                'nama' => $employee->name,
+                'nric' => $employee->identity_number,
+                'no_telefon' => $employee->phone,
+                'email' => $employee->official_email,
+                'status' => $employee->status === 'active'
+                    ? 'Aktif'
+                    : 'Menunggu Tarikh Mula',
+                'source' => 'IBCO HR Solutions',
+                '_can_edit' => false,
+                '_can_delete' => false,
+            ]);
+        $combined = $legacyRecords
+            ->concat($localRecords)
+            ->sortBy(fn (array $employee) => Str::lower($employee['nama'] ?? ''))
+            ->values();
+        $page = LengthAwarePaginator::resolveCurrentPage();
+        $perPage = 15;
+        $records = new LengthAwarePaginator(
+            $combined->forPage($page, $perPage)->values(),
+            $combined->count(),
+            $perPage,
+            $page,
+            [
+                'path' => $request->url(),
+                'query' => $request->query(),
+            ],
+        );
 
         return Inertia::render('MaklumatPekerja/Index', [
             'records' => $records,
@@ -69,6 +121,15 @@ class MaklumatPekerjaController extends Controller
 
     public function show(Request $request, int $id): Response
     {
+        $localEmployee = EmployeeRecord::query()
+            ->with(['officeLocation:id,name', 'manager:id,name'])
+            ->where('directory_id', $id)
+            ->first();
+
+        if ($localEmployee) {
+            return $this->showLocalEmployee($request, $localEmployee);
+        }
+
         $connection = DB::connection('ibco');
         $canViewPayroll = $request->user()->hasPermission('payroll.view');
 
@@ -264,6 +325,113 @@ class MaklumatPekerjaController extends Controller
             'canViewPayroll' => $canViewPayroll,
             'canManage' => $request->user()->hasPermission('employees.manage'),
             'canManagePositions' => $request->user()->hasPermission('positions.manage'),
+            'dataSource' => 'db_spp',
+        ]);
+    }
+
+    private function showLocalEmployee(
+        Request $request,
+        EmployeeRecord $employee,
+    ): Response {
+        $employeeId = $employee->directory_id;
+        $probationEnd = $employee->probation_months > 0
+            ? $employee->start_date?->addMonths($employee->probation_months)->toDateString()
+            : null;
+        $attendance = DB::table('geo_attendance_records')
+            ->where('employee_id', $employeeId)
+            ->latest('attendance_date')
+            ->latest('clock_in_at')
+            ->limit(5)
+            ->get();
+        $leave = DB::table('employee_leave_requests')
+            ->where('employee_id', $employeeId)
+            ->latest('start_date')
+            ->limit(5)
+            ->get();
+        $overtime = DB::table('overtime_requests')
+            ->where('employee_id', $employeeId)
+            ->latest('work_date')
+            ->limit(5)
+            ->get();
+
+        return Inertia::render('MaklumatPekerja/Show', [
+            'pekerja' => [
+                'id' => $employee->directory_id,
+                'employee_id' => $employee->employee_number,
+                'nama' => $employee->name,
+                'nric' => $employee->identity_number,
+                'alamat' => null,
+                'tarikh_lahir' => null,
+                'kewarganegaraan' => null,
+                'no_telefon' => $employee->phone,
+                'email' => $employee->official_email,
+                'jantina' => null,
+                'agama' => null,
+                'bangsa' => null,
+                'status_perkahwinan' => null,
+                'status' => $employee->status === 'active'
+                    ? 'Aktif'
+                    : 'Menunggu Tarikh Mula',
+            ],
+            'jawatan' => [
+                'id' => $employee->getKey(),
+                'jawatan' => $employee->position_name,
+                'jabatan' => $employee->department_id
+                    ? 'Jabatan ID '.$employee->department_id
+                    : null,
+                'tarikh_lapor_diri' => $employee->start_date?->toDateString(),
+                'tarikh_tamat_tempoh_cubaan' => $probationEnd,
+                'gaji_asas' => $employee->salary,
+                'bank' => null,
+                'no_akaun' => null,
+                'no_kwsp' => null,
+                'no_perkeso' => null,
+                'kelayakan_cuti' => null,
+            ],
+            'jawatanHistory' => [],
+            'statistics' => [
+                'kehadiran' => DB::table('geo_attendance_records')
+                    ->where('employee_id', $employeeId)
+                    ->where('status', 'active')
+                    ->count(),
+                'cuti' => DB::table('employee_leave_requests')
+                    ->where('employee_id', $employeeId)
+                    ->count(),
+                'kerja_lebih_masa' => DB::table('overtime_requests')
+                    ->where('employee_id', $employeeId)
+                    ->count(),
+                'payroll' => DB::table('payroll_entries')
+                    ->where('employee_id', $employeeId)
+                    ->count(),
+            ],
+            'recentAttendance' => $attendance->map(fn ($record) => [
+                'id' => $record->id,
+                'pilihan_jam' => null,
+                'waktu_masuk' => $record->clock_in_at,
+                'waktu_keluar' => $record->clock_out_at,
+                'catatan' => $record->notes,
+            ]),
+            'recentLeave' => $leave->map(fn ($record) => [
+                'id' => $record->id,
+                'jenis_cuti' => $record->leave_type_label,
+                'tarikh_mula' => $record->start_date,
+                'tarikh_tamat' => $record->end_date,
+                'bilangan_hari' => $record->requested_days,
+                'status_permohonan' => $record->status,
+            ]),
+            'recentOvertime' => $overtime->map(fn ($record) => [
+                'id' => $record->id,
+                'jenis_ot' => 'Kerja Lebih Masa',
+                'tarikh' => $record->work_date,
+                'waktu_masuk' => $record->start_at,
+                'waktu_keluar' => $record->end_at,
+                'catatan' => $record->reason,
+            ]),
+            'recentPayroll' => [],
+            'canViewPayroll' => $request->user()->hasPermission('payroll.view'),
+            'canManage' => false,
+            'canManagePositions' => false,
+            'dataSource' => 'IBCO HR Solutions',
         ]);
     }
 

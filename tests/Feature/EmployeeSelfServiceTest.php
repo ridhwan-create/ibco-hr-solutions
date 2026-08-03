@@ -328,7 +328,7 @@ test('overlapping active leave application is rejected', function () {
     $this->assertDatabaseCount('employee_leave_requests', 1);
 });
 
-test('hr admin can approve leave while ordinary employee cannot access approval list', function () {
+test('hr manager can approve leave while ordinary employee cannot access approval list', function () {
     $employeeUser = User::factory()->employee()->create();
     $employeeId = createSelfServiceEmployee();
     linkSelfServiceEmployee($employeeUser, $employeeId);
@@ -345,6 +345,7 @@ test('hr admin can approve leave while ordinary employee cannot access approval 
         'submitted_at' => now(),
     ]);
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
 
     $this->actingAs($employeeUser)
         ->get(route('leave-requests.index'))
@@ -354,7 +355,7 @@ test('hr admin can approve leave while ordinary employee cannot access approval 
         ->get(route('leave-requests.index'))
         ->assertOk();
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($hrManager)
         ->patch(route('leave-requests.review', $leave), [
             'status' => 'approved',
             'review_notes' => 'Permohonan lengkap.',
@@ -363,7 +364,7 @@ test('hr admin can approve leave while ordinary employee cannot access approval 
         ->assertSessionDoesntHaveErrors();
 
     expect($leave->fresh()->status)->toBe('approved');
-    expect($leave->fresh()->reviewed_by)->toBe($hrAdmin->getKey());
+    expect($leave->fresh()->reviewed_by)->toBe($hrManager->getKey());
     $this->assertDatabaseHas('audit_logs', [
         'action' => 'leave.approved',
         'auditable_type' => 'employee_leave_requests',

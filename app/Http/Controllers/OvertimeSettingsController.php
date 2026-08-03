@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\UserRole;
 use App\Models\OvertimeApprovalAssignment;
 use App\Models\OvertimeRequest;
 use App\Models\OvertimeType;
@@ -30,8 +29,7 @@ class OvertimeSettingsController extends Controller
             ->with('roleAssignments')
             ->orderBy('name')
             ->get()
-            ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
-                || $user->hasRole(UserRole::SuperAdmin))
+            ->filter(fn (User $user) => $user->hasPermission('overtime.supervise'))
             ->values()
             ->map(fn (User $user) => [
                 'id' => $user->getKey(),
@@ -193,12 +191,9 @@ class OvertimeSettingsController extends Controller
             ->with('roleAssignments')
             ->findOrFail($validated['approver_user_id']);
 
-        if (
-            ! $approver->hasRole(UserRole::Supervisor)
-            && ! $approver->hasRole(UserRole::SuperAdmin)
-        ) {
+        if (! $approver->hasPermission('overtime.supervise')) {
             throw ValidationException::withMessages([
-                'approver_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
+                'approver_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan kerja lebih masa.',
             ]);
         }
 

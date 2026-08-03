@@ -125,6 +125,7 @@ type EmployeeProfileProps = {
     canViewPayroll: boolean;
     canManage: boolean;
     canManagePositions: boolean;
+    dataSource: string;
 };
 
 type InformationItemProps = {
@@ -295,6 +296,7 @@ export default function EmployeeProfile({
     canViewPayroll,
     canManage,
     canManagePositions,
+    dataSource,
 }: EmployeeProfileProps) {
     const employeeSearch = encodeURIComponent(
         pekerja.employee_id || pekerja.nama || '',
@@ -387,7 +389,7 @@ export default function EmployeeProfile({
                                 className="gap-1.5 font-normal"
                             >
                                 <Database className="size-3.5" />
-                                Sumber data: db_spp
+                                Sumber data: {dataSource}
                             </Badge>
                             <Badge variant="outline" className="font-normal">
                                 {canManage

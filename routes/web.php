@@ -5,15 +5,24 @@ use App\Http\Controllers\AttendanceSettingsController;
 use App\Http\Controllers\ClaimRequestController;
 use App\Http\Controllers\ClaimSettingsController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DocumentSettingsController;
+use App\Http\Controllers\DisciplineController;
+use App\Http\Controllers\DisciplineSettingsController;
+use App\Http\Controllers\EmployeeDocumentController;
+use App\Http\Controllers\EmployeeDisciplineController;
 use App\Http\Controllers\EmployeeLeaveController;
+use App\Http\Controllers\EmployeeOnboardingController;
 use App\Http\Controllers\EmployeeClaimController;
 use App\Http\Controllers\EmployeeOvertimeController;
 use App\Http\Controllers\EmployeePayslipController;
 use App\Http\Controllers\EmployeePerformanceController;
 use App\Http\Controllers\EmployeeProfileController;
 use App\Http\Controllers\EmployeeRosterController;
+use App\Http\Controllers\EmployeeSeparationController;
+use App\Http\Controllers\EmployeeTrainingController;
 use App\Http\Controllers\EmployeeUserImportController;
 use App\Http\Controllers\GeoAttendanceController;
+use App\Http\Controllers\HrDocumentController;
 use App\Http\Controllers\LeaveRequestController;
 use App\Http\Controllers\LeaveSettingsController;
 use App\Http\Controllers\MaklumatCutiController;
@@ -23,15 +32,22 @@ use App\Http\Controllers\MaklumatOtController;
 use App\Http\Controllers\MaklumatPayrollController;
 use App\Http\Controllers\OvertimeRequestController;
 use App\Http\Controllers\OvertimeSettingsController;
+use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\PayrollRunController;
 use App\Http\Controllers\PayrollSettingsController;
 use App\Http\Controllers\PerformanceReviewController;
 use App\Http\Controllers\PerformanceSettingsController;
 use App\Http\Controllers\MaklumatPekerjaController;
 use App\Http\Controllers\ReportBulananController;
+use App\Http\Controllers\RecruitmentController;
+use App\Http\Controllers\RecruitmentSettingsController;
 use App\Http\Controllers\RosterController;
 use App\Http\Controllers\ScheduleSettingsController;
+use App\Http\Controllers\SeparationController;
+use App\Http\Controllers\SeparationSettingsController;
 use App\Http\Controllers\StatutorySettingsController;
+use App\Http\Controllers\TrainingController;
+use App\Http\Controllers\TrainingSettingsController;
 use App\Http\Controllers\UserManagementController;
 use App\Http\Controllers\UserPasswordBulkResetController;
 use Illuminate\Support\Facades\Route;
@@ -196,6 +212,123 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->middleware('permission:performance.self')
         ->name('employee-performance.notifications.read');
 
+    Route::get('onboarding-saya', [EmployeeOnboardingController::class, 'index'])
+        ->middleware('permission:onboarding.self')
+        ->name('employee-onboarding.index');
+    Route::patch('onboarding-saya/tugasan/{task}', [EmployeeOnboardingController::class, 'updateTask'])
+        ->middleware('permission:onboarding.self')
+        ->whereNumber('task')
+        ->name('employee-onboarding.tasks.update');
+
+    Route::get('latihan-saya', [EmployeeTrainingController::class, 'index'])
+        ->middleware('permission:training.self')
+        ->name('employee-training.index');
+    Route::post('latihan-saya', [EmployeeTrainingController::class, 'store'])
+        ->middleware('permission:training.apply')
+        ->name('employee-training.store');
+    Route::patch('latihan-saya/{training}/batal', [EmployeeTrainingController::class, 'cancel'])
+        ->middleware('permission:training.apply')
+        ->whereNumber('training')
+        ->name('employee-training.cancel');
+    Route::post('latihan-saya/{training}/sijil', [EmployeeTrainingController::class, 'uploadCertificate'])
+        ->middleware('permission:training.self')
+        ->whereNumber('training')
+        ->name('employee-training.certificate');
+    Route::put('latihan-saya/{training}/penilaian', [EmployeeTrainingController::class, 'evaluate'])
+        ->middleware('permission:training.self')
+        ->whereNumber('training')
+        ->name('employee-training.evaluate');
+    Route::get('latihan-saya/{training}/lampiran/{attachment}', [EmployeeTrainingController::class, 'downloadAttachment'])
+        ->middleware('permission:training.self')
+        ->whereNumber(['training', 'attachment'])
+        ->name('employee-training.attachment');
+    Route::patch('latihan-saya/notifikasi/dibaca', [EmployeeTrainingController::class, 'readNotifications'])
+        ->middleware('permission:training.self')
+        ->name('employee-training.notifications.read');
+
+    Route::get('dokumen-saya', [EmployeeDocumentController::class, 'index'])
+        ->middleware('permission:documents.self')
+        ->name('employee-documents.index');
+    Route::patch('dokumen-saya/{document}/perakuan', [EmployeeDocumentController::class, 'acknowledge'])
+        ->middleware('permission:documents.self')
+        ->whereNumber('document')
+        ->name('employee-documents.acknowledge');
+    Route::get('dokumen-saya/{document}/pdf', [EmployeeDocumentController::class, 'downloadPdf'])
+        ->middleware('permission:documents.self')
+        ->whereNumber('document')
+        ->name('employee-documents.pdf');
+    Route::get('dokumen-saya/{document}/lampiran/{attachment}', [EmployeeDocumentController::class, 'downloadAttachment'])
+        ->middleware('permission:documents.self')
+        ->whereNumber(['document', 'attachment'])
+        ->name('employee-documents.attachment');
+    Route::patch('dokumen-saya/notifikasi/dibaca', [EmployeeDocumentController::class, 'readNotifications'])
+        ->middleware('permission:documents.self')
+        ->name('employee-documents.notifications.read');
+
+    Route::get('aduan-saya', [EmployeeDisciplineController::class, 'index'])
+        ->middleware('permission:discipline.self')
+        ->name('employee-discipline.index');
+    Route::post('aduan-saya', [EmployeeDisciplineController::class, 'store'])
+        ->middleware('permission:discipline.apply')
+        ->name('employee-discipline.store');
+    Route::patch('aduan-saya/{case}/tarik-balik', [EmployeeDisciplineController::class, 'withdraw'])
+        ->middleware('permission:discipline.apply')
+        ->whereNumber('case')
+        ->name('employee-discipline.withdraw');
+    Route::post('aduan-saya/{case}/jawapan-tunjuk-sebab', [EmployeeDisciplineController::class, 'submitResponse'])
+        ->middleware('permission:discipline.self')
+        ->whereNumber('case')
+        ->name('employee-discipline.response');
+    Route::post('aduan-saya/{case}/rayuan', [EmployeeDisciplineController::class, 'appeal'])
+        ->middleware('permission:discipline.self')
+        ->whereNumber('case')
+        ->name('employee-discipline.appeal');
+    Route::get('aduan-saya/{case}/lampiran/{attachment}', [EmployeeDisciplineController::class, 'downloadAttachment'])
+        ->middleware('permission:discipline.self')
+        ->whereNumber(['case', 'attachment'])
+        ->name('employee-discipline.attachment');
+    Route::patch('aduan-saya/notifikasi/dibaca', [EmployeeDisciplineController::class, 'readNotifications'])
+        ->middleware('permission:discipline.self')
+        ->name('employee-discipline.notifications.read');
+
+    Route::get('pengakhiran-saya', [EmployeeSeparationController::class, 'index'])
+        ->middleware('permission:separation.self')
+        ->name('employee-separation.index');
+    Route::post('pengakhiran-saya', [EmployeeSeparationController::class, 'store'])
+        ->middleware('permission:separation.apply')
+        ->name('employee-separation.store');
+    Route::patch('pengakhiran-saya/{case}/batal', [EmployeeSeparationController::class, 'cancel'])
+        ->middleware('permission:separation.apply')
+        ->whereNumber('case')
+        ->name('employee-separation.cancel');
+    Route::patch('pengakhiran-saya/{case}/tugasan/{task}/hantar', [EmployeeSeparationController::class, 'submitTask'])
+        ->middleware('permission:separation.self')
+        ->whereNumber(['case', 'task'])
+        ->name('employee-separation.tasks.submit');
+    Route::post('pengakhiran-saya/{case}/tugasan/{task}/lampiran', [EmployeeSeparationController::class, 'uploadAttachment'])
+        ->middleware('permission:separation.self')
+        ->whereNumber(['case', 'task'])
+        ->name('employee-separation.tasks.attachments.store');
+    Route::post('pengakhiran-saya/{case}/serahan-tugas', [EmployeeSeparationController::class, 'storeHandover'])
+        ->middleware('permission:separation.self')
+        ->whereNumber('case')
+        ->name('employee-separation.handovers.store');
+    Route::patch('pengakhiran-saya/{case}/serahan-tugas/{handover}/hantar', [EmployeeSeparationController::class, 'submitHandover'])
+        ->middleware('permission:separation.self')
+        ->whereNumber(['case', 'handover'])
+        ->name('employee-separation.handovers.submit');
+    Route::put('pengakhiran-saya/{case}/exit-interview', [EmployeeSeparationController::class, 'submitInterview'])
+        ->middleware('permission:separation.self')
+        ->whereNumber('case')
+        ->name('employee-separation.interview.submit');
+    Route::get('pengakhiran-saya/{case}/lampiran/{attachment}', [EmployeeSeparationController::class, 'downloadAttachment'])
+        ->middleware('permission:separation.self')
+        ->whereNumber(['case', 'attachment'])
+        ->name('employee-separation.attachments.download');
+    Route::patch('pengakhiran-saya/notifikasi/dibaca', [EmployeeSeparationController::class, 'readNotifications'])
+        ->middleware('permission:separation.self')
+        ->name('employee-separation.notifications.read');
+
     Route::get('tuntutan-saya', [EmployeeClaimController::class, 'index'])
         ->middleware('permission:claims.self')
         ->name('employee-claims.index');
@@ -226,11 +359,11 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->whereNumber('leaveRequest')
         ->name('leave-requests.supervisor-review');
     Route::patch('permohonan-cuti/{leaveRequest}/semakan', [LeaveRequestController::class, 'review'])
-        ->middleware('permission:leave.manage')
+        ->middleware('permission:leave.approve')
         ->whereNumber('leaveRequest')
         ->name('leave-requests.review');
     Route::patch('permohonan-cuti/{leaveRequest}/batal-kelulusan', [LeaveRequestController::class, 'cancelApproved'])
-        ->middleware('permission:leave.manage')
+        ->middleware('permission:leave.approve')
         ->whereNumber('leaveRequest')
         ->name('leave-requests.cancel-approved');
     Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])
@@ -245,11 +378,11 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->whereNumber('overtimeRequest')
         ->name('overtime-requests.supervisor-review');
     Route::patch('permohonan-ot/{overtimeRequest}/semakan', [OvertimeRequestController::class, 'review'])
-        ->middleware('permission:overtime.manage')
+        ->middleware('permission:overtime.approve')
         ->whereNumber('overtimeRequest')
         ->name('overtime-requests.review');
     Route::patch('permohonan-ot/{overtimeRequest}/batal-kelulusan', [OvertimeRequestController::class, 'cancelApproved'])
-        ->middleware('permission:overtime.manage')
+        ->middleware('permission:overtime.approve')
         ->whereNumber('overtimeRequest')
         ->name('overtime-requests.cancel-approved');
     Route::get('jadual-roster', [RosterController::class, 'index'])
@@ -274,7 +407,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->whereNumber('period')
         ->name('rosters.lock');
     Route::patch('jadual-roster/pertukaran/{shiftSwapRequest}/semakan', [RosterController::class, 'reviewSwap'])
-        ->middleware('permission:roster.view')
+        ->middleware('permission:roster.supervise')
         ->whereNumber('shiftSwapRequest')
         ->name('rosters.swaps.review');
     Route::get('permohonan-tuntutan', [ClaimRequestController::class, 'index'])
@@ -286,7 +419,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->whereNumber('claimRequest')
         ->name('claim-requests.supervisor-review');
     Route::patch('permohonan-tuntutan/{claimRequest}/semakan', [ClaimRequestController::class, 'review'])
-        ->middleware('permission:claims.manage')
+        ->middleware('permission:claims.approve')
         ->whereNumber('claimRequest')
         ->name('claim-requests.review');
     Route::patch('permohonan-tuntutan/{claimRequest}/jadual-payroll', [ClaimRequestController::class, 'schedulePayroll'])
@@ -294,7 +427,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->whereNumber('claimRequest')
         ->name('claim-requests.schedule-payroll');
     Route::patch('permohonan-tuntutan/{claimRequest}/batal-kelulusan', [ClaimRequestController::class, 'cancelApproved'])
-        ->middleware('permission:claims.manage')
+        ->middleware('permission:claims.approve')
         ->whereNumber('claimRequest')
         ->name('claim-requests.cancel-approved');
     Route::get('permohonan-tuntutan/{claimRequest}/resit/{attachment}', [ClaimRequestController::class, 'downloadAttachment'])
@@ -342,6 +475,319 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->middleware('permission:performance.view')
         ->whereNumber(['review', 'evidence'])
         ->name('performance.evidence.download');
+
+    Route::get('pengambilan', [RecruitmentController::class, 'index'])
+        ->middleware('permission:recruitment.view')
+        ->name('recruitment.index');
+    Route::get('pengambilan/laporan.csv', [RecruitmentController::class, 'export'])
+        ->middleware('permission:recruitment.view')
+        ->name('recruitment.export');
+    Route::get('pengambilan/calon/{candidate}', [RecruitmentController::class, 'show'])
+        ->middleware('permission:recruitment.view')
+        ->whereNumber('candidate')
+        ->name('recruitment.show');
+    Route::patch('pengambilan/notifikasi/dibaca', [RecruitmentController::class, 'readNotifications'])
+        ->middleware('permission:recruitment.view')
+        ->name('recruitment.notifications.read');
+    Route::middleware('permission:recruitment.manage')->group(function () {
+        Route::post('pengambilan/kekosongan', [RecruitmentController::class, 'storeRequisition'])
+            ->name('recruitment.requisitions.store');
+        Route::put('pengambilan/kekosongan/{requisition}', [RecruitmentController::class, 'updateRequisition'])
+            ->whereNumber('requisition')
+            ->name('recruitment.requisitions.update');
+        Route::post('pengambilan/calon', [RecruitmentController::class, 'storeCandidate'])
+            ->name('recruitment.candidates.store');
+        Route::put('pengambilan/calon/{candidate}', [RecruitmentController::class, 'updateCandidate'])
+            ->whereNumber('candidate')
+            ->name('recruitment.candidates.update');
+        Route::patch('pengambilan/calon/{candidate}/peringkat', [RecruitmentController::class, 'updateCandidateStage'])
+            ->whereNumber('candidate')
+            ->name('recruitment.candidates.stage');
+        Route::post('pengambilan/calon/{candidate}/dokumen', [RecruitmentController::class, 'uploadDocument'])
+            ->whereNumber('candidate')
+            ->name('recruitment.documents.store');
+        Route::delete('pengambilan/calon/{candidate}/dokumen/{document}', [RecruitmentController::class, 'deleteDocument'])
+            ->whereNumber(['candidate', 'document'])
+            ->name('recruitment.documents.destroy');
+        Route::post('pengambilan/calon/{candidate}/temu-duga', [RecruitmentController::class, 'scheduleInterview'])
+            ->whereNumber('candidate')
+            ->name('recruitment.interviews.store');
+        Route::patch('pengambilan/calon/{candidate}/temu-duga/{interview}/status', [RecruitmentController::class, 'cancelInterview'])
+            ->whereNumber(['candidate', 'interview'])
+            ->name('recruitment.interviews.status');
+        Route::post('pengambilan/calon/{candidate}/tawaran', [RecruitmentController::class, 'storeOffer'])
+            ->whereNumber('candidate')
+            ->name('recruitment.offers.store');
+    });
+    Route::patch('pengambilan/kekosongan/{requisition}/status', [RecruitmentController::class, 'changeRequisitionStatus'])
+        ->middleware('permission:recruitment.view')
+        ->whereNumber('requisition')
+        ->name('recruitment.requisitions.status');
+    Route::patch('pengambilan/calon/{candidate}/tawaran/{offer}/status', [RecruitmentController::class, 'changeOfferStatus'])
+        ->middleware('permission:recruitment.view')
+        ->whereNumber(['candidate', 'offer'])
+        ->name('recruitment.offers.status');
+    Route::get('pengambilan/calon/{candidate}/dokumen/{document}', [RecruitmentController::class, 'downloadDocument'])
+        ->middleware('permission:recruitment.view')
+        ->whereNumber(['candidate', 'document'])
+        ->name('recruitment.documents.download');
+    Route::put('pengambilan/calon/{candidate}/temu-duga/{interview}/scorecard', [RecruitmentController::class, 'submitScorecard'])
+        ->middleware('permission:recruitment.interview')
+        ->whereNumber(['candidate', 'interview'])
+        ->name('recruitment.interviews.scorecard');
+
+    Route::middleware('permission:onboarding.view')->group(function () {
+        Route::get('onboarding', [OnboardingController::class, 'index'])
+            ->name('onboarding.index');
+        Route::get('onboarding/laporan.csv', [OnboardingController::class, 'export'])
+            ->name('onboarding.export');
+    });
+    Route::middleware('permission:onboarding.manage')->group(function () {
+        Route::put('onboarding/{onboardingCase}', [OnboardingController::class, 'updateCase'])
+            ->whereNumber('onboardingCase')
+            ->name('onboarding.update');
+        Route::put('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'linkEmployee'])
+            ->whereNumber('onboardingCase')
+            ->name('onboarding.link-employee');
+        Route::delete('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'unlinkEmployee'])
+            ->whereNumber('onboardingCase')
+            ->name('onboarding.unlink-employee');
+        Route::put('onboarding/{onboardingCase}/tugasan/{task}', [OnboardingController::class, 'updateTask'])
+            ->whereNumber(['onboardingCase', 'task'])
+            ->name('onboarding.tasks.update');
+    });
+    Route::post('onboarding/{onboardingCase}/daftar-pekerja', [OnboardingController::class, 'registerEmployee'])
+        ->middleware('permission:onboarding.approve')
+        ->whereNumber('onboardingCase')
+        ->name('onboarding.register-employee');
+    Route::patch('onboarding/{onboardingCase}/status', [OnboardingController::class, 'changeCaseStatus'])
+        ->middleware('permission:onboarding.view')
+        ->whereNumber('onboardingCase')
+        ->name('onboarding.status');
+
+    Route::get('latihan-kompetensi', [TrainingController::class, 'index'])
+        ->middleware('permission:training.view')
+        ->name('training.index');
+    Route::get('latihan-kompetensi/laporan.csv', [TrainingController::class, 'export'])
+        ->middleware('permission:training.view')
+        ->name('training.export');
+    Route::patch('latihan-kompetensi/{training}/semakan-penyelia', [TrainingController::class, 'supervisorReview'])
+        ->middleware('permission:training.supervise')
+        ->whereNumber('training')
+        ->name('training.supervisor-review');
+    Route::middleware('permission:training.manage')->group(function () {
+        Route::post('latihan-kompetensi/pencalonan', [TrainingController::class, 'nominate'])
+            ->name('training.nominate');
+        Route::put('latihan-kompetensi/{training}/penyelesaian', [TrainingController::class, 'recordCompletion'])
+            ->whereNumber('training')
+            ->name('training.completion');
+        Route::post('latihan-kompetensi/pelan-pembangunan', [TrainingController::class, 'storeDevelopmentPlan'])
+            ->name('training.development-plans.store');
+        Route::patch('latihan-kompetensi/pelan-pembangunan/{plan}', [TrainingController::class, 'updateDevelopmentPlan'])
+            ->whereNumber('plan')
+            ->name('training.development-plans.update');
+    });
+    Route::patch('latihan-kompetensi/{training}/semakan', [TrainingController::class, 'review'])
+        ->middleware('permission:training.approve')
+        ->whereNumber('training')
+        ->name('training.review');
+    Route::post('latihan-kompetensi/penilaian-kompetensi', [TrainingController::class, 'saveCompetency'])
+        ->middleware('permission:competency.assess')
+        ->name('training.competencies.save');
+    Route::get('latihan-kompetensi/{training}/lampiran/{attachment}', [TrainingController::class, 'downloadAttachment'])
+        ->middleware('permission:training.view')
+        ->whereNumber(['training', 'attachment'])
+        ->name('training.attachment');
+
+    Route::get('dokumen-hr', [HrDocumentController::class, 'index'])
+        ->middleware('permission:documents.view')
+        ->name('hr-documents.index');
+    Route::get('dokumen-hr/laporan.csv', [HrDocumentController::class, 'export'])
+        ->middleware('permission:documents.view')
+        ->name('hr-documents.export');
+    Route::patch('dokumen-hr/notifikasi/dibaca', [HrDocumentController::class, 'readNotifications'])
+        ->middleware('permission:documents.view')
+        ->name('hr-documents.notifications.read');
+    Route::get('dokumen-hr/{document}/pdf', [HrDocumentController::class, 'downloadPdf'])
+        ->middleware('permission:documents.view')
+        ->whereNumber('document')
+        ->name('hr-documents.pdf');
+    Route::get('dokumen-hr/{document}/lampiran/{attachment}', [HrDocumentController::class, 'downloadAttachment'])
+        ->middleware('permission:documents.view')
+        ->whereNumber(['document', 'attachment'])
+        ->name('hr-documents.attachment');
+    Route::patch('dokumen-hr/{document}/semakan', [HrDocumentController::class, 'review'])
+        ->middleware('permission:documents.approve')
+        ->whereNumber('document')
+        ->name('hr-documents.review');
+    Route::middleware('permission:documents.manage')->group(function () {
+        Route::post('dokumen-hr', [HrDocumentController::class, 'store'])
+            ->name('hr-documents.store');
+        Route::put('dokumen-hr/{document}', [HrDocumentController::class, 'update'])
+            ->whereNumber('document')
+            ->name('hr-documents.update');
+        Route::patch('dokumen-hr/{document}/hantar', [HrDocumentController::class, 'submit'])
+            ->whereNumber('document')
+            ->name('hr-documents.submit');
+        Route::patch('dokumen-hr/{document}/keluar', [HrDocumentController::class, 'issue'])
+            ->whereNumber('document')
+            ->name('hr-documents.issue');
+        Route::patch('dokumen-hr/{document}/batal', [HrDocumentController::class, 'void'])
+            ->whereNumber('document')
+            ->name('hr-documents.void');
+        Route::post('dokumen-hr/{document}/pembaharuan', [HrDocumentController::class, 'renew'])
+            ->whereNumber('document')
+            ->name('hr-documents.renew');
+        Route::post('dokumen-hr/{document}/lampiran', [HrDocumentController::class, 'uploadAttachment'])
+            ->whereNumber('document')
+            ->name('hr-documents.attachments.store');
+        Route::delete('dokumen-hr/{document}/lampiran/{attachment}', [HrDocumentController::class, 'deleteAttachment'])
+            ->whereNumber(['document', 'attachment'])
+            ->name('hr-documents.attachments.destroy');
+    });
+
+    Route::get('disiplin-aduan', [DisciplineController::class, 'index'])
+        ->middleware('permission:discipline.view')
+        ->name('discipline.index');
+    Route::get('disiplin-aduan/laporan.csv', [DisciplineController::class, 'export'])
+        ->middleware('permission:discipline.view')
+        ->name('discipline.export');
+    Route::patch('disiplin-aduan/notifikasi/dibaca', [DisciplineController::class, 'readNotifications'])
+        ->middleware('permission:discipline.view')
+        ->name('discipline.notifications.read');
+    Route::patch('disiplin-aduan/{case}/triage', [DisciplineController::class, 'triage'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber('case')
+        ->name('discipline.triage');
+    Route::post('disiplin-aduan/{case}/pasukan', [DisciplineController::class, 'addMember'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber('case')
+        ->name('discipline.members.store');
+    Route::patch('disiplin-aduan/{case}/pasukan/{member}/konflik', [DisciplineController::class, 'declareConflict'])
+        ->middleware('permission:discipline.investigate')
+        ->whereNumber(['case', 'member'])
+        ->name('discipline.members.conflict');
+    Route::patch('disiplin-aduan/{case}/pasukan/{member}/gugur', [DisciplineController::class, 'recuseMember'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber(['case', 'member'])
+        ->name('discipline.members.recuse');
+    Route::post('disiplin-aduan/{case}/kronologi', [DisciplineController::class, 'addEvent'])
+        ->middleware('permission:discipline.investigate')
+        ->whereNumber('case')
+        ->name('discipline.events.store');
+    Route::post('disiplin-aduan/{case}/lampiran', [DisciplineController::class, 'uploadAttachment'])
+        ->middleware('permission:discipline.investigate')
+        ->whereNumber('case')
+        ->name('discipline.attachments.store');
+    Route::delete('disiplin-aduan/{case}/lampiran/{attachment}', [DisciplineController::class, 'deleteAttachment'])
+        ->middleware('permission:discipline.investigate')
+        ->whereNumber(['case', 'attachment'])
+        ->name('discipline.attachments.destroy');
+    Route::get('disiplin-aduan/{case}/lampiran/{attachment}', [DisciplineController::class, 'downloadAttachment'])
+        ->middleware('permission:discipline.view')
+        ->whereNumber(['case', 'attachment'])
+        ->name('discipline.attachments.download');
+    Route::patch('disiplin-aduan/{case}/dapatan', [DisciplineController::class, 'submitFinding'])
+        ->middleware('permission:discipline.investigate')
+        ->whereNumber('case')
+        ->name('discipline.findings.submit');
+    Route::patch('disiplin-aduan/{case}/tunjuk-sebab', [DisciplineController::class, 'issueShowCause'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber('case')
+        ->name('discipline.show-cause.issue');
+    Route::patch('disiplin-aduan/{case}/keputusan', [DisciplineController::class, 'decide'])
+        ->middleware('permission:discipline.approve')
+        ->whereNumber('case')
+        ->name('discipline.decision');
+    Route::patch('disiplin-aduan/{case}/tunjuk-sebab/tanpa-jawapan', [DisciplineController::class, 'proceedWithoutResponse'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber('case')
+        ->name('discipline.show-cause.no-response');
+    Route::patch('disiplin-aduan/{case}/rayuan/{appeal}', [DisciplineController::class, 'reviewAppeal'])
+        ->middleware('permission:discipline.approve')
+        ->whereNumber(['case', 'appeal'])
+        ->name('discipline.appeals.review');
+    Route::patch('disiplin-aduan/{case}/tutup', [DisciplineController::class, 'close'])
+        ->middleware('permission:discipline.manage')
+        ->whereNumber('case')
+        ->name('discipline.close');
+
+    Route::get('berhenti-clearance', [SeparationController::class, 'index'])
+        ->middleware('permission:separation.view')
+        ->name('separations.index');
+    Route::get('berhenti-clearance/laporan.csv', [SeparationController::class, 'export'])
+        ->middleware('permission:separation.view')
+        ->name('separations.export');
+    Route::patch('berhenti-clearance/notifikasi/dibaca', [SeparationController::class, 'readNotifications'])
+        ->middleware('permission:separation.view')
+        ->name('separations.notifications.read');
+    Route::post('berhenti-clearance', [SeparationController::class, 'store'])
+        ->middleware('permission:separation.manage')
+        ->name('separations.store');
+    Route::patch('berhenti-clearance/{case}/hantar', [SeparationController::class, 'submit'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.submit');
+    Route::patch('berhenti-clearance/{case}/semakan-penyelia', [SeparationController::class, 'supervisorReview'])
+        ->middleware('permission:separation.supervise')
+        ->whereNumber('case')
+        ->name('separations.supervisor-review');
+    Route::patch('berhenti-clearance/{case}/kelulusan-hr', [SeparationController::class, 'hrReview'])
+        ->middleware('permission:separation.approve')
+        ->whereNumber('case')
+        ->name('separations.hr-review');
+    Route::patch('berhenti-clearance/{case}/batal', [SeparationController::class, 'cancel'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.cancel');
+    Route::patch('berhenti-clearance/{case}/tugasan/{task}', [SeparationController::class, 'taskAction'])
+        ->middleware('permission:separation.clearance')
+        ->whereNumber(['case', 'task'])
+        ->name('separations.tasks.action');
+    Route::post('berhenti-clearance/{case}/tugasan/{task}/lampiran', [SeparationController::class, 'uploadAttachment'])
+        ->middleware('permission:separation.clearance')
+        ->whereNumber(['case', 'task'])
+        ->name('separations.tasks.attachments.store');
+    Route::post('berhenti-clearance/{case}/lampiran', [SeparationController::class, 'uploadAttachment'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.attachments.store');
+    Route::get('berhenti-clearance/{case}/lampiran/{attachment}', [SeparationController::class, 'downloadAttachment'])
+        ->middleware('permission:separation.view')
+        ->whereNumber(['case', 'attachment'])
+        ->name('separations.attachments.download');
+    Route::post('berhenti-clearance/{case}/aset', [SeparationController::class, 'storeAsset'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.assets.store');
+    Route::patch('berhenti-clearance/{case}/aset/{asset}', [SeparationController::class, 'updateAsset'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber(['case', 'asset'])
+        ->name('separations.assets.update');
+    Route::patch('berhenti-clearance/{case}/serahan-tugas/{handover}', [SeparationController::class, 'reviewHandover'])
+        ->middleware('permission:separation.clearance')
+        ->whereNumber(['case', 'handover'])
+        ->name('separations.handovers.review');
+    Route::put('berhenti-clearance/{case}/exit-interview', [SeparationController::class, 'updateInterview'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.interview.update');
+    Route::put('berhenti-clearance/{case}/final-settlement', [SeparationController::class, 'updateSettlement'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.settlement.update');
+    Route::patch('berhenti-clearance/{case}/final-settlement/sahkan', [SeparationController::class, 'verifySettlement'])
+        ->middleware('permission:separation.approve')
+        ->whereNumber('case')
+        ->name('separations.settlement.verify');
+    Route::post('berhenti-clearance/{case}/dokumen', [SeparationController::class, 'generateDocument'])
+        ->middleware('permission:separation.manage')
+        ->whereNumber('case')
+        ->name('separations.documents.store');
+    Route::patch('berhenti-clearance/{case}/selesai', [SeparationController::class, 'complete'])
+        ->middleware('permission:separation.approve')
+        ->whereNumber('case')
+        ->name('separations.complete');
     Route::get('payroll-asal', [MaklumatPayrollController::class, 'index'])
         ->middleware('permission:payroll.view')
         ->name('payroll.legacy');
@@ -503,6 +949,118 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::delete('tetapan-prestasi/penyelia/{assignment}', [PerformanceSettingsController::class, 'destroyAssignment'])
             ->whereNumber('assignment')
             ->name('performance-settings.assignments.destroy');
+    });
+
+    Route::middleware('permission:recruitment.settings')->group(function () {
+        Route::get('tetapan-pengambilan', [RecruitmentSettingsController::class, 'index'])
+            ->name('recruitment-settings.index');
+        Route::post('tetapan-pengambilan/template', [RecruitmentSettingsController::class, 'storeTemplate'])
+            ->name('recruitment-settings.templates.store');
+        Route::put('tetapan-pengambilan/template/{template}', [RecruitmentSettingsController::class, 'updateTemplate'])
+            ->whereNumber('template')
+            ->name('recruitment-settings.templates.update');
+        Route::patch('tetapan-pengambilan/template/{template}/status', [RecruitmentSettingsController::class, 'toggleTemplate'])
+            ->whereNumber('template')
+            ->name('recruitment-settings.templates.toggle');
+    });
+
+    Route::middleware('permission:training.settings')->group(function () {
+        Route::get('tetapan-latihan', [TrainingSettingsController::class, 'index'])
+            ->name('training-settings.index');
+        Route::post('tetapan-latihan/penyedia', [TrainingSettingsController::class, 'storeProvider'])
+            ->name('training-settings.providers.store');
+        Route::put('tetapan-latihan/penyedia/{provider}', [TrainingSettingsController::class, 'updateProvider'])
+            ->whereNumber('provider')
+            ->name('training-settings.providers.update');
+        Route::patch('tetapan-latihan/penyedia/{provider}/status', [TrainingSettingsController::class, 'toggleProvider'])
+            ->whereNumber('provider')
+            ->name('training-settings.providers.toggle');
+        Route::post('tetapan-latihan/kursus', [TrainingSettingsController::class, 'storeCourse'])
+            ->name('training-settings.courses.store');
+        Route::put('tetapan-latihan/kursus/{course}', [TrainingSettingsController::class, 'updateCourse'])
+            ->whereNumber('course')
+            ->name('training-settings.courses.update');
+        Route::patch('tetapan-latihan/kursus/{course}/status', [TrainingSettingsController::class, 'toggleCourse'])
+            ->whereNumber('course')
+            ->name('training-settings.courses.toggle');
+        Route::post('tetapan-latihan/sesi', [TrainingSettingsController::class, 'storeSession'])
+            ->name('training-settings.sessions.store');
+        Route::put('tetapan-latihan/sesi/{session}', [TrainingSettingsController::class, 'updateSession'])
+            ->whereNumber('session')
+            ->name('training-settings.sessions.update');
+        Route::patch('tetapan-latihan/sesi/{session}/status', [TrainingSettingsController::class, 'changeSessionStatus'])
+            ->whereNumber('session')
+            ->name('training-settings.sessions.status');
+        Route::post('tetapan-latihan/bajet', [TrainingSettingsController::class, 'saveBudget'])
+            ->name('training-settings.budgets.save');
+        Route::post('tetapan-latihan/kompetensi', [TrainingSettingsController::class, 'storeCompetency'])
+            ->name('training-settings.competencies.store');
+        Route::put('tetapan-latihan/kompetensi/{competency}', [TrainingSettingsController::class, 'updateCompetency'])
+            ->whereNumber('competency')
+            ->name('training-settings.competencies.update');
+        Route::patch('tetapan-latihan/kompetensi/{competency}/status', [TrainingSettingsController::class, 'toggleCompetency'])
+            ->whereNumber('competency')
+            ->name('training-settings.competencies.toggle');
+        Route::post('tetapan-latihan/keperluan', [TrainingSettingsController::class, 'storeRequirement'])
+            ->name('training-settings.requirements.store');
+        Route::put('tetapan-latihan/keperluan/{requirement}', [TrainingSettingsController::class, 'updateRequirement'])
+            ->whereNumber('requirement')
+            ->name('training-settings.requirements.update');
+        Route::delete('tetapan-latihan/keperluan/{requirement}', [TrainingSettingsController::class, 'destroyRequirement'])
+            ->whereNumber('requirement')
+            ->name('training-settings.requirements.destroy');
+        Route::post('tetapan-latihan/penyelia', [TrainingSettingsController::class, 'saveAssignment'])
+            ->name('training-settings.assignments.save');
+    });
+
+    Route::middleware('permission:documents.settings')->group(function () {
+        Route::get('tetapan-dokumen', [DocumentSettingsController::class, 'index'])
+            ->name('document-settings.index');
+        Route::post('tetapan-dokumen/template', [DocumentSettingsController::class, 'storeTemplate'])
+            ->name('document-settings.templates.store');
+        Route::put('tetapan-dokumen/template/{template}', [DocumentSettingsController::class, 'updateTemplate'])
+            ->whereNumber('template')
+            ->name('document-settings.templates.update');
+        Route::patch('tetapan-dokumen/template/{template}/status', [DocumentSettingsController::class, 'toggleTemplate'])
+            ->whereNumber('template')
+            ->name('document-settings.templates.toggle');
+        Route::post('tetapan-dokumen/siri', [DocumentSettingsController::class, 'saveSequence'])
+            ->name('document-settings.sequences.save');
+    });
+
+    Route::middleware('permission:discipline.settings')->group(function () {
+        Route::get('tetapan-disiplin', [DisciplineSettingsController::class, 'index'])
+            ->name('discipline-settings.index');
+        Route::post('tetapan-disiplin/kategori', [DisciplineSettingsController::class, 'store'])
+            ->name('discipline-settings.categories.store');
+        Route::put('tetapan-disiplin/kategori/{category}', [DisciplineSettingsController::class, 'update'])
+            ->whereNumber('category')
+            ->name('discipline-settings.categories.update');
+        Route::patch('tetapan-disiplin/kategori/{category}/status', [DisciplineSettingsController::class, 'toggle'])
+            ->whereNumber('category')
+            ->name('discipline-settings.categories.toggle');
+    });
+
+    Route::middleware('permission:separation.settings')->group(function () {
+        Route::get('tetapan-clearance', [SeparationSettingsController::class, 'index'])
+            ->name('separation-settings.index');
+        Route::post('tetapan-clearance/template', [SeparationSettingsController::class, 'store'])
+            ->name('separation-settings.templates.store');
+        Route::put('tetapan-clearance/template/{template}', [SeparationSettingsController::class, 'update'])
+            ->whereNumber('template')
+            ->name('separation-settings.templates.update');
+        Route::patch('tetapan-clearance/template/{template}/status', [SeparationSettingsController::class, 'toggle'])
+            ->whereNumber('template')
+            ->name('separation-settings.templates.toggle');
+        Route::post('tetapan-clearance/template/{template}/item', [SeparationSettingsController::class, 'storeItem'])
+            ->whereNumber('template')
+            ->name('separation-settings.items.store');
+        Route::put('tetapan-clearance/template/{template}/item/{item}', [SeparationSettingsController::class, 'updateItem'])
+            ->whereNumber(['template', 'item'])
+            ->name('separation-settings.items.update');
+        Route::delete('tetapan-clearance/template/{template}/item/{item}', [SeparationSettingsController::class, 'destroyItem'])
+            ->whereNumber(['template', 'item'])
+            ->name('separation-settings.items.destroy');
     });
 
     Route::middleware('permission:leave.settings')->group(function () {

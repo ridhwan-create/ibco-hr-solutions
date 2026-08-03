@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\EmployeePayrollComponent;
+use App\Models\EmployeeRecord;
 use App\Models\EmployeeSalaryProfile;
 use App\Models\PayrollComponent;
 use App\Models\PayrollSetting;
@@ -10,7 +11,9 @@ use App\Support\AuditLogger;
 use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -26,7 +29,7 @@ class PayrollSettingsController extends Controller
             ->where('rcd_enable', 1)
             ->selectRaw('id_pekerja, MAX(id) as job_id')
             ->groupBy('id_pekerja');
-        $employees = DB::connection('ibco')
+        $legacyEmployees = DB::connection('ibco')
             ->table('maklumatpekerja as employee')
             ->leftJoinSub($activeJobIds, 'active_job', function ($join) {
                 $join->on('active_job.id_pekerja', '=', 'employee.id');
@@ -48,8 +51,34 @@ class PayrollSettingsController extends Controller
                 'job.salary as legacy_salary',
             ])
             ->orderBy('employee.nama')
-            ->paginate(20)
-            ->withQueryString();
+            ->get();
+        $localEmployees = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                $query->where('name', 'like', "%{$search}%")
+                    ->orWhere('employee_number', 'like', "%{$search}%")
+                    ->orWhere('position_name', 'like', "%{$search}%");
+            }))
+            ->get()
+            ->map(fn (EmployeeRecord $employee) => (object) [
+                'id' => $employee->directory_id,
+                'employee_number' => $employee->employee_number,
+                'employee_name' => $employee->name,
+                'position' => $employee->position_name,
+                'legacy_salary' => $employee->salary,
+            ]);
+        $combinedEmployees = $legacyEmployees
+            ->concat($localEmployees)
+            ->sortBy(fn ($employee) => Str::lower($employee->employee_name ?? ''))
+            ->values();
+        $page = LengthAwarePaginator::resolveCurrentPage();
+        $employees = new LengthAwarePaginator(
+            $combinedEmployees->forPage($page, 20)->values(),
+            $combinedEmployees->count(),
+            20,
+            $page,
+            ['path' => $request->url(), 'query' => $request->query()],
+        );
         $employeeIds = collect($employees->items())->pluck('id')->all();
         $profiles = EmployeeSalaryProfile::query()
             ->whereIn('employee_id', $employeeIds)
@@ -138,7 +167,9 @@ class PayrollSettingsController extends Controller
                 'active_employees' => DB::connection('ibco')
                     ->table('maklumatpekerja')
                     ->where('rcd_enable', 1)
-                    ->count(),
+                    ->count() + EmployeeRecord::query()
+                        ->where('status', 'active')
+                        ->count(),
                 'configured_profiles' => EmployeeSalaryProfile::query()
                     ->where('is_active', true)
                     ->count(),
@@ -492,6 +523,11 @@ class PayrollSettingsController extends Controller
             ->table('maklumatpekerja')
             ->where('id', $employeeId)
             ->where('rcd_enable', 1)
+            ->exists();
+
+        $exists = $exists || EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->whereIn('status', ['pending_activation', 'active'])
             ->exists();
 
         if (! $exists) {

@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\EmployeeRecord;
 use App\Models\PublicHoliday;
 use App\Models\RosterEntry;
 use App\Models\ScheduleAssignment;
@@ -424,6 +425,14 @@ class WorkScheduleResolver
 
     private function departmentId(int $employeeId): ?int
     {
+        $localDepartmentId = EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->value('department_id');
+
+        if ($localDepartmentId !== null) {
+            return (int) $localDepartmentId;
+        }
+
         $departmentId = DB::connection('ibco')
             ->table('maklumatjawatan')
             ->where('id_pekerja', $employeeId)

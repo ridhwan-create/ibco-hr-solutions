@@ -1,0 +1,3379 @@
+diff --git a/README.md b/README.md
+index 0fcca40def2919124592b694ad5be3c9d8041b8a..6a922b4ba7037d0f4a1ada37a6026976c9acf448 100644
+--- a/README.md
++++ b/README.md
+@@ -45,7 +45,7 @@ ## CRUD pekerja
+   secara kekal.
+ 
+ ID pekerja dan NRIC diperiksa untuk mengelakkan rekod pendua. Borang
+-memerlukan pengesahan sebelum data disimpan, manakala Viewer / Manager kekal
++memerlukan pengesahan sebelum data disimpan, manakala Viewer / Pemerhati kekal
+ dengan akses paparan sahaja.
+ 
+ Semua tindakan tambah, kemas kini dan nyahaktif direkodkan dalam jadual
+@@ -59,7 +59,7 @@ ## CRUD jawatan dan penempatan
+ rekod terdahulu kepada `rcd_enable = 0`, supaya sejarah tidak ditimpa. Sistem
+ turut memastikan hanya satu jawatan aktif bagi seseorang pekerja.
+ 
+-Viewer / Manager boleh melihat jawatan aktif dan sejarah, tetapi tidak menerima
++Viewer / Pemerhati boleh melihat jawatan aktif dan sejarah, tetapi tidak menerima
+ medan gaji, bank atau caruman daripada backend. Profil pekerja memaparkan
+ jawatan semasa dan keseluruhan sejarah penempatan.
+ 
+@@ -404,15 +404,19 @@ ## Roles & Permissions
+ 
+ Kawalan akses disimpan dalam jadual `users` pada database sistem:
+ 
+-- **Super Admin** — akses penuh termasuk pengurusan pengguna dan role.
++- **Super Admin** — akses teknikal penuh kepada modul, pengguna, role,
++  konfigurasi, keselamatan dan Audit Trail, tanpa kuasa meluluskan transaksi HR.
++- **Pengurus HR** — pelulus akhir bagi proses HR termasuk pengambilan,
++  onboarding, cuti, OT, tuntutan, roster, prestasi, latihan, dokumen, tatatertib,
++  penggajian dan pelepasan pekerja.
+ - **HR Admin** — akses semua modul HR termasuk disiplin, pengambilan,
+   onboarding, pengakhiran dan clearance, CRUD pekerja, roster, prestasi,
+-  penyediaan tuntutan, Payroll Core dan laporan. HR mengurus triage tetapi tidak
+-  membuat keputusan tatatertib.
++  penyediaan tuntutan, Payroll Core dan laporan. HR menyediakan, memproses dan
++  menyemak transaksi tetapi tidak membuat kelulusan akhir.
+ - **Penyelia / Ketua Jabatan** — menyertai panel temu duga dan pasukan siasatan
+   yang ditetapkan serta menyemak onboarding, cuti, OT, tuntutan, pertukaran
+   syif dan penilaian prestasi pekerja.
+-- **Viewer / Manager** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
++- **Viewer / Pemerhati** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
+   dan Kerja Lebih Masa sahaja.
+ - **Employee** — melihat onboarding, roster dan prestasi, menghantar aduan
+   sulit, menjawab tunjuk sebab, membuat rayuan, memohon pertukaran syif,
+@@ -421,7 +425,8 @@ ## Roles & Permissions
+ 
+ Akaun boleh memegang lebih daripada satu role. Permission daripada semua role
+ akan digabungkan, contohnya akaun `Super Admin + Employee` boleh mengurus sistem
+-dan merakam kehadiran sendiri.
++dan merakam kehadiran sendiri. Role Pengurus HR tidak boleh digabungkan dengan
++Super Admin, HR Admin atau Penyelia supaya pengasingan tugas kekal berkesan.
+ 
+ Super Admin juga boleh menggunakan fungsi **Import Pekerja** untuk membaca
+ pekerja aktif daripada `db_spp` dan mendaftarkan sehingga 200 akaun Employee
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+index f0fe520c3932bf924917cfbf7dd2e9093c73c4da..d95fe446554b9bf33631c31336af5db9c60de7f8 100644
+--- a/app/Enums/UserRole.php
++++ b/app/Enums/UserRole.php
+@@ -5,6 +5,7 @@
+ enum UserRole: string
+ {
+     case SuperAdmin = 'super_admin';
++    case HrManager = 'hr_manager';
+     case HrAdmin = 'hr_admin';
+     case Supervisor = 'supervisor';
+     case Viewer = 'viewer';
+@@ -27,63 +28,78 @@ public function permissions(): array
+                 'attendance.settings',
+                 'leave.view',
+                 'leave.manage',
+-                'leave.supervise',
+                 'leave.settings',
+                 'overtime.view',
+                 'overtime.manage',
+-                'overtime.supervise',
+                 'overtime.settings',
+                 'roster.view',
+                 'roster.manage',
+-                'roster.publish',
+-                'roster.supervise',
+                 'roster.settings',
+                 'performance.view',
+                 'performance.manage',
+-                'performance.supervise',
+-                'performance.moderate',
+-                'performance.finalize',
+                 'performance.settings',
+                 'recruitment.view',
+                 'recruitment.manage',
+-                'recruitment.approve',
+-                'recruitment.interview',
+                 'recruitment.settings',
+                 'onboarding.view',
+                 'onboarding.manage',
+                 'training.view',
+                 'training.manage',
+-                'training.supervise',
+                 'training.settings',
+                 'competency.view',
+-                'competency.assess',
+                 'documents.view',
+                 'documents.manage',
+-                'documents.approve',
+                 'documents.settings',
+                 'discipline.view',
+                 'discipline.manage',
+-                'discipline.investigate',
+-                'discipline.approve',
+                 'discipline.settings',
+                 'separation.view',
+                 'separation.manage',
+-                'separation.supervise',
+-                'separation.approve',
+                 'separation.clearance',
+                 'separation.settings',
+                 'claims.view',
+                 'claims.manage',
+-                'claims.supervise',
+                 'claims.settings',
+                 'payroll.view',
+                 'payroll.manage',
+-                'payroll.approve',
+                 'payroll.settings',
+                 'reports.view',
+                 'audit.view',
+                 'users.manage',
+             ],
++            self::HrManager => [
++                'dashboard.view',
++                'employees.view',
++                'positions.view',
++                'attendance.view',
++                'leave.view',
++                'leave.approve',
++                'overtime.view',
++                'overtime.approve',
++                'roster.view',
++                'roster.publish',
++                'performance.view',
++                'performance.finalize',
++                'recruitment.view',
++                'recruitment.approve',
++                'onboarding.view',
++                'onboarding.approve',
++                'training.view',
++                'training.approve',
++                'competency.view',
++                'documents.view',
++                'documents.approve',
++                'discipline.view',
++                'discipline.approve',
++                'separation.view',
++                'separation.approve',
++                'claims.view',
++                'claims.approve',
++                'payroll.view',
++                'payroll.approve',
++                'reports.view',
++                'audit.view',
++            ],
+             self::HrAdmin => [
+                 'dashboard.view',
+                 'employees.view',
+@@ -100,16 +116,13 @@ public function permissions(): array
+                 'overtime.settings',
+                 'roster.view',
+                 'roster.manage',
+-                'roster.publish',
+                 'roster.settings',
+                 'performance.view',
+                 'performance.manage',
+                 'performance.moderate',
+-                'performance.finalize',
+                 'performance.settings',
+                 'recruitment.view',
+                 'recruitment.manage',
+-                'recruitment.approve',
+                 'recruitment.interview',
+                 'recruitment.settings',
+                 'onboarding.view',
+@@ -128,7 +141,6 @@ public function permissions(): array
+                 'discipline.settings',
+                 'separation.view',
+                 'separation.manage',
+-                'separation.approve',
+                 'separation.clearance',
+                 'separation.settings',
+                 'claims.view',
+@@ -161,7 +173,6 @@ public function permissions(): array
+                 'competency.view',
+                 'competency.assess',
+                 'documents.view',
+-                'documents.approve',
+                 'discipline.view',
+                 'discipline.investigate',
+                 'separation.view',
+@@ -221,9 +232,10 @@ public function label(): string
+     {
+         return match ($this) {
+             self::SuperAdmin => 'Super Admin',
++            self::HrManager => 'Pengurus HR',
+             self::HrAdmin => 'HR Admin',
+             self::Supervisor => 'Penyelia / Ketua Jabatan',
+-            self::Viewer => 'Viewer / Manager',
++            self::Viewer => 'Viewer / Pemerhati',
+             self::Employee => 'Employee',
+         };
+     }
+@@ -231,10 +243,11 @@ public function label(): string
+     public function description(): string
+     {
+         return match ($this) {
+-            self::SuperAdmin => 'Akses penuh termasuk pengurusan pengguna dan role.',
+-            self::HrAdmin => 'Akses semua modul HR termasuk berhenti kerja, clearance, dokumen, disiplin, pengambilan, onboarding, latihan, kompetensi, roster, prestasi, tuntutan, payroll dan laporan.',
++            self::SuperAdmin => 'Akses teknikal penuh kepada semua modul, pengguna, role, konfigurasi, keselamatan dan Audit Trail tanpa kuasa kelulusan HR.',
++            self::HrManager => 'Kuasa perniagaan HR tertinggi untuk kelulusan akhir, keputusan rasmi dan pemuktamadan tanpa mengurus pengguna atau konfigurasi teknikal.',
++            self::HrAdmin => 'Memproses transaksi, menyediakan rekod, mengurus modul HR dan konfigurasi polisi tanpa kuasa kelulusan akhir.',
+             self::Supervisor => 'Semak pengakhiran dan clearance yang ditugaskan, dokumen, kes siasatan, pengambilan, temu duga, onboarding, latihan, kompetensi, cuti, OT, tuntutan, pertukaran syif dan prestasi jabatan.',
+-            self::Viewer => 'Akses paparan operasi serta tugasan clearance yang ditugaskan tanpa payroll, laporan atau pengurusan pengguna.',
++            self::Viewer => 'Akses paparan operasi serta tugasan clearance yang ditugaskan tanpa kuasa perubahan atau kelulusan.',
+             self::Employee => 'Akses profil, notis pengakhiran, clearance, dokumen, aduan sulit, onboarding, latihan, kompetensi, roster, prestasi, cuti, OT, tuntutan, kehadiran dan slip gaji sendiri.',
+         };
+     }
+@@ -242,7 +255,8 @@ public function description(): string
+     public function priority(): int
+     {
+         return match ($this) {
+-            self::SuperAdmin => 400,
++            self::SuperAdmin => 500,
++            self::HrManager => 400,
+             self::HrAdmin => 300,
+             self::Supervisor => 250,
+             self::Viewer => 200,
+diff --git a/app/Http/Controllers/ClaimRequestController.php b/app/Http/Controllers/ClaimRequestController.php
+index 4498dbfe5089f06d588a57d15e3e89623a074508..9779527a162788bf1c1453193e9145f8942ddea0 100644
+--- a/app/Http/Controllers/ClaimRequestController.php
++++ b/app/Http/Controllers/ClaimRequestController.php
+@@ -123,6 +123,7 @@ public function index(Request $request): Response
+             'permissions' => [
+                 'can_supervise' => $request->user()->hasPermission('claims.supervise'),
+                 'can_manage' => $request->user()->hasPermission('claims.manage'),
++                'can_approve' => $request->user()->hasPermission('claims.approve'),
+             ],
+         ]);
+     }
+@@ -184,7 +185,7 @@ public function supervisorReview(
+                     ? 'Tuntutan disokong penyelia'
+                     : 'Tuntutan ditolak penyelia',
+                 'message' => $supported
+-                    ? 'Tuntutan anda dihantar kepada HR/Kewangan untuk kelulusan akhir.'
++                    ? 'Tuntutan anda dihantar kepada Pengurus HR untuk kelulusan akhir.'
+                     : 'Tuntutan anda tidak disokong oleh penyelia.',
+             ]);
+ 
+@@ -210,7 +211,7 @@ public function supervisorReview(
+         return back()->with('toast', [
+             'type' => 'success',
+             'message' => $claimRequest->status === 'pending'
+-                ? 'Tuntutan disokong dan dihantar kepada HR/Kewangan.'
++                ? 'Tuntutan disokong dan dihantar kepada Pengurus HR.'
+                 : 'Tuntutan telah ditolak.',
+         ]);
+     }
+@@ -286,7 +287,13 @@ public function review(
+                 || ! in_array($locked->approval_stage, ['finance', null], true)
+             ) {
+                 throw ValidationException::withMessages([
+-                    'status' => 'Tuntutan ini belum sampai kepada HR/Kewangan atau telah selesai.',
++                    'status' => 'Tuntutan ini belum sampai kepada Pengurus HR atau telah selesai.',
++                ]);
++            }
++
++            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'status' => 'Anda tidak boleh meluluskan tuntutan sendiri.',
+                 ]);
+             }
+ 
+@@ -306,12 +313,12 @@ public function review(
+                     ? 'Tuntutan diluluskan'
+                     : 'Tuntutan ditolak',
+                 'message' => $approved
+-                    ? 'HR/Kewangan meluluskan RM'
++                    ? 'Pengurus HR meluluskan RM'
+                         .number_format($approvedAmount, 2)
+                         .($scheduledPeriod
+                             ? ' untuk dimasukkan ke payroll.'
+                             : '.')
+-                    : 'HR/Kewangan telah menolak tuntutan anda.',
++                    : 'Pengurus HR telah menolak tuntutan anda.',
+             ]);
+             $this->recalculateScheduledDraft($scheduledPeriod, $request);
+ 
+@@ -411,7 +418,7 @@ public function cancelApproved(
+         Request $request,
+         ClaimRequest $claimRequest,
+     ): RedirectResponse {
+-        abort_unless($request->user()->hasPermission('claims.manage'), 403);
++        abort_unless($request->user()->hasPermission('claims.approve'), 403);
+         $validated = $request->validate([
+             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
+         ]);
+@@ -422,6 +429,12 @@ public function cancelApproved(
+             ]);
+         }
+ 
++        if ((int) $claimRequest->user_id === (int) $request->user()->getAuthIdentifier()) {
++            throw ValidationException::withMessages([
++                'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan tuntutan sendiri.',
++            ]);
++        }
++
+         if ($claimRequest->paid_at) {
+             throw ValidationException::withMessages([
+                 'cancellation_notes' => 'Tuntutan telah dibayar melalui payroll dan tidak boleh dibatalkan.',
+@@ -457,14 +470,14 @@ public function cancelApproved(
+                     ($claimRequest->review_notes
+                         ? $claimRequest->review_notes."\n\n"
+                         : '')
+-                    .'Pembatalan HR/Kewangan: '.$validated['cancellation_notes'],
++                    .'Pembatalan Pengurus HR: '.$validated['cancellation_notes'],
+                 ),
+             ]);
+             ClaimNotification::query()->create([
+                 'user_id' => $claimRequest->user_id,
+                 'claim_request_id' => $claimRequest->getKey(),
+                 'title' => 'Kelulusan tuntutan dibatalkan',
+-                'message' => 'HR/Kewangan membatalkan tuntutan yang sebelum ini diluluskan.',
++                'message' => 'Pengurus HR membatalkan tuntutan yang sebelum ini diluluskan.',
+             ]);
+ 
+             if ($run) {
+@@ -503,7 +516,8 @@ public function downloadAttachment(
+             $attachment->claim_request_id === $claimRequest->getKey(),
+             404,
+         );
+-        $canManage = $request->user()->hasPermission('claims.manage');
++        $canManage = $request->user()->hasPermission('claims.manage')
++            || $request->user()->hasPermission('claims.approve');
+         $canSupervise = $request->user()->hasPermission('claims.supervise')
+             && ClaimApprovalAssignment::query()
+                 ->where('department_id', $claimRequest->department_id)
+@@ -526,6 +540,7 @@ public function reportCsv(Request $request): StreamedResponse
+     {
+         abort_unless(
+             $request->user()->hasPermission('claims.manage')
++                || $request->user()->hasPermission('claims.approve')
+                 || $request->user()->hasPermission('claims.supervise'),
+             403,
+         );
+@@ -680,11 +695,12 @@ private function visibleQuery(Request $request): Builder
+     {
+         $user = $request->user();
+         $canManage = $user->hasPermission('claims.manage');
++        $canApprove = $user->hasPermission('claims.approve');
+         $canSupervise = $user->hasPermission('claims.supervise');
+-        abort_unless($canManage || $canSupervise, 403);
++        abort_unless($canManage || $canApprove || $canSupervise, 403);
+         $query = ClaimRequest::query();
+ 
+-        if ($canManage) {
++        if ($canManage || $canApprove) {
+             return $query;
+         }
+ 
+diff --git a/app/Http/Controllers/ClaimSettingsController.php b/app/Http/Controllers/ClaimSettingsController.php
+index e5e8c2d10f7e73221e16a1d910136b5b29e26d9b..14e5b9821f4cab20cb2f5e348e3eacfed71a8af2 100644
+--- a/app/Http/Controllers/ClaimSettingsController.php
++++ b/app/Http/Controllers/ClaimSettingsController.php
+@@ -2,7 +2,6 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Enums\UserRole;
+ use App\Models\EmployeeRecord;
+ use App\Models\ClaimApprovalAssignment;
+ use App\Models\ClaimLimitOverride;
+@@ -64,8 +63,7 @@ public function index(): Response
+             ->with('roleAssignments')
+             ->orderBy('name')
+             ->get()
+-            ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
+-                || $user->hasRole(UserRole::SuperAdmin))
++            ->filter(fn (User $user) => $user->hasPermission('claims.supervise'))
+             ->values()
+             ->map(fn (User $user) => [
+                 'id' => $user->getKey(),
+@@ -266,12 +264,9 @@ public function saveAssignment(Request $request): RedirectResponse
+             ->with('roleAssignments')
+             ->findOrFail($validated['approver_user_id']);
+ 
+-        if (
+-            ! $approver->hasRole(UserRole::Supervisor)
+-            && ! $approver->hasRole(UserRole::SuperAdmin)
+-        ) {
++        if (! $approver->hasPermission('claims.supervise')) {
+             throw ValidationException::withMessages([
+-                'approver_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
++                'approver_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan tuntutan.',
+             ]);
+         }
+ 
+diff --git a/app/Http/Controllers/HrDocumentController.php b/app/Http/Controllers/HrDocumentController.php
+index dadc278a62549400cb4acc1453d8fac45123f8bb..39f1aeb0b0f91333663236d70d6c37eb6eb7435a 100644
+--- a/app/Http/Controllers/HrDocumentController.php
++++ b/app/Http/Controllers/HrDocumentController.php
+@@ -2,7 +2,6 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Enums\UserRole;
+ use App\Models\DocumentTemplate;
+ use App\Models\HrDocument;
+ use App\Models\HrDocumentAttachment;
+@@ -327,8 +326,7 @@ public function submit(Request $request, HrDocument $document): RedirectResponse
+             $hasDefaultApprover = User::query()
+                 ->with('roleAssignments')
+                 ->get()
+-                ->contains(fn (User $user) => $user->hasPermission('documents.manage')
+-                    && $user->hasPermission('documents.approve'));
++                ->contains(fn (User $user) => $user->hasPermission('documents.approve'));
+             if (! $hasDefaultApprover) {
+                 throw ValidationException::withMessages([
+                     'approver_user_id' => 'Tetapkan pelulus dokumen sebelum menghantar draf.',
+@@ -371,6 +369,15 @@ public function submit(Request $request, HrDocument $document): RedirectResponse
+     public function review(Request $request, HrDocument $document): RedirectResponse
+     {
+         $this->authorizeApproval($request, $document);
++        abort_if(
++            in_array(
++                (int) $request->user()->getAuthIdentifier(),
++                array_filter([(int) $document->created_by, (int) $document->submitted_by]),
++                true,
++            ),
++            403,
++            'Penyedia atau penghantar dokumen tidak boleh meluluskan dokumen yang sama.',
++        );
+         if ($document->status !== 'pending_approval') {
+             throw ValidationException::withMessages([
+                 'status' => 'Dokumen ini tidak lagi menunggu kelulusan.',
+@@ -724,7 +731,9 @@ private function visibleQuery(User $user): Builder
+ 
+         return $query
+             ->where('status', 'pending_approval')
+-            ->where('approver_user_id', $user->getAuthIdentifier());
++            ->where(fn (Builder $query) => $query
++                ->where('approver_user_id', $user->getAuthIdentifier())
++                ->orWhereNull('approver_user_id'));
+     }
+ 
+     private function authorizeManage(Request $request, HrDocument $document): void
+@@ -739,14 +748,7 @@ private function authorizeApproval(Request $request, HrDocument $document): void
+ 
+         if ($document->approver_user_id) {
+             abort_unless(
+-                $document->approver_user_id === $user->getAuthIdentifier()
+-                    || $user->hasRole(UserRole::SuperAdmin),
+-                403,
+-            );
+-        } else {
+-            abort_unless(
+-                $user->hasPermission('documents.manage')
+-                    && $user->hasPermission('documents.approve'),
++                $document->approver_user_id === $user->getAuthIdentifier(),
+                 403,
+             );
+         }
+@@ -761,7 +763,10 @@ private function authorizeView(Request $request, HrDocument $document): void
+ 
+         abort_unless(
+             $user->hasPermission('documents.approve')
+-                && $document->approver_user_id === $user->getAuthIdentifier(),
++                && (
++                    $document->approver_user_id === $user->getAuthIdentifier()
++                    || $document->approver_user_id === null
++                ),
+             403,
+         );
+     }
+@@ -786,8 +791,7 @@ private function notifyApprovers(HrDocument $document): void
+             : User::query()
+                 ->with('roleAssignments')
+                 ->get()
+-                ->filter(fn (User $user) => $user->hasPermission('documents.manage')
+-                    && $user->hasPermission('documents.approve'));
++                ->filter(fn (User $user) => $user->hasPermission('documents.approve'));
+ 
+         foreach ($approvers as $approver) {
+             HrDocumentNotification::query()->create([
+diff --git a/app/Http/Controllers/LeaveRequestController.php b/app/Http/Controllers/LeaveRequestController.php
+index 14c1ed6dad8d1577a2826c304fc3ce5c2e1650ce..2fca76b2a87133d7f822e0c4416eb7601f65b5bb 100644
+--- a/app/Http/Controllers/LeaveRequestController.php
++++ b/app/Http/Controllers/LeaveRequestController.php
+@@ -124,6 +124,7 @@ public function index(Request $request): Response
+             'permissions' => [
+                 'can_supervise' => $request->user()->hasPermission('leave.supervise'),
+                 'can_manage' => $request->user()->hasPermission('leave.manage'),
++                'can_approve' => $request->user()->hasPermission('leave.approve'),
+             ],
+         ]);
+     }
+@@ -188,7 +189,7 @@ public function supervisorReview(
+                     ? 'Permohonan disokong penyelia'
+                     : 'Permohonan ditolak penyelia',
+                 'message' => $approved
+-                    ? 'Permohonan cuti anda telah dihantar kepada HR untuk kelulusan akhir.'
++                    ? 'Permohonan cuti anda telah dihantar kepada Pengurus HR untuk kelulusan akhir.'
+                     : 'Permohonan cuti anda tidak disokong oleh penyelia.',
+             ]);
+ 
+@@ -218,7 +219,7 @@ public function supervisorReview(
+         return back()->with('toast', [
+             'type' => 'success',
+             'message' => $leaveRequest->status === 'pending'
+-                ? 'Permohonan telah disokong dan dihantar kepada HR.'
++                ? 'Permohonan telah disokong dan dihantar kepada Pengurus HR.'
+                 : 'Permohonan cuti telah ditolak.',
+         ]);
+     }
+@@ -242,6 +243,12 @@ public function review(
+                 ]);
+             }
+ 
++            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'status' => 'Anda tidak boleh meluluskan permohonan cuti sendiri.',
++                ]);
++            }
++
+             if ($request->validated('status') === 'approved') {
+                 $this->balances->deduct($locked, $request->user());
+             }
+@@ -299,7 +306,7 @@ public function cancelApproved(
+         Request $request,
+         EmployeeLeaveRequest $leaveRequest,
+     ): RedirectResponse {
+-        abort_unless($request->user()->hasPermission('leave.manage'), 403);
++        abort_unless($request->user()->hasPermission('leave.approve'), 403);
+         $validated = $request->validate([
+             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
+         ]);
+@@ -320,6 +327,12 @@ public function cancelApproved(
+                 ]);
+             }
+ 
++            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan cuti sendiri.',
++                ]);
++            }
++
+             $this->balances->refund($locked, $request->user());
+             $locked->update([
+                 'status' => 'cancelled',
+@@ -361,6 +374,7 @@ public function reportCsv(Request $request): StreamedResponse
+     {
+         abort_unless(
+             $request->user()->hasPermission('leave.manage')
++                || $request->user()->hasPermission('leave.approve')
+                 || $request->user()->hasPermission('leave.supervise'),
+             403,
+         );
+@@ -469,7 +483,10 @@ private function visibleQuery(Request $request): Builder
+     {
+         $query = EmployeeLeaveRequest::query();
+ 
+-        if ($request->user()->hasPermission('leave.manage')) {
++        if (
++            $request->user()->hasPermission('leave.manage')
++            || $request->user()->hasPermission('leave.approve')
++        ) {
+             return $query;
+         }
+ 
+diff --git a/app/Http/Controllers/OnboardingController.php b/app/Http/Controllers/OnboardingController.php
+index e2e9551cf9c3aaf4ec2f97f4b5ad1098470b58d9..6baa75d1c455fbd9a06b52796616470e2d0e3cdf 100644
+--- a/app/Http/Controllers/OnboardingController.php
++++ b/app/Http/Controllers/OnboardingController.php
+@@ -30,6 +30,8 @@ public function index(Request $request): Response
+         $search = $request->string('search')->trim()->toString();
+         $status = $request->string('status')->trim()->toString();
+         $canManage = $request->user()->hasPermission('onboarding.manage');
++        $canApprove = $request->user()->hasPermission('onboarding.approve');
++        $canOperate = $canManage || $canApprove;
+         $casesQuery = OnboardingCase::query()
+             ->with([
+                 'candidate.requisition:id,code,title,department_id,position_name,hiring_manager_user_id',
+@@ -85,7 +87,7 @@ public function index(Request $request): Response
+                     ->whereDate('due_date', '<', today())
+                     ->count(),
+             ],
+-            'users' => $canManage
++            'users' => $canOperate
+                 ? User::query()
+                     ->orderBy('name')
+                     ->get(['id', 'name', 'email'])
+@@ -108,7 +110,7 @@ public function index(Request $request): Response
+                         'email' => $user->email,
+                     ])
+                 : [],
+-            'officeLocations' => $canManage
++            'officeLocations' => $canOperate
+                 ? OfficeLocation::query()
+                     ->where('is_active', true)
+                     ->orderBy('name')
+@@ -126,6 +128,7 @@ public function index(Request $request): Response
+             'newEmployeeCredentials' => $request->session()->get('new_employee_credentials'),
+             'permissions' => [
+                 'can_manage' => $canManage,
++                'can_approve' => $canApprove,
+             ],
+         ]);
+     }
+@@ -136,6 +139,13 @@ public function registerEmployee(
+     ): RedirectResponse {
+         $validated = $request->validated();
+         $onboardingCase->loadMissing(['candidate.requisition', 'offer', 'employeeRecord']);
++
++        if ((int) $onboardingCase->created_by === (int) $request->user()->getAuthIdentifier()) {
++            throw ValidationException::withMessages([
++                'registration' => 'Pencipta kes onboarding tidak boleh mengesahkan pendaftaran pekerja yang sama.',
++            ]);
++        }
++
+         $candidate = $onboardingCase->candidate;
+         $offer = $onboardingCase->offer;
+ 
+@@ -667,6 +677,13 @@ public function changeCaseStatus(
+             'notes' => ['nullable', 'string', 'max:3000'],
+         ]);
+         $action = $validated['action'];
++
++        if ($action === 'complete') {
++            abort_unless($request->user()->hasPermission('onboarding.approve'), 403);
++        } else {
++            abort_unless($request->user()->hasPermission('onboarding.manage'), 403);
++        }
++
+         $next = [
+             'pending:start' => 'active',
+             'active:complete' => 'completed',
+@@ -682,6 +699,12 @@ public function changeCaseStatus(
+         }
+ 
+         if ($action === 'complete') {
++            if ((int) $onboardingCase->created_by === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'action' => 'Pencipta kes onboarding tidak boleh melengkapkan kelulusan kes yang sama.',
++                ]);
++            }
++
+             if (
+                 (
+                     ! $onboardingCase->employee_record_id
+@@ -825,7 +848,10 @@ public function export(Request $request): StreamedResponse
+ 
+     private function scopeCasesForUser(Builder $query, User $user): void
+     {
+-        if ($user->hasPermission('onboarding.manage')) {
++        if (
++            $user->hasPermission('onboarding.manage')
++            || $user->hasPermission('onboarding.approve')
++        ) {
+             return;
+         }
+ 
+diff --git a/app/Http/Controllers/OvertimeRequestController.php b/app/Http/Controllers/OvertimeRequestController.php
+index 62ec0ab4fe663738531fccbab2dd3069ef0bbb8b..a5352220087f0261ab782330c4efcf09674efe1e 100644
+--- a/app/Http/Controllers/OvertimeRequestController.php
++++ b/app/Http/Controllers/OvertimeRequestController.php
+@@ -100,6 +100,7 @@ public function index(Request $request): Response
+             'permissions' => [
+                 'can_supervise' => $request->user()->hasPermission('overtime.supervise'),
+                 'can_manage' => $request->user()->hasPermission('overtime.manage'),
++                'can_approve' => $request->user()->hasPermission('overtime.approve'),
+             ],
+         ]);
+     }
+@@ -163,7 +164,7 @@ public function supervisorReview(
+                     ? 'Permohonan OT disokong penyelia'
+                     : 'Permohonan OT ditolak penyelia',
+                 'message' => $supported
+-                    ? 'Permohonan OT anda telah dihantar kepada HR untuk kelulusan akhir.'
++                    ? 'Permohonan OT anda telah dihantar kepada Pengurus HR untuk kelulusan akhir.'
+                     : 'Permohonan OT anda tidak disokong oleh penyelia.',
+             ]);
+ 
+@@ -189,7 +190,7 @@ public function supervisorReview(
+         return back()->with('toast', [
+             'type' => 'success',
+             'message' => $overtimeRequest->status === 'pending'
+-                ? 'Permohonan OT disokong dan dihantar kepada HR.'
++                ? 'Permohonan OT disokong dan dihantar kepada Pengurus HR.'
+                 : 'Permohonan OT telah ditolak.',
+         ]);
+     }
+@@ -216,6 +217,12 @@ public function review(
+                 ]);
+             }
+ 
++            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'status' => 'Anda tidak boleh meluluskan permohonan OT sendiri.',
++                ]);
++            }
++
+             $approved = $request->validated('status') === 'approved';
+             $approvedMinutes = $approved
+                 ? (int) $request->validated('approved_minutes')
+@@ -248,7 +255,7 @@ public function review(
+                     ? 'Permohonan OT diluluskan'
+                     : 'Permohonan OT ditolak',
+                 'message' => $approved
+-                    ? 'HR meluluskan '.number_format($approvedMinutes / 60, 2).' jam OT anda.'
++                    ? 'Pengurus HR meluluskan '.number_format($approvedMinutes / 60, 2).' jam OT anda.'
+                     : 'HR telah menolak permohonan OT anda.',
+             ]);
+ 
+@@ -284,7 +291,7 @@ public function cancelApproved(
+         Request $request,
+         OvertimeRequest $overtimeRequest,
+     ): RedirectResponse {
+-        abort_unless($request->user()->hasPermission('overtime.manage'), 403);
++        abort_unless($request->user()->hasPermission('overtime.approve'), 403);
+         $validated = $request->validate([
+             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
+         ]);
+@@ -295,6 +302,12 @@ public function cancelApproved(
+             ]);
+         }
+ 
++        if ((int) $overtimeRequest->user_id === (int) $request->user()->getAuthIdentifier()) {
++            throw ValidationException::withMessages([
++                'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan OT sendiri.',
++            ]);
++        }
++
+         $oldMinutes = $overtimeRequest->approved_minutes;
+         $overtimeRequest->update([
+             'status' => 'cancelled',
+@@ -335,6 +348,7 @@ public function reportCsv(Request $request): StreamedResponse
+     {
+         abort_unless(
+             $request->user()->hasPermission('overtime.manage')
++                || $request->user()->hasPermission('overtime.approve')
+                 || $request->user()->hasPermission('overtime.supervise'),
+             403,
+         );
+@@ -478,7 +492,10 @@ private function visibleQuery(Request $request): Builder
+     {
+         $query = OvertimeRequest::query();
+ 
+-        if ($request->user()->hasPermission('overtime.manage')) {
++        if (
++            $request->user()->hasPermission('overtime.manage')
++            || $request->user()->hasPermission('overtime.approve')
++        ) {
+             return $query;
+         }
+ 
+diff --git a/app/Http/Controllers/OvertimeSettingsController.php b/app/Http/Controllers/OvertimeSettingsController.php
+index 9d980d11ff1479f0c915bc513ac6652894546a4c..2aff8c9fc200b2f1cbbaacb5221a66b893963bf4 100644
+--- a/app/Http/Controllers/OvertimeSettingsController.php
++++ b/app/Http/Controllers/OvertimeSettingsController.php
+@@ -2,7 +2,6 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Enums\UserRole;
+ use App\Models\OvertimeApprovalAssignment;
+ use App\Models\OvertimeRequest;
+ use App\Models\OvertimeType;
+@@ -30,8 +29,7 @@ public function index(): Response
+             ->with('roleAssignments')
+             ->orderBy('name')
+             ->get()
+-            ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
+-                || $user->hasRole(UserRole::SuperAdmin))
++            ->filter(fn (User $user) => $user->hasPermission('overtime.supervise'))
+             ->values()
+             ->map(fn (User $user) => [
+                 'id' => $user->getKey(),
+@@ -193,12 +191,9 @@ public function saveAssignment(Request $request): RedirectResponse
+             ->with('roleAssignments')
+             ->findOrFail($validated['approver_user_id']);
+ 
+-        if (
+-            ! $approver->hasRole(UserRole::Supervisor)
+-            && ! $approver->hasRole(UserRole::SuperAdmin)
+-        ) {
++        if (! $approver->hasPermission('overtime.supervise')) {
+             throw ValidationException::withMessages([
+-                'approver_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
++                'approver_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan kerja lebih masa.',
+             ]);
+         }
+ 
+diff --git a/app/Http/Controllers/PayrollRunController.php b/app/Http/Controllers/PayrollRunController.php
+index ab7934d84e1ace2a4f496510bd0e9c6375342657..a39884aaa000f0dd0b5d2af3672c286c7c06966d 100644
+--- a/app/Http/Controllers/PayrollRunController.php
++++ b/app/Http/Controllers/PayrollRunController.php
+@@ -449,6 +449,15 @@ public function approve(
+                 ->lockForUpdate()
+                 ->findOrFail($payrollRun->getKey());
+             $this->ensureStatus($locked, 'hr_reviewed');
++            if (in_array(
++                (int) $request->user()->getAuthIdentifier(),
++                array_filter([(int) $locked->generated_by, (int) $locked->reviewed_by]),
++                true,
++            )) {
++                throw ValidationException::withMessages([
++                    'notes' => 'Penyedia atau penyemak payroll tidak boleh meluluskan payroll yang sama.',
++                ]);
++            }
+             $locked->update([
+                 'status' => 'approved',
+                 'approved_at' => now(),
+diff --git a/app/Http/Controllers/PerformanceReviewController.php b/app/Http/Controllers/PerformanceReviewController.php
+index 30e1e75bdd99e1e899586b90b299a91adf3378ab..12d2fc96f288be3b4a927b36707a9e94d8fd2eb5 100644
+--- a/app/Http/Controllers/PerformanceReviewController.php
++++ b/app/Http/Controllers/PerformanceReviewController.php
+@@ -465,6 +465,15 @@ public function finalize(
+             ]);
+         }
+ 
++        if (in_array((int) $request->user()->getAuthIdentifier(), [
++            (int) $review->employee_user_id,
++            (int) $review->moderated_by,
++        ], true)) {
++            throw ValidationException::withMessages([
++                'review' => 'Pengurus HR yang memuktamadkan mestilah berbeza daripada pekerja dan pegawai yang membuat moderasi.',
++            ]);
++        }
++
+         DB::transaction(function () use ($request, $review) {
+             $review->update([
+                 'status' => 'finalized',
+@@ -710,6 +719,7 @@ private function visibleQuery(Request $request): Builder
+         if (
+             $request->user()->hasPermission('performance.manage')
+             || $request->user()->hasPermission('performance.moderate')
++            || $request->user()->hasPermission('performance.finalize')
+         ) {
+             return $query;
+         }
+@@ -727,6 +737,7 @@ private function authorizeVisible(
+         abort_unless(
+             $request->user()->hasPermission('performance.manage')
+             || $request->user()->hasPermission('performance.moderate')
++            || $request->user()->hasPermission('performance.finalize')
+             || $review->supervisor_user_id === $request->user()->getAuthIdentifier(),
+             403,
+         );
+diff --git a/app/Http/Controllers/PerformanceSettingsController.php b/app/Http/Controllers/PerformanceSettingsController.php
+index 7ef74873c3216ce87703150feef4869b0de1cc81..54f575dfe3c2a9aa6b792d08c11811af90c15169 100644
+--- a/app/Http/Controllers/PerformanceSettingsController.php
++++ b/app/Http/Controllers/PerformanceSettingsController.php
+@@ -2,7 +2,6 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Enums\UserRole;
+ use App\Models\PerformanceCycle;
+ use App\Models\PerformanceNotification;
+ use App\Models\PerformanceSupervisorAssignment;
+@@ -87,8 +86,7 @@ public function index(): Response
+                 ->with('roleAssignments')
+                 ->orderBy('name')
+                 ->get()
+-                ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
+-                    || $user->hasRole(UserRole::SuperAdmin))
++                ->filter(fn (User $user) => $user->hasPermission('performance.supervise'))
+                 ->values()
+                 ->map(fn (User $user) => [
+                     'id' => $user->getKey(),
+@@ -370,12 +368,9 @@ public function saveAssignment(Request $request): RedirectResponse
+         ]);
+         $supervisor = User::query()->findOrFail($validated['supervisor_user_id']);
+ 
+-        if (
+-            ! $supervisor->hasRole(UserRole::Supervisor)
+-            && ! $supervisor->hasRole(UserRole::SuperAdmin)
+-        ) {
++        if (! $supervisor->hasPermission('performance.supervise')) {
+             throw ValidationException::withMessages([
+-                'supervisor_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
++                'supervisor_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan prestasi.',
+             ]);
+         }
+ 
+diff --git a/app/Http/Controllers/RecruitmentController.php b/app/Http/Controllers/RecruitmentController.php
+index 9c559ea5b2a71bcc3bd8038362f78277bce79e7f..ffde1e707cacdf2b7731831f8e1782a9d1cb86bd 100644
+--- a/app/Http/Controllers/RecruitmentController.php
++++ b/app/Http/Controllers/RecruitmentController.php
+@@ -67,7 +67,8 @@ public function index(Request $request): Response
+             ->with('hiringManager:id,name')
+             ->withCount('candidates')
+             ->when(
+-                ! $user->hasPermission('recruitment.manage'),
++                ! $user->hasPermission('recruitment.manage')
++                    && ! $user->hasPermission('recruitment.approve'),
+                 fn (Builder $query) => $query->where(
+                     'hiring_manager_user_id',
+                     $user->getAuthIdentifier(),
+@@ -217,7 +218,9 @@ public function show(Request $request, RecruitmentCandidate $candidate): Respons
+         $canManage = $request->user()->hasPermission('recruitment.manage');
+         $isHiringManager = (int) $candidate->requisition?->hiring_manager_user_id
+             === (int) $request->user()->getAuthIdentifier();
+-        $canSeeOffer = $canManage || $isHiringManager;
++        $canSeeOffer = $canManage
++            || $request->user()->hasPermission('recruitment.approve')
++            || $isHiringManager;
+         $panelIds = $candidate->interviews
+             ->flatMap(fn (RecruitmentInterview $interview) => $interview->panel_user_ids ?? [])
+             ->map(fn ($id) => (int) $id)
+@@ -452,6 +455,14 @@ public function changeRequisitionStatus(
+ 
+         if (in_array($action, ['approve', 'reject'], true)) {
+             abort_unless($request->user()->hasPermission('recruitment.approve'), 403);
++
++            if ((int) $requisition->created_by === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'action' => 'Penyedia permohonan kekosongan tidak boleh meluluskan atau menolak rekod yang sama.',
++                ]);
++            }
++        } else {
++            abort_unless($request->user()->hasPermission('recruitment.manage'), 403);
+         }
+ 
+         $transition = [
+@@ -750,7 +761,8 @@ public function downloadDocument(
+         );
+         abort_if(
+             in_array($document->document_type, ['identity', 'offer_letter'], true)
+-            && ! $request->user()->hasPermission('recruitment.manage'),
++            && ! $request->user()->hasPermission('recruitment.manage')
++            && ! $request->user()->hasPermission('recruitment.approve'),
+             403,
+         );
+         abort_unless(Storage::disk($document->disk)->exists($document->path), 404);
+@@ -1039,6 +1051,14 @@ public function changeOfferStatus(
+ 
+         if (in_array($action, ['approve', 'reject'], true)) {
+             abort_unless($request->user()->hasPermission('recruitment.approve'), 403);
++
++            if ((int) $offer->created_by === (int) $request->user()->getAuthIdentifier()) {
++                throw ValidationException::withMessages([
++                    'action' => 'Penyedia tawaran tidak boleh meluluskan atau menolak tawaran yang sama.',
++                ]);
++            }
++        } else {
++            abort_unless($request->user()->hasPermission('recruitment.manage'), 403);
+         }
+ 
+         $next = [
+@@ -1214,7 +1234,10 @@ private function validateRequisition(
+ 
+     private function scopeCandidatesForUser(Builder $query, User $user): void
+     {
+-        if ($user->hasPermission('recruitment.manage')) {
++        if (
++            $user->hasPermission('recruitment.manage')
++            || $user->hasPermission('recruitment.approve')
++        ) {
+             return;
+         }
+ 
+@@ -1467,8 +1490,7 @@ private function recruitmentUsers()
+             ->with('roleAssignments')
+             ->orderBy('name')
+             ->get()
+-            ->filter(fn (User $user) => $user->hasRole(UserRole::SuperAdmin)
+-                || $user->hasRole(UserRole::HrAdmin)
++            ->filter(fn (User $user) => $user->hasRole(UserRole::HrAdmin)
+                 || $user->hasRole(UserRole::Supervisor))
+             ->values()
+             ->map(fn (User $user) => [
+diff --git a/app/Http/Controllers/RosterController.php b/app/Http/Controllers/RosterController.php
+index 8dd04d85e0613fa9ad637edd7f18f09446e99312..63672bf514856d359342a2c299eec5386a433e27 100644
+--- a/app/Http/Controllers/RosterController.php
++++ b/app/Http/Controllers/RosterController.php
+@@ -124,24 +124,23 @@ public function index(Request $request): Response
+         $statistics = $query
+             ? $this->statistics((clone $query)->get())
+             : $this->emptyStatistics();
+-        $pendingSwaps = ShiftSwapRequest::query()
+-            ->with([
+-                'requesterEntry.shiftTemplate:id,name',
+-                'targetEntry.shiftTemplate:id,name',
+-                'requester:id,name',
+-                'target:id,name',
+-            ])
+-            ->where('status', 'pending')
+-            ->when(
+-                ! $request->user()->hasPermission('roster.manage'),
+-                fn (Builder $query) => $query->whereIn(
++        $pendingSwaps = $request->user()->hasPermission('roster.supervise')
++            ? ShiftSwapRequest::query()
++                ->with([
++                    'requesterEntry.shiftTemplate:id,name',
++                    'targetEntry.shiftTemplate:id,name',
++                    'requester:id,name',
++                    'target:id,name',
++                ])
++                ->where('status', 'pending')
++                ->whereIn(
+                     'department_id',
+                     $this->supervisedDepartmentIds($request),
+-                ),
+-            )
+-            ->latest()
+-            ->get()
+-            ->map(fn (ShiftSwapRequest $swap) => $this->swapPayload($swap));
++                )
++                ->latest()
++                ->get()
++                ->map(fn (ShiftSwapRequest $swap) => $this->swapPayload($swap))
++            : collect();
+ 
+         return Inertia::render('Rosters/Index', [
+             'period' => $period ? $this->periodPayload($period) : null,
+@@ -332,6 +331,12 @@ public function publish(
+         Request $request,
+         RosterPeriod $period,
+     ): RedirectResponse {
++        if ((int) $period->created_by === (int) $request->user()->getAuthIdentifier()) {
++            throw ValidationException::withMessages([
++                'roster' => 'Penyedia roster tidak boleh menerbitkan roster yang sama.',
++            ]);
++        }
++
+         if ($period->status !== 'draft' || ! $period->entries()->exists()) {
+             throw ValidationException::withMessages([
+                 'roster' => 'Roster mesti mempunyai rekod Draf sebelum diterbitkan.',
+@@ -422,14 +427,13 @@ public function reviewSwap(
+                 'required_if:status,rejected',
+             ],
+         ]);
+-        $canManage = $request->user()->hasPermission('roster.manage');
+         $assigned = $request->user()->hasPermission('roster.supervise')
+             && in_array(
+                 $shiftSwapRequest->department_id,
+                 $this->supervisedDepartmentIds($request),
+                 true,
+             );
+-        abort_unless($canManage || $assigned, 403);
++        abort_unless($assigned, 403);
+ 
+         $swap = DB::transaction(function () use (
+             $request,
+diff --git a/app/Http/Controllers/SeparationController.php b/app/Http/Controllers/SeparationController.php
+index 22e2081d7c621eeacd0156ef8d51c9fe7c71b91c..44ec9cbb944275d521ad24b676d5926c52a4509f 100644
+--- a/app/Http/Controllers/SeparationController.php
++++ b/app/Http/Controllers/SeparationController.php
+@@ -2,7 +2,6 @@
+ 
+ namespace App\Http\Controllers;
+ 
+-use App\Enums\UserRole;
+ use App\Models\ClearanceTask;
+ use App\Models\ExitInterview;
+ use App\Models\FinalSettlement;
+@@ -286,7 +285,7 @@ public function supervisorReview(
+                 (int) $recipient,
+                 $case,
+                 $supported ? 'hr_approval_required' : 'separation_rejected',
+-                $supported ? 'Kes menunggu kelulusan HR' : 'Notis pengakhiran ditolak',
++                $supported ? 'Kes menunggu kelulusan Pengurus HR' : 'Notis pengakhiran ditolak',
+                 $supported
+                     ? "Kes {$case->case_number} telah disokong penyelia."
+                     : "Kes {$case->case_number} telah ditolak oleh penyelia.",
+@@ -304,7 +303,7 @@ public function supervisorReview(
+             ],
+         );
+ 
+-        return $this->success($supported ? 'Kes telah disokong dan dihantar kepada HR.' : 'Kes telah ditolak.');
++        return $this->success($supported ? 'Kes telah disokong dan dihantar kepada Pengurus HR.' : 'Kes telah ditolak.');
+     }
+ 
+     public function hrReview(Request $request, SeparationCase $case): RedirectResponse
+@@ -313,8 +312,7 @@ public function hrReview(Request $request, SeparationCase $case): RedirectRespon
+         abort_unless($user->hasPermission('separation.approve'), 403);
+         if ($case->hr_approver_user_id) {
+             abort_unless(
+-                $case->hr_approver_user_id === $user->getAuthIdentifier()
+-                    || $user->hasRole(UserRole::SuperAdmin),
++                $case->hr_approver_user_id === $user->getAuthIdentifier(),
+                 403,
+             );
+         }
+@@ -323,7 +321,7 @@ public function hrReview(Request $request, SeparationCase $case): RedirectRespon
+         }
+         if ($case->status !== 'pending_approval' || $case->approval_stage !== 'hr') {
+             throw ValidationException::withMessages([
+-                'status' => 'Kes ini tidak lagi menunggu kelulusan HR.',
++                'status' => 'Kes ini tidak lagi menunggu kelulusan Pengurus HR.',
+             ]);
+         }
+         $validated = $request->validate([
+@@ -899,7 +897,13 @@ public function generateDocument(
+ 
+     public function complete(Request $request, SeparationCase $case): RedirectResponse
+     {
+-        $this->authorizeManage($request, $case);
++        abort_unless($request->user()->hasPermission('separation.approve'), 403);
++        $this->authorizeCaseView($request, $case);
++        abort_if(
++            (int) $case->created_by === (int) $request->user()->getAuthIdentifier(),
++            403,
++            'Pencipta kes tidak boleh menutup kes yang sama.',
++        );
+         abort_unless(in_array($case->status, ['clearance', 'final_review'], true), 422);
+         $case->loadMissing('template', 'interview', 'settlement');
+         $blockers = $this->completionBlockers($case);
+@@ -1000,7 +1004,7 @@ public function export(Request $request): StreamedResponse
+     private function visibleQuery(User $user): Builder
+     {
+         $query = SeparationCase::query();
+-        if ($user->hasPermission('separation.manage') || $user->hasRole(UserRole::SuperAdmin)) {
++        if ($user->hasPermission('separation.manage')) {
+             return $query;
+         }
+ 
+diff --git a/app/Http/Controllers/TrainingController.php b/app/Http/Controllers/TrainingController.php
+index d3586a023c0b0f5f624a5dddcfdceb0fa6f12f3e..84b9ea6eee71a3a26f3ed26e9c9ec032b2615fc9 100644
+--- a/app/Http/Controllers/TrainingController.php
++++ b/app/Http/Controllers/TrainingController.php
+@@ -176,6 +176,7 @@ public function index(Request $request): Response
+                 ]),
+             'permissions' => [
+                 'can_manage' => $request->user()->hasPermission('training.manage'),
++                'can_approve' => $request->user()->hasPermission('training.approve'),
+                 'can_supervise' => $request->user()->hasPermission('training.supervise'),
+                 'can_assess' => $request->user()->hasPermission('competency.assess'),
+             ],
+@@ -207,7 +208,7 @@ public function supervisorReview(Request $request, TrainingRequest $training): R
+             $supported ? 'supervisor_supported' : 'supervisor_rejected',
+             $supported ? 'Permohonan latihan disokong' : 'Permohonan latihan ditolak',
+             $supported
+-                ? 'Permohonan anda telah disokong dan dihantar kepada HR.'
++                ? 'Permohonan anda telah disokong dan dihantar kepada Pengurus HR.'
+                 : 'Permohonan anda ditolak oleh penyelia. Semak catatan untuk maklumat lanjut.',
+         );
+         AuditLogger::record(
+@@ -221,17 +222,28 @@ public function supervisorReview(Request $request, TrainingRequest $training): R
+ 
+         return back()->with('toast', [
+             'type' => 'success',
+-            'message' => $supported ? 'Permohonan disokong dan dihantar kepada HR.' : 'Permohonan ditolak.',
++            'message' => $supported ? 'Permohonan disokong dan dihantar kepada Pengurus HR.' : 'Permohonan ditolak.',
+         ]);
+     }
+ 
+     public function review(Request $request, TrainingRequest $training): RedirectResponse
+     {
++        abort_unless($request->user()->hasPermission('training.approve'), 403);
++
+         if ($training->status !== 'pending' || $training->approval_stage !== 'hr') {
+             throw ValidationException::withMessages([
+                 'status' => 'Permohonan ini tidak lagi menunggu keputusan HR.',
+             ]);
+         }
++
++        if (in_array((int) $request->user()->getAuthIdentifier(), [
++            (int) $training->employee_user_id,
++            (int) $training->created_by,
++        ], true)) {
++            throw ValidationException::withMessages([
++                'status' => 'Pengguna yang memohon atau menyediakan pencalonan tidak boleh meluluskan latihan yang sama.',
++            ]);
++        }
+         $validated = $request->validate([
+             'action' => ['required', Rule::in(['approve', 'reject'])],
+             'approved_cost' => [Rule::requiredIf($request->input('action') === 'approve'), 'nullable', 'numeric', 'min:0', 'max:9999999999.99'],
+@@ -410,30 +422,36 @@ public function nominate(Request $request): RedirectResponse
+                 'justification' => $validated['justification'],
+                 'development_source' => $validated['development_source'],
+                 'estimated_cost' => $session->cost_per_participant,
+-                'approved_cost' => $session->cost_per_participant,
+-                'status' => 'approved',
+-                'approval_stage' => null,
+-                'hr_user_id' => $request->user()->getAuthIdentifier(),
+-                'hr_notes' => 'Pencalonan latihan oleh HR.',
+-                'hr_reviewed_at' => now(),
++                'approved_cost' => null,
++                'status' => 'pending',
++                'approval_stage' => 'hr',
++                'hr_user_id' => null,
++                'hr_notes' => null,
++                'hr_reviewed_at' => null,
+                 'created_by' => $request->user()->getAuthIdentifier(),
+             ]);
+         });
+         $this->notifyEmployee(
+             $training,
+             'nominated',
+-            'Anda dicalonkan untuk latihan',
+-            "Anda telah didaftarkan untuk {$training->course_title}.",
++            'Pencalonan latihan menunggu kelulusan',
++            "Anda telah dicalonkan untuk {$training->course_title} dan permohonan sedang menunggu kelulusan Pengurus HR.",
+         );
+         AuditLogger::record(
+             $request,
+             'training.employee_nominated',
+             'training_requests',
+             $training->getKey(),
+-            newValues: $training->only(['employee_id', 'course_title', 'approved_cost', 'development_source']),
++            newValues: $training->only([
++                'employee_id', 'course_title', 'estimated_cost',
++                'status', 'approval_stage', 'development_source',
++            ]),
+         );
+ 
+-        return back()->with('toast', ['type' => 'success', 'message' => 'Pekerja telah dicalonkan dan didaftarkan untuk latihan.']);
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => 'Pencalonan telah dihantar kepada Pengurus HR untuk kelulusan.',
++        ]);
+     }
+ 
+     public function saveCompetency(Request $request): RedirectResponse
+@@ -608,6 +626,7 @@ private function visibleQuery(Request $request): Builder
+     {
+         $query = TrainingRequest::query();
+         if ($request->user()->hasPermission('training.manage')
++            || $request->user()->hasPermission('training.approve')
+             || ($request->user()->hasPermission('training.view')
+                 && ! $request->user()->hasPermission('training.supervise'))) {
+             return $query;
+diff --git a/app/Http/Controllers/TrainingSettingsController.php b/app/Http/Controllers/TrainingSettingsController.php
+index 05f30ec4d29220f01ce3f8af019e0c975405febd..4b1d2303bafba999ff7ba1acd081b40ea3df8645 100644
+--- a/app/Http/Controllers/TrainingSettingsController.php
++++ b/app/Http/Controllers/TrainingSettingsController.php
+@@ -121,8 +121,7 @@ public function index(Request $request): Response
+                 ->with('roleAssignments')
+                 ->orderBy('name')
+                 ->get()
+-                ->filter(fn (User $user) => $user->hasPermission('training.supervise')
+-                    || $user->hasPermission('training.manage'))
++                ->filter(fn (User $user) => $user->hasPermission('training.supervise'))
+                 ->values()
+                 ->map(fn (User $user) => [
+                     'id' => $user->getKey(),
+@@ -352,8 +351,8 @@ public function saveAssignment(Request $request): RedirectResponse
+             'is_active' => ['required', 'boolean'],
+         ]);
+         $approver = User::query()->findOrFail($validated['approver_user_id']);
+-        if (! $approver->hasPermission('training.supervise') && ! $approver->hasPermission('training.manage')) {
+-            throw ValidationException::withMessages(['approver_user_id' => 'Pengguna ini tidak mempunyai permission kelulusan latihan.']);
++        if (! $approver->hasPermission('training.supervise')) {
++            throw ValidationException::withMessages(['approver_user_id' => 'Pengguna ini tidak mempunyai kebenaran penyeliaan latihan.']);
+         }
+         $assignment = TrainingApprovalAssignment::query()->updateOrCreate(
+             ['department_id' => $validated['department_id']],
+diff --git a/app/Http/Controllers/UserManagementController.php b/app/Http/Controllers/UserManagementController.php
+index 8d61687269db9a81ac7c1aed0d3963da719bb01e..ae0874102d05c1e23d87553915e4b1b7920e3041 100644
+--- a/app/Http/Controllers/UserManagementController.php
++++ b/app/Http/Controllers/UserManagementController.php
+@@ -116,6 +116,7 @@ public function store(StoreSystemUserRequest $request): RedirectResponse
+     {
+         $validated = $request->validated();
+         $roles = $this->rolesFromValidated($validated);
++        $this->guardRoleCombination($roles);
+         $this->validateEmployeeAssignment($validated);
+ 
+         $user = DB::transaction(function () use ($request, $validated, $roles) {
+@@ -178,6 +179,7 @@ public function update(
+         $validated = $request->validated();
+         $roles = $this->rolesFromValidated($validated);
+ 
++        $this->guardRoleCombination($roles);
+         $this->guardRoleChange($request, $user, $roles);
+         $this->validateEmployeeAssignment($validated, $user);
+ 
+@@ -225,6 +227,7 @@ public function updateRole(UpdateUserRoleRequest $request, User $user): Redirect
+         $validated = $request->validated();
+         $roles = $this->rolesFromValidated($validated);
+ 
++        $this->guardRoleCombination($roles);
+         $this->guardRoleChange($request, $user, $roles);
+ 
+         if (
+@@ -299,6 +302,32 @@ private function guardRoleChange(
+         }
+     }
+ 
++    /**
++     * @param  array<int, UserRole>  $roles
++     */
++    private function guardRoleCombination(array $roles): void
++    {
++        if (! in_array(UserRole::HrManager, $roles, true)) {
++            return;
++        }
++
++        $conflicts = collect($roles)->filter(fn (UserRole $role) => in_array(
++            $role,
++            [
++                UserRole::SuperAdmin,
++                UserRole::HrAdmin,
++                UserRole::Supervisor,
++            ],
++            true,
++        ));
++
++        if ($conflicts->isNotEmpty()) {
++            throw ValidationException::withMessages([
++                'roles' => 'Role Pengurus HR tidak boleh digabungkan dengan Super Admin, HR Admin atau Penyelia. Gunakan akaun berasingan untuk mengekalkan pengasingan tugas.',
++            ]);
++        }
++    }
++
+     /**
+      * @param  array<string, mixed>  $validated
+      */
+diff --git a/app/Http/Requests/RegisterOnboardingEmployeeRequest.php b/app/Http/Requests/RegisterOnboardingEmployeeRequest.php
+index ee7cf25db7df8dc287d4fa45978c49aa3fe10906..cd2f77ae6c3d65c035932cacd5552ba997b913f1 100644
+--- a/app/Http/Requests/RegisterOnboardingEmployeeRequest.php
++++ b/app/Http/Requests/RegisterOnboardingEmployeeRequest.php
+@@ -9,7 +9,7 @@ class RegisterOnboardingEmployeeRequest extends FormRequest
+ {
+     public function authorize(): bool
+     {
+-        return $this->user()?->hasPermission('onboarding.manage') ?? false;
++        return $this->user()?->hasPermission('onboarding.approve') ?? false;
+     }
+ 
+     /**
+diff --git a/app/Http/Requests/ReviewClaimRequest.php b/app/Http/Requests/ReviewClaimRequest.php
+index b63a9f50abd832efbc933205bfd2a94a469ede52..7751f2820028789515db37929030bd0dfeb28b46 100644
+--- a/app/Http/Requests/ReviewClaimRequest.php
++++ b/app/Http/Requests/ReviewClaimRequest.php
+@@ -9,7 +9,7 @@ class ReviewClaimRequest extends FormRequest
+ {
+     public function authorize(): bool
+     {
+-        return $this->user()?->hasPermission('claims.manage') ?? false;
++        return $this->user()?->hasPermission('claims.approve') ?? false;
+     }
+ 
+     /**
+diff --git a/app/Http/Requests/ReviewEmployeeLeaveRequest.php b/app/Http/Requests/ReviewEmployeeLeaveRequest.php
+index c9a09fa58ee3eb649f46423ad00718b492c01667..8241c49327022c91363fe3b0445063b01e4a7e70 100644
+--- a/app/Http/Requests/ReviewEmployeeLeaveRequest.php
++++ b/app/Http/Requests/ReviewEmployeeLeaveRequest.php
+@@ -9,7 +9,7 @@ class ReviewEmployeeLeaveRequest extends FormRequest
+ {
+     public function authorize(): bool
+     {
+-        return $this->user()?->hasPermission('leave.manage') ?? false;
++        return $this->user()?->hasPermission('leave.approve') ?? false;
+     }
+ 
+     /**
+diff --git a/app/Http/Requests/ReviewOvertimeRequest.php b/app/Http/Requests/ReviewOvertimeRequest.php
+index b540549b9163b98cc1a03ad761262dac23019620..e59ef0661e51121d213108e0dbe9091817d6ad25 100644
+--- a/app/Http/Requests/ReviewOvertimeRequest.php
++++ b/app/Http/Requests/ReviewOvertimeRequest.php
+@@ -9,7 +9,7 @@ class ReviewOvertimeRequest extends FormRequest
+ {
+     public function authorize(): bool
+     {
+-        return $this->user()?->hasPermission('overtime.manage') ?? false;
++        return $this->user()?->hasPermission('overtime.approve') ?? false;
+     }
+ 
+     /**
+diff --git a/app/Support/LeaveApprovalAlerts.php b/app/Support/LeaveApprovalAlerts.php
+index 4e72e936713e664e9f025f775eb427fa148adf97..caa521cdc68d252a3004096e9e20527278abd8a8 100644
+--- a/app/Support/LeaveApprovalAlerts.php
++++ b/app/Support/LeaveApprovalAlerts.php
+@@ -116,18 +116,24 @@ public function summarizeFor(?User $user): array
+ 
+         $canManageLeave = $user->hasPermission('leave.manage');
+         $canSuperviseLeave = $user->hasPermission('leave.supervise');
++        $canApproveLeave = $user->hasPermission('leave.approve');
+         $canManageOvertime = $user->hasPermission('overtime.manage');
+         $canSuperviseOvertime = $user->hasPermission('overtime.supervise');
++        $canApproveOvertime = $user->hasPermission('overtime.approve');
+         $canManageClaims = $user->hasPermission('claims.manage');
+         $canSuperviseClaims = $user->hasPermission('claims.supervise');
++        $canApproveClaims = $user->hasPermission('claims.approve');
+         $canSupervisePerformance = $user->hasPermission('performance.supervise');
+         $canModeratePerformance = $user->hasPermission('performance.moderate');
++        $canFinalizePerformance = $user->hasPermission('performance.finalize');
+         $canApproveRecruitment = $user->hasPermission('recruitment.approve');
+         $canInterview = $user->hasPermission('recruitment.interview');
+         $canManageRecruitment = $user->hasPermission('recruitment.manage');
+         $canManageOnboarding = $user->hasPermission('onboarding.manage');
++        $canApproveOnboarding = $user->hasPermission('onboarding.approve');
+         $canManageTraining = $user->hasPermission('training.manage');
+         $canSuperviseTraining = $user->hasPermission('training.supervise');
++        $canApproveTraining = $user->hasPermission('training.approve');
+         $canManageDocuments = $user->hasPermission('documents.manage');
+         $canApproveDocuments = $user->hasPermission('documents.approve');
+         $canManageDiscipline = $user->hasPermission('discipline.manage');
+@@ -141,18 +147,24 @@ public function summarizeFor(?User $user): array
+         if (
+             ! $canManageLeave
+             && ! $canSuperviseLeave
++            && ! $canApproveLeave
+             && ! $canManageOvertime
+             && ! $canSuperviseOvertime
++            && ! $canApproveOvertime
+             && ! $canManageClaims
+             && ! $canSuperviseClaims
++            && ! $canApproveClaims
+             && ! $canSupervisePerformance
+             && ! $canModeratePerformance
++            && ! $canFinalizePerformance
+             && ! $canApproveRecruitment
+             && ! $canInterview
+             && ! $canManageRecruitment
+             && ! $canManageOnboarding
++            && ! $canApproveOnboarding
+             && ! $canManageTraining
+             && ! $canSuperviseTraining
++            && ! $canApproveTraining
+             && ! $canManageDocuments
+             && ! $canApproveDocuments
+             && ! $canManageDiscipline
+@@ -171,7 +183,7 @@ public function summarizeFor(?User $user): array
+         $leaveSupervisor = $leaveReady && $canSuperviseLeave
+             ? $this->leaveSupervisorQuery($user, $canManageLeave)->count()
+             : 0;
+-        $leaveHr = $leaveReady && $canManageLeave
++        $leaveHr = $leaveReady && $canApproveLeave
+             ? EmployeeLeaveRequest::query()
+                 ->where('status', 'pending')
+                 ->where(function (Builder $query) {
+@@ -185,7 +197,7 @@ public function summarizeFor(?User $user): array
+         $overtimeSupervisor = $overtimeReady && $canSuperviseOvertime
+             ? $this->overtimeSupervisorQuery($user, $canManageOvertime)->count()
+             : 0;
+-        $overtimeHr = $overtimeReady && $canManageOvertime
++        $overtimeHr = $overtimeReady && $canApproveOvertime
+             ? OvertimeRequest::query()
+                 ->where('status', 'pending')
+                 ->where(function (Builder $query) {
+@@ -199,7 +211,7 @@ public function summarizeFor(?User $user): array
+         $claimSupervisor = $claimsReady && $canSuperviseClaims
+             ? $this->claimSupervisorQuery($user, $canManageClaims)->count()
+             : 0;
+-        $claimFinance = $claimsReady && $canManageClaims
++        $claimFinance = $claimsReady && $canApproveClaims
+             ? ClaimRequest::query()
+                 ->where('status', 'pending')
+                 ->where(function (Builder $query) {
+@@ -221,11 +233,19 @@ public function summarizeFor(?User $user): array
+                 )
+                 ->count()
+             : 0;
+-        $performanceHr = $performanceReady && $canModeratePerformance
++        $performanceModeration = $performanceReady && $canModeratePerformance
+             ? PerformanceReview::query()
+                 ->where('status', 'hr_moderation')
++                ->whereNull('moderated_score')
+                 ->count()
+             : 0;
++        $performanceFinalization = $performanceReady && $canFinalizePerformance
++            ? PerformanceReview::query()
++                ->where('status', 'hr_moderation')
++                ->whereNotNull('moderated_score')
++                ->count()
++            : 0;
++        $performanceHr = $performanceModeration + $performanceFinalization;
+         $recruitmentReady = Schema::hasTable('recruitment_requisitions')
+             && Schema::hasTable('recruitment_offers')
+             && Schema::hasTable('recruitment_interviews')
+@@ -256,7 +276,7 @@ public function summarizeFor(?User $user): array
+             : 0;
+         $onboardingReady = Schema::hasTable('onboarding_tasks');
+         $onboardingRegistration = $onboardingReady
+-            && $canManageOnboarding
++            && $canApproveOnboarding
+             && Schema::hasColumn('onboarding_cases', 'employee_record_id')
+             ? \App\Models\OnboardingCase::query()
+                 ->whereIn('status', ['pending', 'active'])
+@@ -277,7 +297,7 @@ public function summarizeFor(?User $user): array
+         $trainingSupervisor = $trainingReady && $canSuperviseTraining
+             ? $this->trainingSupervisorQuery($user, $canManageTraining)->count()
+             : 0;
+-        $trainingHr = $trainingReady && $canManageTraining
++        $trainingHr = $trainingReady && $canApproveTraining
+             ? TrainingRequest::query()
+                 ->where('status', 'pending')
+                 ->where('approval_stage', 'hr')
+@@ -287,12 +307,9 @@ public function summarizeFor(?User $user): array
+         $documentApproval = $documentReady && $canApproveDocuments
+             ? HrDocument::query()
+                 ->where('status', 'pending_approval')
+-                ->where(function (Builder $query) use ($user, $canManageDocuments) {
+-                    $query->where('approver_user_id', $user->getAuthIdentifier());
+-                    if ($canManageDocuments) {
+-                        $query->orWhereNull('approver_user_id');
+-                    }
+-                })
++                ->where(fn (Builder $query) => $query
++                    ->where('approver_user_id', $user->getAuthIdentifier())
++                    ->orWhereNull('approver_user_id'))
+                 ->count()
+             : 0;
+         $documentExpiring = $documentReady && $canManageDocuments
+@@ -349,13 +366,9 @@ public function summarizeFor(?User $user): array
+             ? SeparationCase::query()
+                 ->where('status', 'pending_approval')
+                 ->where('approval_stage', 'hr')
+-                ->when(
+-                    ! $user->hasRole(\App\Enums\UserRole::SuperAdmin),
+-                    fn (Builder $query) => $query->where(
+-                        'hr_approver_user_id',
+-                        $user->getAuthIdentifier(),
+-                    ),
+-                )
++                ->where(fn (Builder $query) => $query
++                    ->where('hr_approver_user_id', $user->getAuthIdentifier())
++                    ->orWhereNull('hr_approver_user_id'))
+                 ->count()
+             : 0;
+         $separationClearance = $separationReady && $canClearSeparation
+@@ -367,7 +380,7 @@ public function summarizeFor(?User $user): array
+                         ->orWhereNull('assigned_user_id')))
+                 ->count()
+             : 0;
+-        $separationFinalReview = $separationReady && $canManageSeparation
++        $separationFinalReview = $separationReady && $canApproveSeparation
+             ? SeparationCase::query()->where('status', 'final_review')->count()
+             : 0;
+         $leaveTotal = $leaveSupervisor + $leaveHr;
+@@ -391,11 +404,11 @@ public function summarizeFor(?User $user): array
+                 + $documentTotal + $disciplineTotal + $separationTotal,
+             'supervisor' => $leaveSupervisor + $overtimeSupervisor + $claimSupervisor
+                 + $performanceSupervisor + $recruitmentInterview + $trainingSupervisor
+-                + $documentApproval + $disciplineInvestigation
++                + $disciplineInvestigation
+                 + $separationSupervisor + $separationClearance,
+             'hr' => $leaveHr + $overtimeHr + $claimFinance + $performanceHr
+                 + $recruitmentApproval + $onboardingTotal + $trainingHr
+-                + $documentExpiring + $disciplineTriage + $disciplineDecision
++                + $documentApproval + $documentExpiring + $disciplineTriage + $disciplineDecision
+                 + $separationHr + $separationFinalReview,
+             'leave_total' => $leaveTotal,
+             'leave_supervisor' => $leaveSupervisor,
+diff --git a/app/Support/RecruitmentAccess.php b/app/Support/RecruitmentAccess.php
+index 15aa1d69617524c1d2e47001f2f21d7b56c976ab..736f1d0a91637376d581a49904fe08461a6d29e2 100644
+--- a/app/Support/RecruitmentAccess.php
++++ b/app/Support/RecruitmentAccess.php
+@@ -10,7 +10,10 @@ class RecruitmentAccess
+ {
+     public static function canAccessCandidate(User $user, RecruitmentCandidate $candidate): bool
+     {
+-        if ($user->hasPermission('recruitment.manage')) {
++        if (
++            $user->hasPermission('recruitment.manage')
++            || $user->hasPermission('recruitment.approve')
++        ) {
+             return true;
+         }
+ 
+diff --git a/database/factories/UserFactory.php b/database/factories/UserFactory.php
+index 07de00b4cdf189e456cef9bb22faf9d688e08224..b4f023dfc0887368193865e373b6082bbaa0e3cf 100644
+--- a/database/factories/UserFactory.php
++++ b/database/factories/UserFactory.php
+@@ -66,6 +66,13 @@ public function hrAdmin(): static
+         ]);
+     }
+ 
++    public function hrManager(): static
++    {
++        return $this->state(fn (array $attributes) => [
++            'role' => UserRole::HrManager,
++        ]);
++    }
++
+     public function supervisor(): static
+     {
+         return $this->state(fn (array $attributes) => [
+diff --git a/resources/js/lib/permissions.ts b/resources/js/lib/permissions.ts
+index 4cfd80df2c8a8c0a07702aefa27d93d6f6358594..73c576d05249ae1cd67dde84bbc2017cc7d33b72 100644
+--- a/resources/js/lib/permissions.ts
++++ b/resources/js/lib/permissions.ts
+@@ -2,9 +2,10 @@ import type { Auth, Permission, UserRole } from '@/types';
+ 
+ const roleLabels: Record<UserRole, string> = {
+     super_admin: 'Super Admin',
++    hr_manager: 'Pengurus HR',
+     hr_admin: 'HR Admin',
+     supervisor: 'Penyelia / Ketua Jabatan',
+-    viewer: 'Viewer / Manager',
++    viewer: 'Viewer / Pemerhati',
+     employee: 'Employee',
+ };
+ 
+diff --git a/resources/js/pages/ClaimRequests/Index.tsx b/resources/js/pages/ClaimRequests/Index.tsx
+index d96026a86094bb34720d0c794799422d7133071a..ac9f3c1e22de824038d1973af1ca80dd3149006a 100644
+--- a/resources/js/pages/ClaimRequests/Index.tsx
++++ b/resources/js/pages/ClaimRequests/Index.tsx
+@@ -90,7 +90,11 @@ type Props = {
+         approved_amount: number;
+     }[];
+     payrollPeriods: { id: number; period: string; label: string }[];
+-    permissions: { can_supervise: boolean; can_manage: boolean };
++    permissions: {
++        can_supervise: boolean;
++        can_manage: boolean;
++        can_approve: boolean;
++    };
+ };
+ 
+ function money(value: number): string {
+@@ -323,7 +327,7 @@ export default function Index({
+                             Permohonan Tuntutan
+                         </h1>
+                         <p className="text-sm text-muted-foreground">
+-                            Kelulusan Penyelia → HR/Kewangan dan penjadualan
++                            Kelulusan Penyelia → Pengurus HR dan penjadualan
+                             bayaran melalui payroll.
+                         </p>
+                     </div>
+@@ -341,7 +345,7 @@ export default function Index({
+                     {[
+                         ['Jumlah', statistics.total],
+                         ['Menunggu Penyelia', statistics.pending_supervisor],
+-                        ['Menunggu HR/Kewangan', statistics.pending_finance],
++                        ['Menunggu Pengurus HR', statistics.pending_finance],
+                         ['Diluluskan', statistics.approved],
+                         ['Amaun Diluluskan', money(statistics.approved_amount)],
+                         [
+@@ -611,7 +615,7 @@ export default function Index({
+ 
+                                     {claim.status === 'pending' &&
+                                         claim.approval_stage === 'finance' &&
+-                                        permissions.can_manage && (
++                                        permissions.can_approve && (
+                                             <HrReview
+                                                 claim={claim}
+                                                 payrollPeriods={payrollPeriods}
+@@ -619,19 +623,23 @@ export default function Index({
+                                         )}
+ 
+                                     {claim.status === 'approved' &&
+-                                        permissions.can_manage && (
++                                        (permissions.can_manage ||
++                                            permissions.can_approve) && (
+                                             <div>
+-                                                <PayrollSchedule
+-                                                    claim={claim}
+-                                                    payrollPeriods={
+-                                                        payrollPeriods
+-                                                    }
+-                                                />
+-                                                {!claim.payroll_status ||
+-                                                claim.payroll_status ===
+-                                                    'scheduled' ||
+-                                                claim.payroll_status ===
+-                                                    'draft' ? (
++                                                {permissions.can_manage && (
++                                                    <PayrollSchedule
++                                                        claim={claim}
++                                                        payrollPeriods={
++                                                            payrollPeriods
++                                                        }
++                                                    />
++                                                )}
++                                                {permissions.can_approve &&
++                                                (!claim.payroll_status ||
++                                                    claim.payroll_status ===
++                                                        'scheduled' ||
++                                                    claim.payroll_status ===
++                                                        'draft') ? (
+                                                     <Button
+                                                         className="mt-2"
+                                                         size="sm"
+diff --git a/resources/js/pages/LeaveRequests/Index.tsx b/resources/js/pages/LeaveRequests/Index.tsx
+index f3011482c1b097717a93ea9441fbd7e68a620c47..17a683675850fa426c7a55e768520783026aec95 100644
+--- a/resources/js/pages/LeaveRequests/Index.tsx
++++ b/resources/js/pages/LeaveRequests/Index.tsx
+@@ -135,6 +135,7 @@ type LeaveRequestProps = {
+     permissions: {
+         can_supervise: boolean;
+         can_manage: boolean;
++        can_approve: boolean;
+     };
+ };
+ 
+@@ -262,7 +263,7 @@ function ReviewDialog({
+                             <SelectContent>
+                                 <SelectItem value="approved">
+                                     {mode === 'supervisor'
+-                                        ? 'Sokong dan hantar kepada HR'
++                                        ? 'Sokong dan hantar kepada Pengurus HR'
+                                         : 'Luluskan'}
+                                 </SelectItem>
+                                 <SelectItem value="rejected">Tolak</SelectItem>
+@@ -519,8 +520,8 @@ export default function LeaveRequests({
+                             Pengurusan Permohonan Cuti
+                         </h1>
+                         <p className="text-sm text-muted-foreground">
+-                            Semakan penyelia, kelulusan HR, kalendar dan laporan
+-                            dalam satu aliran.
++                            Semakan penyelia, kelulusan Pengurus HR, kalendar
++                            dan laporan dalam satu aliran.
+                         </p>
+                     </div>
+                     <Button asChild variant="outline">
+@@ -535,7 +536,7 @@ export default function LeaveRequests({
+                     {[
+                         ['Jumlah', statistics.total],
+                         ['Menunggu Penyelia', statistics.pending_supervisor],
+-                        ['Menunggu HR', statistics.pending_hr],
++                        ['Menunggu Pengurus HR', statistics.pending_hr],
+                         ['Diluluskan', statistics.approved],
+                         ['Ditolak', statistics.rejected],
+                     ].map(([label, value]) => (
+@@ -850,7 +851,7 @@ export default function LeaveRequests({
+                                                         mode="supervisor"
+                                                     />
+                                                 )}
+-                                            {permissions.can_manage &&
++                                            {permissions.can_approve &&
+                                                 request.status === 'pending' &&
+                                                 request.approval_stage ===
+                                                     'hr' && (
+@@ -859,7 +860,7 @@ export default function LeaveRequests({
+                                                         mode="hr"
+                                                     />
+                                                 )}
+-                                            {permissions.can_manage &&
++                                            {permissions.can_approve &&
+                                                 request.status ===
+                                                     'approved' && (
+                                                     <CancellationDialog
+@@ -908,7 +909,7 @@ export default function LeaveRequests({
+                     </Card>
+                 )}
+ 
+-                {permissions.can_manage && (
++                {permissions.can_approve && (
+                     <Card className="border-primary/20 bg-primary/5">
+                         <CardContent className="flex items-start gap-3 pt-6">
+                             <ShieldCheck className="mt-0.5 size-5 text-primary" />
+diff --git a/resources/js/pages/Onboarding/Index.tsx b/resources/js/pages/Onboarding/Index.tsx
+index 4642ab3910729e4f1c6d2d0f6f2ddb45055f818f..18a04567c4990a8ba92a5756d2a8344599471304 100644
+--- a/resources/js/pages/Onboarding/Index.tsx
++++ b/resources/js/pages/Onboarding/Index.tsx
+@@ -143,7 +143,7 @@ type Props = {
+         activation_date: string;
+         account_status: string;
+     } | null;
+-    permissions: { can_manage: boolean };
++    permissions: { can_manage: boolean; can_approve: boolean };
+ };
+ 
+ const statusLabel: Record<string, string> = {
+@@ -998,7 +998,15 @@ function TaskDialog({
+     );
+ }
+ 
+-function CaseActions({ item }: { item: OnboardingCase }) {
++function CaseActions({
++    item,
++    canManage,
++    canApprove,
++}: {
++    item: OnboardingCase;
++    canManage: boolean;
++    canApprove: boolean;
++}) {
+     const run = (action: string) => {
+         const notes = ['cancel', 'reopen'].includes(action)
+             ? window.prompt('Catatan:')
+@@ -1017,19 +1025,19 @@ function CaseActions({ item }: { item: OnboardingCase }) {
+ 
+     return (
+         <div className="flex flex-wrap gap-1">
+-            {item.status === 'pending' && (
++            {canManage && item.status === 'pending' && (
+                 <Button size="sm" onClick={() => run('start')}>
+                     <Play />
+                     Mula
+                 </Button>
+             )}
+-            {item.status === 'active' && (
++            {canApprove && item.status === 'active' && (
+                 <Button size="sm" onClick={() => run('complete')}>
+                     <CheckCircle2 />
+                     Lengkapkan
+                 </Button>
+             )}
+-            {['pending', 'active'].includes(item.status) && (
++            {canManage && ['pending', 'active'].includes(item.status) && (
+                 <Button
+                     size="sm"
+                     variant="outline"
+@@ -1039,7 +1047,7 @@ function CaseActions({ item }: { item: OnboardingCase }) {
+                     Batal
+                 </Button>
+             )}
+-            {item.status === 'cancelled' && (
++            {canManage && item.status === 'cancelled' && (
+                 <Button
+                     size="sm"
+                     variant="outline"
+@@ -1233,17 +1241,21 @@ export default function OnboardingIndex({
+                                                     Profil Calon
+                                                 </Link>
+                                             </Button>
+-                                            {permissions.can_manage && (
++                                            {(permissions.can_manage ||
++                                                permissions.can_approve) && (
+                                                 <>
+-                                                    <CaseSettingsDialog
+-                                                        item={item}
+-                                                        users={users}
+-                                                    />
++                                                    {permissions.can_manage && (
++                                                        <CaseSettingsDialog
++                                                            item={item}
++                                                            users={users}
++                                                        />
++                                                    )}
+                                                     {!item.employee_record_id &&
+                                                         !item.legacy_employee_id &&
+                                                         !item.employee_user_id &&
+                                                         item.offer?.status ===
+-                                                            'accepted' && (
++                                                            'accepted' &&
++                                                        permissions.can_approve && (
+                                                             <RegisterEmployeeDialog
+                                                                 item={item}
+                                                                 users={users}
+@@ -1254,7 +1266,8 @@ export default function OnboardingIndex({
+                                                         )}
+                                                     {!item.employee_record_id &&
+                                                         !item.legacy_employee_id &&
+-                                                        !item.employee_user_id && (
++                                                        !item.employee_user_id &&
++                                                        permissions.can_manage && (
+                                                             <LinkEmployeeDialog
+                                                                 item={item}
+                                                                 employees={
+@@ -1276,12 +1289,21 @@ export default function OnboardingIndex({
+                                                             'active',
+                                                         ].includes(
+                                                             item.status,
+-                                                        ) && (
++                                                        ) &&
++                                                        permissions.can_manage && (
+                                                             <UnlinkEmployeeDialog
+                                                                 item={item}
+                                                             />
+                                                         )}
+-                                                    <CaseActions item={item} />
++                                                    <CaseActions
++                                                        item={item}
++                                                        canManage={
++                                                            permissions.can_manage
++                                                        }
++                                                        canApprove={
++                                                            permissions.can_approve
++                                                        }
++                                                    />
+                                                 </>
+                                             )}
+                                         </div>
+diff --git a/resources/js/pages/OvertimeRequests/Index.tsx b/resources/js/pages/OvertimeRequests/Index.tsx
+index f738f9c5833a64d8bd4ce538f23a79524df84210..16b49192276933f08820cad3be1e6fe199d1b39a 100644
+--- a/resources/js/pages/OvertimeRequests/Index.tsx
++++ b/resources/js/pages/OvertimeRequests/Index.tsx
+@@ -122,6 +122,7 @@ type Props = {
+     permissions: {
+         can_supervise: boolean;
+         can_manage: boolean;
++        can_approve: boolean;
+     };
+ };
+ 
+@@ -250,7 +251,7 @@ function ReviewDialog({
+                             <SelectContent>
+                                 <SelectItem value="approved">
+                                     {mode === 'supervisor'
+-                                        ? 'Sokong dan hantar kepada HR'
++                                        ? 'Sokong dan hantar kepada Pengurus HR'
+                                         : 'Luluskan'}
+                                 </SelectItem>
+                                 <SelectItem value="rejected">Tolak</SelectItem>
+@@ -452,7 +453,7 @@ export default function OvertimeRequests({
+                             value: statistics.pending_supervisor,
+                         },
+                         {
+-                            label: 'Menunggu HR',
++                            label: 'Menunggu Pengurus HR',
+                             value: statistics.pending_hr,
+                         },
+                         {
+@@ -579,7 +580,7 @@ export default function OvertimeRequests({
+                                         request.status === 'pending' &&
+                                         request.approval_stage === 'supervisor';
+                                     const canHrReview =
+-                                        permissions.can_manage &&
++                                        permissions.can_approve &&
+                                         request.status === 'pending' &&
+                                         request.approval_stage === 'hr';
+ 
+@@ -711,7 +712,7 @@ export default function OvertimeRequests({
+                                                             mode="hr"
+                                                         />
+                                                     )}
+-                                                    {permissions.can_manage &&
++                                                    {permissions.can_approve &&
+                                                         request.status ===
+                                                             'approved' && (
+                                                             <CancellationDialog
+diff --git a/resources/js/pages/Recruitment/Index.tsx b/resources/js/pages/Recruitment/Index.tsx
+index c34ad1f3fbca2a23426c92910a22deb542ac3d9e..b86671fefc041dfe7ec977e07bbdb5f253d4be1f 100644
+--- a/resources/js/pages/Recruitment/Index.tsx
++++ b/resources/js/pages/Recruitment/Index.tsx
+@@ -765,9 +765,11 @@ function CandidateDialog({
+ 
+ function RequisitionActions({
+     requisition,
++    canManage,
+     canApprove,
+ }: {
+     requisition: Requisition;
++    canManage: boolean;
+     canApprove: boolean;
+ }) {
+     const act = (action: string) => {
+@@ -790,7 +792,7 @@ function RequisitionActions({
+     };
+     const actions: { action: string; label: string; icon: typeof Send }[] = [];
+ 
+-    if (requisition.status === 'draft') {
++    if (requisition.status === 'draft' && canManage) {
+         actions.push({ action: 'submit', label: 'Hantar', icon: Send });
+     }
+ 
+@@ -807,16 +809,16 @@ function RequisitionActions({
+         });
+     }
+ 
+-    if (requisition.status === 'approved') {
++    if (requisition.status === 'approved' && canManage) {
+         actions.push({ action: 'publish', label: 'Buka', icon: Send });
+     }
+ 
+-    if (requisition.status === 'published') {
++    if (requisition.status === 'published' && canManage) {
+         actions.push({ action: 'hold', label: 'Tangguh', icon: PauseCircle });
+         actions.push({ action: 'close', label: 'Tutup', icon: XCircle });
+     }
+ 
+-    if (requisition.status === 'on_hold') {
++    if (requisition.status === 'on_hold' && canManage) {
+         actions.push({ action: 'resume', label: 'Buka Semula', icon: Send });
+         actions.push({ action: 'close', label: 'Tutup', icon: XCircle });
+     }
+@@ -1030,7 +1032,8 @@ export default function RecruitmentIndex({
+                                     <TableHead>Jenis</TableHead>
+                                     <TableHead>Posisi / Calon</TableHead>
+                                     <TableHead>Status</TableHead>
+-                                    {permissions.can_manage && (
++                                    {(permissions.can_manage ||
++                                        permissions.can_approve) && (
+                                         <TableHead>Tindakan</TableHead>
+                                     )}
+                                 </TableRow>
+@@ -1096,32 +1099,39 @@ export default function RecruitmentIndex({
+                                                     }
+                                                 </Badge>
+                                             </TableCell>
+-                                            {permissions.can_manage && (
++                                            {(permissions.can_manage ||
++                                                permissions.can_approve) && (
+                                                 <TableCell>
+                                                     <div className="flex flex-wrap gap-1">
+-                                                        {[
+-                                                            'draft',
+-                                                            'approved',
+-                                                        ].includes(
+-                                                            requisition.status,
+-                                                        ) && (
+-                                                            <RequisitionDialog
+-                                                                requisition={
+-                                                                    requisition
+-                                                                }
+-                                                                departments={
+-                                                                    departments
+-                                                                }
+-                                                                positionNames={
+-                                                                    positionNames
+-                                                                }
+-                                                                users={users}
+-                                                            />
+-                                                        )}
++                                                        {permissions.can_manage &&
++                                                            [
++                                                                'draft',
++                                                                'approved',
++                                                            ].includes(
++                                                                requisition.status,
++                                                            ) && (
++                                                                <RequisitionDialog
++                                                                    requisition={
++                                                                        requisition
++                                                                    }
++                                                                    departments={
++                                                                        departments
++                                                                    }
++                                                                    positionNames={
++                                                                        positionNames
++                                                                    }
++                                                                    users={
++                                                                        users
++                                                                    }
++                                                                />
++                                                            )}
+                                                         <RequisitionActions
+                                                             requisition={
+                                                                 requisition
+                                                             }
++                                                            canManage={
++                                                                permissions.can_manage
++                                                            }
+                                                             canApprove={
+                                                                 permissions.can_approve
+                                                             }
+diff --git a/resources/js/pages/Recruitment/Show.tsx b/resources/js/pages/Recruitment/Show.tsx
+index d1ebcfcea606fa4c3b678cbcb5bdf9da5ac7b2a3..3d60f0b612e0bfe7e6857f059e13912bfae837d7 100644
+--- a/resources/js/pages/Recruitment/Show.tsx
++++ b/resources/js/pages/Recruitment/Show.tsx
+@@ -1072,11 +1072,13 @@ function OfferDialog({ candidate }: { candidate: Candidate }) {
+ function OfferActions({
+     candidate,
+     offer,
++    canManage,
+     canApprove,
+     templates,
+ }: {
+     candidate: Candidate;
+     offer: Candidate['offers'][number];
++    canManage: boolean;
+     canApprove: boolean;
+     templates: Props['onboardingTemplates'];
+ }) {
+@@ -1114,7 +1116,7 @@ function OfferActions({
+ 
+     return (
+         <div className="flex flex-wrap gap-1">
+-            {offer.status === 'draft' && (
++            {offer.status === 'draft' && canManage && (
+                 <Button
+                     size="sm"
+                     variant="outline"
+@@ -1140,13 +1142,13 @@ function OfferActions({
+                     </Button>
+                 </>
+             )}
+-            {offer.status === 'approved' && (
++            {offer.status === 'approved' && canManage && (
+                 <Button size="sm" onClick={() => run('send')}>
+                     <Send />
+                     Rekod Dihantar
+                 </Button>
+             )}
+-            {offer.status === 'sent' && (
++            {offer.status === 'sent' && canManage && (
+                 <>
+                     <Button size="sm" onClick={() => run('accept')}>
+                         <CheckCircle2 />
+@@ -1619,12 +1621,16 @@ export default function RecruitmentShow({
+                                                         </Badge>
+                                                     </TableCell>
+                                                     <TableCell>
+-                                                        {permissions.can_manage && (
++                                                        {(permissions.can_manage ||
++                                                            permissions.can_approve) && (
+                                                             <OfferActions
+                                                                 candidate={
+                                                                     candidate
+                                                                 }
+                                                                 offer={offer}
++                                                                canManage={
++                                                                    permissions.can_manage
++                                                                }
+                                                                 canApprove={
+                                                                     permissions.can_approve
+                                                                 }
+@@ -1746,9 +1752,10 @@ export default function RecruitmentShow({
+                                             </p>
+                                         ) : (
+                                             <p className="text-muted-foreground">
+-                                                Menunggu HR menggunakan tindakan
+-                                                “Sahkan & Daftar sebagai
+-                                                Pekerja” di Pusat Onboarding.
++                                                Menunggu Pengurus HR menggunakan
++                                                tindakan “Sahkan & Daftar
++                                                sebagai Pekerja” di Pusat
++                                                Onboarding.
+                                             </p>
+                                         )}
+                                     </div>
+diff --git a/resources/js/pages/Rosters/Index.tsx b/resources/js/pages/Rosters/Index.tsx
+index bc6c542b5e3ff38663b4a0d55e883ec7d7e113d5..4f421e3f12e117798cc803e6cddbc0226abf9f32 100644
+--- a/resources/js/pages/Rosters/Index.tsx
++++ b/resources/js/pages/Rosters/Index.tsx
+@@ -717,7 +717,7 @@ export default function RosterIndex({
+                     </Button>
+                 </form>
+ 
+-                {pendingSwaps.length > 0 && (
++                {permissions.can_supervise && pendingSwaps.length > 0 && (
+                     <Card className="border-amber-500/30">
+                         <CardHeader>
+                             <CardTitle>
+diff --git a/resources/js/pages/Separations/Index.tsx b/resources/js/pages/Separations/Index.tsx
+index 072d962f2dde77bcddfb2b50715d9a00bb2f28e4..13d560b9b0e169070840799d50e8df7029ac8512 100644
+--- a/resources/js/pages/Separations/Index.tsx
++++ b/resources/js/pages/Separations/Index.tsx
+@@ -652,7 +652,9 @@ function HrApproval({ separationCase }: { separationCase: SeparationCase }) {
+     return (
+         <Card>
+             <CardHeader>
+-                <CardTitle className="text-base">Kelulusan HR</CardTitle>
++                <CardTitle className="text-base">
++                    Kelulusan Pengurus HR
++                </CardTitle>
+                 <CardDescription>
+                     Kelulusan akan menjana checklist clearance secara automatik.
+                 </CardDescription>
+@@ -1556,13 +1558,15 @@ function SettlementForm({
+ function FinalActions({
+     separationCase,
+     canManage,
++    canApprove,
+ }: {
+     separationCase: SeparationCase;
+     canManage: boolean;
++    canApprove: boolean;
+ }) {
+     const form = useForm({ eligible_for_rehire: true, closure_notes: '' });
+ 
+-    if (!canManage) {
++    if (!canManage && !canApprove) {
+         return null;
+     }
+ 
+@@ -1574,38 +1578,40 @@ function FinalActions({
+                 </CardTitle>
+             </CardHeader>
+             <CardContent className="space-y-4">
+-                <div className="flex flex-wrap gap-2">
+-                    <Button
+-                        variant="outline"
+-                        onClick={() =>
+-                            router.post(
+-                                `/berhenti-clearance/${separationCase.id}/dokumen`,
+-                                { kind: 'acceptance' },
+-                            )
+-                        }
+-                    >
+-                        <FilePlus2 /> Surat Penerimaan / Penamatan
+-                    </Button>
+-                    {separationCase.status === 'completed' && (
++                {canManage && (
++                    <div className="flex flex-wrap gap-2">
+                         <Button
+                             variant="outline"
+                             onClick={() =>
+                                 router.post(
+                                     `/berhenti-clearance/${separationCase.id}/dokumen`,
+-                                    { kind: 'clearance' },
++                                    { kind: 'acceptance' },
+                                 )
+                             }
+                         >
+-                            <FilePlus2 /> Surat Selesai Clearance
+-                        </Button>
+-                    )}
+-                    {(separationCase.acceptance_document ||
+-                        separationCase.clearance_document) && (
+-                        <Button variant="outline" asChild>
+-                            <Link href="/dokumen-hr">Buka Dokumen HR</Link>
++                            <FilePlus2 /> Surat Penerimaan / Penamatan
+                         </Button>
+-                    )}
+-                </div>
++                        {separationCase.status === 'completed' && (
++                            <Button
++                                variant="outline"
++                                onClick={() =>
++                                    router.post(
++                                        `/berhenti-clearance/${separationCase.id}/dokumen`,
++                                        { kind: 'clearance' },
++                                    )
++                                }
++                            >
++                                <FilePlus2 /> Surat Selesai Clearance
++                            </Button>
++                        )}
++                        {(separationCase.acceptance_document ||
++                            separationCase.clearance_document) && (
++                            <Button variant="outline" asChild>
++                                <Link href="/dokumen-hr">Buka Dokumen HR</Link>
++                            </Button>
++                        )}
++                    </div>
++                )}
+                 {separationCase.completion_blockers.length > 0 && (
+                     <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                         <div className="font-medium">Belum boleh ditutup:</div>
+@@ -1618,7 +1624,7 @@ function FinalActions({
+                         </ul>
+                     </div>
+                 )}
+-                {separationCase.status !== 'completed' && (
++                {canApprove && separationCase.status !== 'completed' && (
+                     <form
+                         className="grid gap-3 md:grid-cols-2"
+                         onSubmit={(event) => {
+@@ -1873,6 +1879,7 @@ function CaseDetail({
+                     <FinalActions
+                         separationCase={separationCase}
+                         canManage={permissions.manage}
++                        canApprove={permissions.approve}
+                     />
+                 </>
+             )}
+diff --git a/resources/js/pages/Training/Index.tsx b/resources/js/pages/Training/Index.tsx
+index d05002fb044d09823a48421d350c8113db8d6068..1e25d5b997450db93f66b5d6c79b249b09655066 100644
+--- a/resources/js/pages/Training/Index.tsx
++++ b/resources/js/pages/Training/Index.tsx
+@@ -167,6 +167,7 @@ type Props = {
+     }[];
+     permissions: {
+         can_manage: boolean;
++        can_approve: boolean;
+         can_supervise: boolean;
+         can_assess: boolean;
+     };
+@@ -1314,7 +1315,7 @@ export default function TrainingIndex({
+                                             )}
+                                         {training.status === 'pending' &&
+                                             training.approval_stage === 'hr' &&
+-                                            permissions.can_manage && (
++                                            permissions.can_approve && (
+                                                 <ReviewDialog
+                                                     training={training}
+                                                     stage="hr"
+diff --git a/resources/js/pages/users/import-employees.tsx b/resources/js/pages/users/import-employees.tsx
+index 628fb2f0ca14c530cddf84275538c555e77dfea5..f93d8ff57e6ddd018bb7715a11b4bfee2b68fa73 100644
+--- a/resources/js/pages/users/import-employees.tsx
++++ b/resources/js/pages/users/import-employees.tsx
+@@ -111,9 +111,10 @@ type ImportForm = {
+ 
+ const roleLabels: Record<UserRole, string> = {
+     super_admin: 'Super Admin',
++    hr_manager: 'Pengurus HR',
+     hr_admin: 'HR Admin',
+     supervisor: 'Penyelia / Ketua Jabatan',
+-    viewer: 'Viewer / Manager',
++    viewer: 'Viewer / Pemerhati',
+     employee: 'Employee',
+ };
+ 
+diff --git a/resources/js/pages/users/index.tsx b/resources/js/pages/users/index.tsx
+index 9c1c53af9b76c61fbfa726761c8cc17dc9980352..19d35ac4c19eefd42c58e00c67aff80c17e22c2d 100644
+--- a/resources/js/pages/users/index.tsx
++++ b/resources/js/pages/users/index.tsx
+@@ -92,12 +92,14 @@ const permissionLabels: Record<Permission, string> = {
+     'employee.profile.update': 'Kemas Kini Profil Sendiri',
+     'leave.view': 'Cuti Asal',
+     'leave.manage': 'Urus Permohonan Cuti',
++    'leave.approve': 'Kelulusan Akhir Cuti',
+     'leave.supervise': 'Semakan Penyelia',
+     'leave.settings': 'Tetapan Cuti',
+     'leave.self': 'Cuti Sendiri',
+     'leave.apply': 'Mohon Cuti',
+     'overtime.view': 'OT Asal',
+     'overtime.manage': 'Urus Permohonan OT',
++    'overtime.approve': 'Kelulusan Akhir OT',
+     'overtime.supervise': 'Semakan Penyelia OT',
+     'overtime.settings': 'Tetapan OT',
+     'overtime.self': 'OT Sendiri',
+@@ -123,9 +125,11 @@ const permissionLabels: Record<Permission, string> = {
+     'recruitment.settings': 'Tetapan Pengambilan',
+     'onboarding.view': 'Onboarding',
+     'onboarding.manage': 'Urus Onboarding',
++    'onboarding.approve': 'Daftar & Selesaikan Onboarding',
+     'onboarding.self': 'Onboarding Sendiri',
+     'training.view': 'Latihan & Kompetensi',
+     'training.manage': 'Urus Latihan',
++    'training.approve': 'Kelulusan Akhir Latihan',
+     'training.supervise': 'Semakan Penyelia Latihan',
+     'training.settings': 'Tetapan Latihan',
+     'training.self': 'Latihan Sendiri',
+@@ -155,6 +159,7 @@ const permissionLabels: Record<Permission, string> = {
+     'separation.apply': 'Hantar Notis Berhenti',
+     'claims.view': 'Tuntutan',
+     'claims.manage': 'Urus Tuntutan',
++    'claims.approve': 'Kelulusan Akhir Tuntutan',
+     'claims.supervise': 'Semakan Penyelia Tuntutan',
+     'claims.settings': 'Tetapan Tuntutan',
+     'claims.self': 'Tuntutan Sendiri',
+@@ -172,6 +177,8 @@ const permissionLabels: Record<Permission, string> = {
+ const roleStyles: Record<UserRole, string> = {
+     super_admin:
+         'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
++    hr_manager:
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+     hr_admin:
+         'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+     supervisor:
+@@ -337,7 +344,9 @@ export default function UserManagement({
+                                 <div className="rounded-lg bg-primary/10 p-2.5 text-primary">
+                                     {role.value === 'super_admin' ? (
+                                         <ShieldCheck className="size-5" />
+-                                    ) : role.value === 'hr_admin' ? (
++                                    ) : ['hr_manager', 'hr_admin'].includes(
++                                          role.value,
++                                      ) ? (
+                                         <UserCog className="size-5" />
+                                     ) : (
+                                         <UsersRound className="size-5" />
+diff --git a/resources/js/pages/users/reset-passwords.tsx b/resources/js/pages/users/reset-passwords.tsx
+index 6824040c9fba01df75ee4e654a00e3ec1da856c4..0ae83941e9d06b9e0cc56adfa22416a9e5aa4929 100644
+--- a/resources/js/pages/users/reset-passwords.tsx
++++ b/resources/js/pages/users/reset-passwords.tsx
+@@ -69,6 +69,8 @@ type ResetForm = {
+ const roleStyles: Record<UserRole, string> = {
+     super_admin:
+         'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
++    hr_manager:
++        'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+     hr_admin:
+         'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+     supervisor:
+diff --git a/resources/js/types/auth.ts b/resources/js/types/auth.ts
+index bd397e23b294571f2806d988284edcbb436caf03..58bc159ae933560dd6d616a920bf1dfaec5d1f93 100644
+--- a/resources/js/types/auth.ts
++++ b/resources/js/types/auth.ts
+@@ -1,5 +1,10 @@
+ export type UserRole =
+-    'super_admin' | 'hr_admin' | 'supervisor' | 'viewer' | 'employee';
++    | 'super_admin'
++    | 'hr_manager'
++    | 'hr_admin'
++    | 'supervisor'
++    | 'viewer'
++    | 'employee';
+ 
+ export type Permission =
+     | 'dashboard.view'
+@@ -15,12 +20,14 @@ export type Permission =
+     | 'employee.profile.update'
+     | 'leave.view'
+     | 'leave.manage'
++    | 'leave.approve'
+     | 'leave.supervise'
+     | 'leave.settings'
+     | 'leave.self'
+     | 'leave.apply'
+     | 'overtime.view'
+     | 'overtime.manage'
++    | 'overtime.approve'
+     | 'overtime.supervise'
+     | 'overtime.settings'
+     | 'overtime.self'
+@@ -46,9 +53,11 @@ export type Permission =
+     | 'recruitment.settings'
+     | 'onboarding.view'
+     | 'onboarding.manage'
++    | 'onboarding.approve'
+     | 'onboarding.self'
+     | 'training.view'
+     | 'training.manage'
++    | 'training.approve'
+     | 'training.supervise'
+     | 'training.settings'
+     | 'training.self'
+@@ -78,6 +87,7 @@ export type Permission =
+     | 'separation.apply'
+     | 'claims.view'
+     | 'claims.manage'
++    | 'claims.approve'
+     | 'claims.supervise'
+     | 'claims.settings'
+     | 'claims.self'
+diff --git a/routes/web.php b/routes/web.php
+index ef03beccc1e30da0a4eac6bc8406301590268caa..4c6940c828b1f8606ebddbc0ea9a5ae85d39158a 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -359,11 +359,11 @@
+         ->whereNumber('leaveRequest')
+         ->name('leave-requests.supervisor-review');
+     Route::patch('permohonan-cuti/{leaveRequest}/semakan', [LeaveRequestController::class, 'review'])
+-        ->middleware('permission:leave.manage')
++        ->middleware('permission:leave.approve')
+         ->whereNumber('leaveRequest')
+         ->name('leave-requests.review');
+     Route::patch('permohonan-cuti/{leaveRequest}/batal-kelulusan', [LeaveRequestController::class, 'cancelApproved'])
+-        ->middleware('permission:leave.manage')
++        ->middleware('permission:leave.approve')
+         ->whereNumber('leaveRequest')
+         ->name('leave-requests.cancel-approved');
+     Route::get('kerja-lebih-masa', [MaklumatOtController::class, 'index'])
+@@ -378,11 +378,11 @@
+         ->whereNumber('overtimeRequest')
+         ->name('overtime-requests.supervisor-review');
+     Route::patch('permohonan-ot/{overtimeRequest}/semakan', [OvertimeRequestController::class, 'review'])
+-        ->middleware('permission:overtime.manage')
++        ->middleware('permission:overtime.approve')
+         ->whereNumber('overtimeRequest')
+         ->name('overtime-requests.review');
+     Route::patch('permohonan-ot/{overtimeRequest}/batal-kelulusan', [OvertimeRequestController::class, 'cancelApproved'])
+-        ->middleware('permission:overtime.manage')
++        ->middleware('permission:overtime.approve')
+         ->whereNumber('overtimeRequest')
+         ->name('overtime-requests.cancel-approved');
+     Route::get('jadual-roster', [RosterController::class, 'index'])
+@@ -407,7 +407,7 @@
+         ->whereNumber('period')
+         ->name('rosters.lock');
+     Route::patch('jadual-roster/pertukaran/{shiftSwapRequest}/semakan', [RosterController::class, 'reviewSwap'])
+-        ->middleware('permission:roster.view')
++        ->middleware('permission:roster.supervise')
+         ->whereNumber('shiftSwapRequest')
+         ->name('rosters.swaps.review');
+     Route::get('permohonan-tuntutan', [ClaimRequestController::class, 'index'])
+@@ -419,7 +419,7 @@
+         ->whereNumber('claimRequest')
+         ->name('claim-requests.supervisor-review');
+     Route::patch('permohonan-tuntutan/{claimRequest}/semakan', [ClaimRequestController::class, 'review'])
+-        ->middleware('permission:claims.manage')
++        ->middleware('permission:claims.approve')
+         ->whereNumber('claimRequest')
+         ->name('claim-requests.review');
+     Route::patch('permohonan-tuntutan/{claimRequest}/jadual-payroll', [ClaimRequestController::class, 'schedulePayroll'])
+@@ -427,7 +427,7 @@
+         ->whereNumber('claimRequest')
+         ->name('claim-requests.schedule-payroll');
+     Route::patch('permohonan-tuntutan/{claimRequest}/batal-kelulusan', [ClaimRequestController::class, 'cancelApproved'])
+-        ->middleware('permission:claims.manage')
++        ->middleware('permission:claims.approve')
+         ->whereNumber('claimRequest')
+         ->name('claim-requests.cancel-approved');
+     Route::get('permohonan-tuntutan/{claimRequest}/resit/{attachment}', [ClaimRequestController::class, 'downloadAttachment'])
+@@ -495,9 +495,6 @@
+         Route::put('pengambilan/kekosongan/{requisition}', [RecruitmentController::class, 'updateRequisition'])
+             ->whereNumber('requisition')
+             ->name('recruitment.requisitions.update');
+-        Route::patch('pengambilan/kekosongan/{requisition}/status', [RecruitmentController::class, 'changeRequisitionStatus'])
+-            ->whereNumber('requisition')
+-            ->name('recruitment.requisitions.status');
+         Route::post('pengambilan/calon', [RecruitmentController::class, 'storeCandidate'])
+             ->name('recruitment.candidates.store');
+         Route::put('pengambilan/calon/{candidate}', [RecruitmentController::class, 'updateCandidate'])
+@@ -521,10 +518,15 @@
+         Route::post('pengambilan/calon/{candidate}/tawaran', [RecruitmentController::class, 'storeOffer'])
+             ->whereNumber('candidate')
+             ->name('recruitment.offers.store');
+-        Route::patch('pengambilan/calon/{candidate}/tawaran/{offer}/status', [RecruitmentController::class, 'changeOfferStatus'])
+-            ->whereNumber(['candidate', 'offer'])
+-            ->name('recruitment.offers.status');
+     });
++    Route::patch('pengambilan/kekosongan/{requisition}/status', [RecruitmentController::class, 'changeRequisitionStatus'])
++        ->middleware('permission:recruitment.view')
++        ->whereNumber('requisition')
++        ->name('recruitment.requisitions.status');
++    Route::patch('pengambilan/calon/{candidate}/tawaran/{offer}/status', [RecruitmentController::class, 'changeOfferStatus'])
++        ->middleware('permission:recruitment.view')
++        ->whereNumber(['candidate', 'offer'])
++        ->name('recruitment.offers.status');
+     Route::get('pengambilan/calon/{candidate}/dokumen/{document}', [RecruitmentController::class, 'downloadDocument'])
+         ->middleware('permission:recruitment.view')
+         ->whereNumber(['candidate', 'document'])
+@@ -550,16 +552,18 @@
+         Route::delete('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'unlinkEmployee'])
+             ->whereNumber('onboardingCase')
+             ->name('onboarding.unlink-employee');
+-        Route::post('onboarding/{onboardingCase}/daftar-pekerja', [OnboardingController::class, 'registerEmployee'])
+-            ->whereNumber('onboardingCase')
+-            ->name('onboarding.register-employee');
+-        Route::patch('onboarding/{onboardingCase}/status', [OnboardingController::class, 'changeCaseStatus'])
+-            ->whereNumber('onboardingCase')
+-            ->name('onboarding.status');
+         Route::put('onboarding/{onboardingCase}/tugasan/{task}', [OnboardingController::class, 'updateTask'])
+             ->whereNumber(['onboardingCase', 'task'])
+             ->name('onboarding.tasks.update');
+     });
++    Route::post('onboarding/{onboardingCase}/daftar-pekerja', [OnboardingController::class, 'registerEmployee'])
++        ->middleware('permission:onboarding.approve')
++        ->whereNumber('onboardingCase')
++        ->name('onboarding.register-employee');
++    Route::patch('onboarding/{onboardingCase}/status', [OnboardingController::class, 'changeCaseStatus'])
++        ->middleware('permission:onboarding.view')
++        ->whereNumber('onboardingCase')
++        ->name('onboarding.status');
+ 
+     Route::get('latihan-kompetensi', [TrainingController::class, 'index'])
+         ->middleware('permission:training.view')
+@@ -574,9 +578,6 @@
+     Route::middleware('permission:training.manage')->group(function () {
+         Route::post('latihan-kompetensi/pencalonan', [TrainingController::class, 'nominate'])
+             ->name('training.nominate');
+-        Route::patch('latihan-kompetensi/{training}/semakan', [TrainingController::class, 'review'])
+-            ->whereNumber('training')
+-            ->name('training.review');
+         Route::put('latihan-kompetensi/{training}/penyelesaian', [TrainingController::class, 'recordCompletion'])
+             ->whereNumber('training')
+             ->name('training.completion');
+@@ -586,6 +587,10 @@
+             ->whereNumber('plan')
+             ->name('training.development-plans.update');
+     });
++    Route::patch('latihan-kompetensi/{training}/semakan', [TrainingController::class, 'review'])
++        ->middleware('permission:training.approve')
++        ->whereNumber('training')
++        ->name('training.review');
+     Route::post('latihan-kompetensi/penilaian-kompetensi', [TrainingController::class, 'saveCompetency'])
+         ->middleware('permission:competency.assess')
+         ->name('training.competencies.save');
+@@ -780,7 +785,7 @@
+         ->whereNumber('case')
+         ->name('separations.documents.store');
+     Route::patch('berhenti-clearance/{case}/selesai', [SeparationController::class, 'complete'])
+-        ->middleware('permission:separation.manage')
++        ->middleware('permission:separation.approve')
+         ->whereNumber('case')
+         ->name('separations.complete');
+     Route::get('payroll-asal', [MaklumatPayrollController::class, 'index'])
+diff --git a/tests/Feature/ClaimApprovalAlertsTest.php b/tests/Feature/ClaimApprovalAlertsTest.php
+index b8e6a938e2b5ed4194f4b8019ea85d79a6b3c235..ad713240afbe4b5e96139e8e838b7dc514a960d5 100644
+--- a/tests/Feature/ClaimApprovalAlertsTest.php
++++ b/tests/Feature/ClaimApprovalAlertsTest.php
+@@ -34,6 +34,7 @@ function createPendingClaimAlert(
+     $assignedSupervisor = User::factory()->supervisor()->create();
+     $otherSupervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $type = ClaimType::query()->where('code', 'TRAVEL')->firstOrFail();
+ 
+@@ -61,6 +62,13 @@ function createPendingClaimAlert(
+         'claim_finance' => 0,
+     ]);
+     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
++        'enabled' => true,
++        'total' => 0,
++        'claim_total' => 0,
++        'claim_supervisor' => 0,
++        'claim_finance' => 0,
++    ]);
++    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+         'enabled' => true,
+         'total' => 1,
+         'claim_total' => 1,
+@@ -69,10 +77,10 @@ function createPendingClaimAlert(
+     ]);
+     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
+         'enabled' => true,
+-        'total' => 3,
+-        'claim_total' => 3,
+-        'claim_supervisor' => 2,
+-        'claim_finance' => 1,
++        'total' => 0,
++        'claim_total' => 0,
++        'claim_supervisor' => 0,
++        'claim_finance' => 0,
+     ]);
+     expect($alerts->summarizeFor($employee))->toMatchArray([
+         'enabled' => false,
+diff --git a/tests/Feature/CompleteClaimManagementTest.php b/tests/Feature/CompleteClaimManagementTest.php
+index 89178361f2100179ebde7c56e5278a7fc8bb414e..c6fb3c229b023af5cf071bfd21f53a34a6f9c8ae 100644
+--- a/tests/Feature/CompleteClaimManagementTest.php
++++ b/tests/Feature/CompleteClaimManagementTest.php
+@@ -128,7 +128,7 @@ function claimPayload(ClaimType $type, string $receipt = 'RCPT-1001'): array
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
+-    $approver = User::factory()->superAdmin()->create();
++    $approver = User::factory()->hrManager()->create();
+     $employeeId = createClaimEmployee($employee);
+     $type = ClaimType::query()->where('code', 'MEDICAL')->firstOrFail();
+     ClaimApprovalAssignment::query()->create([
+@@ -155,7 +155,7 @@ function claimPayload(ClaimType $type, string $receipt = 'RCPT-1001'): array
+         ->assertSessionDoesntHaveErrors();
+     expect($claim->fresh()->approval_stage)->toBe('finance');
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($approver)
+         ->patch(route('claim-requests.review', $claim), [
+             'status' => 'approved',
+             'approved_amount' => 200,
+diff --git a/tests/Feature/CompleteLeaveManagementTest.php b/tests/Feature/CompleteLeaveManagementTest.php
+index e1a6b1445fa926bd517c1fea922dbef7bf2c0822..bbfe307e13135fe58afbc975065554b606158329 100644
+--- a/tests/Feature/CompleteLeaveManagementTest.php
++++ b/tests/Feature/CompleteLeaveManagementTest.php
+@@ -105,6 +105,7 @@ function linkCompleteLeaveEmployee(User $user, int $employeeId): void
+     $employeeUser = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $employeeId = createCompleteLeaveEmployee();
+     linkCompleteLeaveEmployee($employeeUser, $employeeId);
+     LeaveApprovalAssignment::query()->create([
+@@ -135,7 +136,7 @@ function linkCompleteLeaveEmployee(User $user, int $employeeId): void
+     expect($leave->approval_stage)->toBe('supervisor');
+     expect((float) $leave->requested_days)->toBe(3.0);
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($hrManager)
+         ->patch(route('leave-requests.review', $leave), [
+             'status' => 'approved',
+             'review_notes' => 'Cuba lulus terlalu awal.',
+@@ -152,7 +153,7 @@ function linkCompleteLeaveEmployee(User $user, int $employeeId): void
+ 
+     expect($leave->fresh()->approval_stage)->toBe('hr');
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($hrManager)
+         ->patch(route('leave-requests.review', $leave), [
+             'status' => 'approved',
+             'review_notes' => 'Diluluskan HR.',
+@@ -168,7 +169,7 @@ function linkCompleteLeaveEmployee(User $user, int $employeeId): void
+     ]);
+     expect((float) LeaveBalanceTransaction::query()->sum('days'))->toBe(-3.0);
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($hrManager)
+         ->patch(route('leave-requests.cancel-approved', $leave), [
+             'cancellation_notes' => 'Program organisasi dibatalkan.',
+         ])
+diff --git a/tests/Feature/CompleteOvertimeManagementTest.php b/tests/Feature/CompleteOvertimeManagementTest.php
+index bdaa15e503901b34e345b4c0911098942df132b6..4bc15b941f769fb10d34d55e2888340184fbd1fd 100644
+--- a/tests/Feature/CompleteOvertimeManagementTest.php
++++ b/tests/Feature/CompleteOvertimeManagementTest.php
+@@ -118,6 +118,7 @@ function createOvertimeEmployee(User $user, int $departmentId = 1): int
+     $employeeUser = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $employeeId = createOvertimeEmployee($employeeUser);
+     $link = EmployeeUserLink::query()
+         ->where('user_id', $employeeUser->getKey())
+@@ -168,7 +169,7 @@ function createOvertimeEmployee(User $user, int $departmentId = 1): int
+ 
+     expect($overtime->fresh()->approval_stage)->toBe('hr');
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($hrManager)
+         ->patch(route('overtime-requests.review', $overtime), [
+             'status' => 'approved',
+             'approved_minutes' => 90,
+diff --git a/tests/Feature/DisciplineComplaintManagementTest.php b/tests/Feature/DisciplineComplaintManagementTest.php
+index d4fe6432539a4929fbeda4f0195548aef309e8f7..b5eb08d3cbb2be43b3d3ad9c4ecfcbc5af3c3df7 100644
+--- a/tests/Feature/DisciplineComplaintManagementTest.php
++++ b/tests/Feature/DisciplineComplaintManagementTest.php
+@@ -98,8 +98,8 @@ function disciplineUsers(): array
+     ]);
+     $hr = User::factory()->hrAdmin()->create(['name' => 'HR Case Manager']);
+     $investigator = User::factory()->supervisor()->create(['name' => 'Pegawai Siasatan']);
+-    $decisionMaker = User::factory()->superAdmin()->create(['name' => 'Pelulus Tatatertib']);
+-    $appealReviewer = User::factory()->superAdmin()->create(['name' => 'Panel Rayuan']);
++    $decisionMaker = User::factory()->hrManager()->create(['name' => 'Pelulus Tatatertib']);
++    $appealReviewer = User::factory()->hrManager()->create(['name' => 'Panel Rayuan']);
+     $locationId = OfficeLocation::query()->value('id');
+     EmployeeUserLink::query()->create([
+         'user_id' => $complainant->getKey(),
+diff --git a/tests/Feature/EmployeeSelfServiceTest.php b/tests/Feature/EmployeeSelfServiceTest.php
+index 492c98e9d6488a0f85513a0a8a5cb3ab429a735d..2ba183a6b46bb1aadb8154a44fbbfa36c61d1d1f 100644
+--- a/tests/Feature/EmployeeSelfServiceTest.php
++++ b/tests/Feature/EmployeeSelfServiceTest.php
+@@ -328,7 +328,7 @@ function linkSelfServiceEmployee(User $user, int $employeeId): EmployeeUserLink
+     $this->assertDatabaseCount('employee_leave_requests', 1);
+ });
+ 
+-test('hr admin can approve leave while ordinary employee cannot access approval list', function () {
++test('hr manager can approve leave while ordinary employee cannot access approval list', function () {
+     $employeeUser = User::factory()->employee()->create();
+     $employeeId = createSelfServiceEmployee();
+     linkSelfServiceEmployee($employeeUser, $employeeId);
+@@ -345,6 +345,7 @@ function linkSelfServiceEmployee(User $user, int $employeeId): EmployeeUserLink
+         'submitted_at' => now(),
+     ]);
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+ 
+     $this->actingAs($employeeUser)
+         ->get(route('leave-requests.index'))
+@@ -354,7 +355,7 @@ function linkSelfServiceEmployee(User $user, int $employeeId): EmployeeUserLink
+         ->get(route('leave-requests.index'))
+         ->assertOk();
+ 
+-    $this->actingAs($hrAdmin)
++    $this->actingAs($hrManager)
+         ->patch(route('leave-requests.review', $leave), [
+             'status' => 'approved',
+             'review_notes' => 'Permohonan lengkap.',
+@@ -363,7 +364,7 @@ function linkSelfServiceEmployee(User $user, int $employeeId): EmployeeUserLink
+         ->assertSessionDoesntHaveErrors();
+ 
+     expect($leave->fresh()->status)->toBe('approved');
+-    expect($leave->fresh()->reviewed_by)->toBe($hrAdmin->getKey());
++    expect($leave->fresh()->reviewed_by)->toBe($hrManager->getKey());
+     $this->assertDatabaseHas('audit_logs', [
+         'action' => 'leave.approved',
+         'auditable_type' => 'employee_leave_requests',
+diff --git a/tests/Feature/HrDocumentManagementTest.php b/tests/Feature/HrDocumentManagementTest.php
+index 83cee4af32f72ab0a4305fc7773656320f5a8b6f..fdce5f484554f04bdb5d4f6f389a0bf4b84f0926 100644
+--- a/tests/Feature/HrDocumentManagementTest.php
++++ b/tests/Feature/HrDocumentManagementTest.php
+@@ -89,7 +89,7 @@
+         'email' => 'employee@ibco.test',
+     ]);
+     $hr = User::factory()->hrAdmin()->create();
+-    $approver = User::factory()->superAdmin()->create();
++    $approver = User::factory()->hrManager()->create();
+     EmployeeUserLink::query()->create([
+         'user_id' => $employee->getKey(),
+         'employee_id' => 100,
+@@ -248,7 +248,7 @@
+ 
+ test('hr cannot approve documents while the assigned approver can', function () {
+     $hr = User::factory()->hrAdmin()->create();
+-    $approver = User::factory()->supervisor()->create();
++    $approver = User::factory()->hrManager()->create();
+     $document = HrDocument::query()->create([
+         'template_name' => 'Surat Amaran',
+         'category' => 'warning',
+diff --git a/tests/Feature/LeaveApprovalAlertsTest.php b/tests/Feature/LeaveApprovalAlertsTest.php
+index 4dd4c613fa95d28f93ac99dea432cdfee537ddf3..4b18f58329aa8659c8e721c5cbb3f52f35b72cd2 100644
+--- a/tests/Feature/LeaveApprovalAlertsTest.php
++++ b/tests/Feature/LeaveApprovalAlertsTest.php
+@@ -38,6 +38,7 @@ function createPendingLeaveAlert(
+     $assignedSupervisor = User::factory()->supervisor()->create();
+     $otherSupervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $leaveType = LeaveType::query()->where('code', 'ANNUAL')->firstOrFail();
+ 
+@@ -72,6 +73,12 @@ function createPendingLeaveAlert(
+         'hr' => 0,
+     ]);
+     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
++        'enabled' => true,
++        'total' => 0,
++        'supervisor' => 0,
++        'hr' => 0,
++    ]);
++    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+         'enabled' => true,
+         'total' => 1,
+         'supervisor' => 0,
+@@ -79,9 +86,9 @@ function createPendingLeaveAlert(
+     ]);
+     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
+         'enabled' => true,
+-        'total' => 3,
+-        'supervisor' => 2,
+-        'hr' => 1,
++        'total' => 0,
++        'supervisor' => 0,
++        'hr' => 0,
+     ]);
+     expect($alerts->summarizeFor($employee))->toMatchArray([
+         'enabled' => false,
+diff --git a/tests/Feature/OvertimeApprovalAlertsTest.php b/tests/Feature/OvertimeApprovalAlertsTest.php
+index 3be462a357bf699a2b979f768b9668a5cefd1b5a..94c1b26d66078c38542953c41587e7bb5ef7b645 100644
+--- a/tests/Feature/OvertimeApprovalAlertsTest.php
++++ b/tests/Feature/OvertimeApprovalAlertsTest.php
+@@ -39,6 +39,7 @@ function createPendingOvertimeAlert(
+     $assignedSupervisor = User::factory()->supervisor()->create();
+     $otherSupervisor = User::factory()->supervisor()->create();
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $type = OvertimeType::query()->where('code', 'WEEKDAY')->firstOrFail();
+ 
+@@ -66,6 +67,13 @@ function createPendingOvertimeAlert(
+         'overtime_hr' => 0,
+     ]);
+     expect($alerts->summarizeFor($hrAdmin))->toMatchArray([
++        'enabled' => true,
++        'total' => 0,
++        'overtime_total' => 0,
++        'overtime_supervisor' => 0,
++        'overtime_hr' => 0,
++    ]);
++    expect($alerts->summarizeFor($hrManager))->toMatchArray([
+         'enabled' => true,
+         'total' => 1,
+         'overtime_total' => 1,
+@@ -74,10 +82,10 @@ function createPendingOvertimeAlert(
+     ]);
+     expect($alerts->summarizeFor($superAdmin))->toMatchArray([
+         'enabled' => true,
+-        'total' => 3,
+-        'overtime_total' => 3,
+-        'overtime_supervisor' => 2,
+-        'overtime_hr' => 1,
++        'total' => 0,
++        'overtime_total' => 0,
++        'overtime_supervisor' => 0,
++        'overtime_hr' => 0,
+     ]);
+     expect($alerts->summarizeFor($employee))->toMatchArray([
+         'enabled' => false,
+diff --git a/tests/Feature/PayrollCoreTest.php b/tests/Feature/PayrollCoreTest.php
+index 62d2f4697f84720ecaab4b8a15a2ea3dbedb614a..fde2ad594d4bb0f357376fe0aed178ae8d6b834a 100644
+--- a/tests/Feature/PayrollCoreTest.php
++++ b/tests/Feature/PayrollCoreTest.php
+@@ -115,7 +115,7 @@ function configurePayrollEmployee(int $employeeId, User $actor): void
+ 
+ test('payroll core calculates approved ot and unpaid leave then follows approval lock', function () {
+     $hrAdmin = User::factory()->hrAdmin()->create();
+-    $approver = User::factory()->superAdmin()->create();
++    $approver = User::factory()->hrManager()->create();
+     $employeeUser = User::factory()->employee()->create();
+     $employeeId = createPayrollEmployee();
+     configurePayrollEmployee($employeeId, $hrAdmin);
+diff --git a/tests/Feature/PerformanceManagementTest.php b/tests/Feature/PerformanceManagementTest.php
+index 776ac8226ccb1fdf9a4ae19bc113182d547e3fe4..708e99d54ff3ebba32dbd7222b810ad5903630dc 100644
+--- a/tests/Feature/PerformanceManagementTest.php
++++ b/tests/Feature/PerformanceManagementTest.php
+@@ -190,6 +190,7 @@ function createPerformanceCycleAndTemplate(User $admin): array
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $employeeId = createPerformanceEmployee($employee);
+     [$cycle] = createPerformanceCycleAndTemplate($hr);
+     PerformanceSupervisorAssignment::query()->create([
+@@ -274,7 +275,7 @@ function createPerformanceCycleAndTemplate(User $admin): array
+     expect((float) $review->fresh()->moderated_score)->toBe(4.6);
+     expect($review->fresh()->final_rating)->toBe('Sangat Cemerlang');
+ 
+-    $this->actingAs($hr)
++    $this->actingAs($hrManager)
+         ->patch(route('performance.finalize', $review))
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+diff --git a/tests/Feature/RecruitmentOnboardingTest.php b/tests/Feature/RecruitmentOnboardingTest.php
+index e5682dd3d32a754a2fab5b31c78411b991911ed5..6d1f2e8b1d73c1c60fabef354e0795eccb2b7b8c 100644
+--- a/tests/Feature/RecruitmentOnboardingTest.php
++++ b/tests/Feature/RecruitmentOnboardingTest.php
+@@ -83,7 +83,11 @@
+     DB::disconnect('ibco');
+ });
+ 
+-function createPublishedRequisition(User $hr, User $manager): RecruitmentRequisition
++function createPublishedRequisition(
++    User $hr,
++    User $manager,
++    User $hrManager,
++): RecruitmentRequisition
+ {
+     test()->actingAs($hr)
+         ->post(route('recruitment.requisitions.store'), [
+@@ -104,7 +108,7 @@ function createPublishedRequisition(User $hr, User $manager): RecruitmentRequisi
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+     $requisition = RecruitmentRequisition::query()->firstOrFail();
+-    test()->actingAs($hr)
++    test()->actingAs($hrManager)
+         ->patch(route('recruitment.requisitions.status', $requisition), [
+             'action' => 'submit',
+         ])
+@@ -161,11 +165,12 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('complete recruitment offer and onboarding workflow uses legacy database as read only', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+     $employeeUser = User::factory()->employee()->create([
+         'email' => 'new.employee@example.com',
+     ]);
+-    $requisition = createPublishedRequisition($hr, $manager);
++    $requisition = createPublishedRequisition($hr, $manager, $hrManager);
+     $template = createOnboardingTemplate($hr);
+     $legacyEmployeeId = DB::connection('ibco')
+         ->table('maklumatpekerja')
+@@ -262,7 +267,8 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+         ->assertSessionDoesntHaveErrors();
+     $offer = RecruitmentOffer::query()->firstOrFail();
+     foreach (['submit', 'approve', 'send'] as $action) {
+-        $this->actingAs($hr)
++        $actor = $action === 'approve' ? $hrManager : $hr;
++        $this->actingAs($actor)
+             ->patch(route('recruitment.offers.status', [$candidate, $offer]), [
+                 'action' => $action,
+                 'notes' => $action === 'approve'
+@@ -321,7 +327,7 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+         ])
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+-    $this->actingAs($hr)
++    $this->actingAs($hrManager)
+         ->patch(route('onboarding.status', $onboarding), ['action' => 'complete'])
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+@@ -337,12 +343,13 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('HR can correct a wrong legacy onboarding link without deleting source records', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+     $employeeUser = User::factory()->employee()->create([
+         'name' => 'DUMMY DATA',
+         'email' => 'dummy.employee@example.com',
+     ]);
+-    $requisition = createPublishedRequisition($hr, $manager);
++    $requisition = createPublishedRequisition($hr, $manager, $hrManager);
+     $legacyEmployeeId = DB::connection('ibco')
+         ->table('maklumatpekerja')
+         ->insertGetId([
+@@ -502,8 +509,9 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('accepted candidate is registered automatically without writing to legacy database', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+-    $requisition = createPublishedRequisition($hr, $manager);
++    $requisition = createPublishedRequisition($hr, $manager, $hrManager);
+     $office = OfficeLocation::query()->create([
+         'name' => 'IBCO HQ',
+         'address' => 'Kuala Lumpur',
+@@ -567,7 +575,7 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+         }
+     });
+ 
+-    $response = $this->actingAs($hr)
++    $response = $this->actingAs($hrManager)
+         ->post(route('onboarding.register-employee', $onboarding), [
+             'identity_number' => '900101-10-1234',
+             'employee_number' => 'IBCO-2026-0099',
+@@ -618,8 +626,9 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('automatic registration blocks matching legacy employee and directs HR to link existing record', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+-    $requisition = createPublishedRequisition($hr, $manager);
++    $requisition = createPublishedRequisition($hr, $manager, $hrManager);
+     $office = OfficeLocation::query()->create([
+         'name' => 'IBCO HQ',
+         'latitude' => 3.139,
+@@ -667,7 +676,7 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+         'created_by' => $hr->getKey(),
+     ]);
+ 
+-    $this->actingAs($hr)
++    $this->actingAs($hrManager)
+         ->from(route('onboarding.index'))
+         ->post(route('onboarding.register-employee', $onboarding), [
+             'identity_number' => '880101101111',
+@@ -685,9 +694,10 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('candidate documents and profiles are restricted to assigned recruitment users', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+     $unassignedViewer = User::factory()->create();
+-    $requisition = createPublishedRequisition($hr, $manager);
++    $requisition = createPublishedRequisition($hr, $manager, $hrManager);
+     $candidate = RecruitmentCandidate::query()->create([
+         'recruitment_requisition_id' => $requisition->getKey(),
+         'candidate_number' => 'CAN-202607-0001',
+@@ -726,6 +736,7 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+ 
+ test('approval alert includes recruitment approvals interviews and overdue onboarding', function () {
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $manager = User::factory()->supervisor()->create();
+     $requisition = RecruitmentRequisition::query()->create([
+         'code' => 'REQ-ALERT',
+@@ -758,7 +769,7 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+         'created_by' => $hr->getKey(),
+     ]);
+ 
+-    $hrSummary = app(LeaveApprovalAlerts::class)->summarizeFor($hr);
++    $hrSummary = app(LeaveApprovalAlerts::class)->summarizeFor($hrManager);
+     $managerSummary = app(LeaveApprovalAlerts::class)->summarizeFor($manager);
+ 
+     expect($hrSummary['recruitment_approval'])->toBe(1);
+diff --git a/tests/Feature/RolePermissionsTest.php b/tests/Feature/RolePermissionsTest.php
+index 5e2dd8e5b379739d7cb82d15b210fff8431cb654..a54c03a6bd3b58ed95b4d047e03c87280f4b83a3 100644
+--- a/tests/Feature/RolePermissionsTest.php
++++ b/tests/Feature/RolePermissionsTest.php
+@@ -21,9 +21,10 @@
+         ->get(route('users.index'))
+         ->assertForbidden();
+ })->with([
++    'Pengurus HR' => UserRole::HrManager,
+     'HR Admin' => UserRole::HrAdmin,
+     'Penyelia / Ketua Jabatan' => UserRole::Supervisor,
+-    'Viewer / Manager' => UserRole::Viewer,
++    'Viewer / Pemerhati' => UserRole::Viewer,
+     'Employee' => UserRole::Employee,
+ ]);
+ 
+@@ -123,6 +124,7 @@
+ 
+ test('payroll permissions separate hr preparation from final approval', function () {
+     $hrAdmin = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+ 
+     expect($hrAdmin->hasPermission('payroll.view'))->toBeTrue();
+@@ -130,8 +132,10 @@
+     expect($hrAdmin->hasPermission('payroll.settings'))->toBeTrue();
+     expect($hrAdmin->hasPermission('payroll.approve'))->toBeFalse();
+ 
++    expect($hrManager->hasPermission('payroll.manage'))->toBeFalse();
++    expect($hrManager->hasPermission('payroll.approve'))->toBeTrue();
+     expect($superAdmin->hasPermission('payroll.manage'))->toBeTrue();
+-    expect($superAdmin->hasPermission('payroll.approve'))->toBeTrue();
++    expect($superAdmin->hasPermission('payroll.approve'))->toBeFalse();
+     expect($superAdmin->hasPermission('payroll.settings'))->toBeTrue();
+ });
+ 
+@@ -139,6 +143,7 @@
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+ 
+     expect($employee->hasPermission('performance.self'))->toBeTrue();
+@@ -148,14 +153,18 @@
+     expect($supervisor->hasPermission('performance.moderate'))->toBeFalse();
+     expect($hr->hasPermission('performance.manage'))->toBeTrue();
+     expect($hr->hasPermission('performance.moderate'))->toBeTrue();
+-    expect($hr->hasPermission('performance.finalize'))->toBeTrue();
++    expect($hr->hasPermission('performance.finalize'))->toBeFalse();
++    expect($hrManager->hasPermission('performance.moderate'))->toBeFalse();
++    expect($hrManager->hasPermission('performance.finalize'))->toBeTrue();
+     expect($superAdmin->hasPermission('performance.settings'))->toBeTrue();
++    expect($superAdmin->hasPermission('performance.finalize'))->toBeFalse();
+ });
+ 
+ test('recruitment permissions separate employee panel hr and approval workflows', function () {
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $viewer = User::factory()->create();
+ 
+     expect($employee->hasPermission('onboarding.self'))->toBeTrue();
+@@ -164,9 +173,11 @@
+     expect($supervisor->hasPermission('recruitment.interview'))->toBeTrue();
+     expect($supervisor->hasPermission('recruitment.manage'))->toBeFalse();
+     expect($hr->hasPermission('recruitment.manage'))->toBeTrue();
+-    expect($hr->hasPermission('recruitment.approve'))->toBeTrue();
++    expect($hr->hasPermission('recruitment.approve'))->toBeFalse();
+     expect($hr->hasPermission('recruitment.settings'))->toBeTrue();
+     expect($hr->hasPermission('onboarding.manage'))->toBeTrue();
++    expect($hrManager->hasPermission('recruitment.approve'))->toBeTrue();
++    expect($hrManager->hasPermission('onboarding.approve'))->toBeTrue();
+     expect($viewer->hasPermission('recruitment.view'))->toBeTrue();
+     expect($viewer->hasPermission('recruitment.interview'))->toBeFalse();
+ });
+@@ -175,6 +186,7 @@
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $viewer = User::factory()->create();
+ 
+     expect($employee->hasPermission('training.self'))->toBeTrue();
+@@ -188,6 +200,8 @@
+     expect($hr->hasPermission('training.manage'))->toBeTrue();
+     expect($hr->hasPermission('training.settings'))->toBeTrue();
+     expect($hr->hasPermission('competency.assess'))->toBeTrue();
++    expect($hr->hasPermission('training.approve'))->toBeFalse();
++    expect($hrManager->hasPermission('training.approve'))->toBeTrue();
+     expect($viewer->hasPermission('training.view'))->toBeTrue();
+     expect($viewer->hasPermission('training.manage'))->toBeFalse();
+ });
+@@ -196,19 +210,21 @@
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $viewer = User::factory()->create();
+ 
+     expect($employee->hasPermission('documents.self'))->toBeTrue();
+     expect($employee->hasPermission('documents.view'))->toBeFalse();
+     expect($supervisor->hasPermission('documents.view'))->toBeTrue();
+-    expect($supervisor->hasPermission('documents.approve'))->toBeTrue();
++    expect($supervisor->hasPermission('documents.approve'))->toBeFalse();
+     expect($supervisor->hasPermission('documents.manage'))->toBeFalse();
+     expect($hr->hasPermission('documents.view'))->toBeTrue();
+     expect($hr->hasPermission('documents.manage'))->toBeTrue();
+     expect($hr->hasPermission('documents.settings'))->toBeTrue();
+     expect($hr->hasPermission('documents.approve'))->toBeFalse();
+-    expect($superAdmin->hasPermission('documents.approve'))->toBeTrue();
++    expect($hrManager->hasPermission('documents.approve'))->toBeTrue();
++    expect($superAdmin->hasPermission('documents.approve'))->toBeFalse();
+     expect($viewer->hasPermission('documents.view'))->toBeFalse();
+ });
+ 
+@@ -216,6 +232,7 @@
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $viewer = User::factory()->create();
+ 
+@@ -228,7 +245,8 @@
+     expect($hr->hasPermission('discipline.manage'))->toBeTrue();
+     expect($hr->hasPermission('discipline.settings'))->toBeTrue();
+     expect($hr->hasPermission('discipline.approve'))->toBeFalse();
+-    expect($superAdmin->hasPermission('discipline.approve'))->toBeTrue();
++    expect($hrManager->hasPermission('discipline.approve'))->toBeTrue();
++    expect($superAdmin->hasPermission('discipline.approve'))->toBeFalse();
+     expect($viewer->hasPermission('discipline.view'))->toBeFalse();
+ });
+ 
+@@ -236,6 +254,7 @@
+     $employee = User::factory()->employee()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $superAdmin = User::factory()->superAdmin()->create();
+     $viewer = User::factory()->create();
+ 
+@@ -247,9 +266,53 @@
+     expect($supervisor->hasPermission('separation.clearance'))->toBeTrue();
+     expect($supervisor->hasPermission('separation.manage'))->toBeFalse();
+     expect($hr->hasPermission('separation.manage'))->toBeTrue();
+-    expect($hr->hasPermission('separation.approve'))->toBeTrue();
++    expect($hr->hasPermission('separation.approve'))->toBeFalse();
+     expect($hr->hasPermission('separation.settings'))->toBeTrue();
+-    expect($superAdmin->hasPermission('separation.approve'))->toBeTrue();
++    expect($hrManager->hasPermission('separation.approve'))->toBeTrue();
++    expect($superAdmin->hasPermission('separation.approve'))->toBeFalse();
+     expect($viewer->hasPermission('separation.clearance'))->toBeTrue();
+     expect($viewer->hasPermission('separation.manage'))->toBeFalse();
+ });
++
++test('hr manager owns final business approvals while technical and processing roles do not', function () {
++    $hrManager = User::factory()->hrManager()->create();
++    $hrAdmin = User::factory()->hrAdmin()->create();
++    $superAdmin = User::factory()->superAdmin()->create();
++
++    foreach ([
++        'leave.approve',
++        'overtime.approve',
++        'claims.approve',
++        'onboarding.approve',
++        'training.approve',
++        'roster.publish',
++    ] as $permission) {
++        expect($hrManager->hasPermission($permission))->toBeTrue();
++        expect($hrAdmin->hasPermission($permission))->toBeFalse();
++        expect($superAdmin->hasPermission($permission))->toBeFalse();
++    }
++
++    expect($superAdmin->hasPermission('users.manage'))->toBeTrue();
++    expect($superAdmin->hasPermission('recruitment.manage'))->toBeTrue();
++    expect($hrManager->hasPermission('users.manage'))->toBeFalse();
++    expect($hrManager->hasPermission('recruitment.manage'))->toBeFalse();
++});
++
++test('hr manager cannot be combined with technical processing or supervisor roles', function () {
++    $superAdmin = User::factory()->superAdmin()->create();
++    $user = User::factory()->hrManager()->create();
++
++    $this->actingAs($superAdmin)
++        ->from(route('users.index'))
++        ->patch(route('users.role.update', $user), [
++            'roles' => [
++                UserRole::HrManager->value,
++                UserRole::HrAdmin->value,
++            ],
++        ])
++        ->assertRedirect(route('users.index'))
++        ->assertSessionHasErrors('roles');
++
++    expect($user->fresh()->hasRole(UserRole::HrManager))->toBeTrue();
++    expect($user->fresh()->hasRole(UserRole::HrAdmin))->toBeFalse();
++});
+diff --git a/tests/Feature/SeparationClearanceManagementTest.php b/tests/Feature/SeparationClearanceManagementTest.php
+index 45a0364bc9e333434a6b33d0876ac59ac87d6750..cefe1594691e92bf6073644bd6bfefe629741748 100644
+--- a/tests/Feature/SeparationClearanceManagementTest.php
++++ b/tests/Feature/SeparationClearanceManagementTest.php
+@@ -97,7 +97,8 @@ function separationUsers(): array
+         'name' => 'Penyelia Jabatan',
+     ]);
+     $hr = User::factory()->hrAdmin()->create(['name' => 'HR Approver']);
+-    $verifier = User::factory()->superAdmin()->create(['name' => 'Settlement Verifier']);
++    $hrManager = User::factory()->hrManager()->create(['name' => 'Pengurus HR']);
++    $verifier = User::factory()->hrManager()->create(['name' => 'Settlement Verifier']);
+     $locationId = OfficeLocation::query()->value('id');
+     EmployeeUserLink::query()->create([
+         'user_id' => $employee->getKey(),
+@@ -122,7 +123,14 @@ function separationUsers(): array
+         'updated_by' => $hr->getKey(),
+     ]);
+ 
+-    return compact('employee', 'otherEmployee', 'supervisor', 'hr', 'verifier');
++    return compact(
++        'employee',
++        'otherEmployee',
++        'supervisor',
++        'hr',
++        'hrManager',
++        'verifier',
++    );
+ }
+ 
+ function separationTemplate(array $users): SeparationTemplate
+@@ -135,7 +143,7 @@ function separationTemplate(array $users): SeparationTemplate
+         'employee_can_apply' => true,
+         'exit_interview_required' => true,
+         'final_settlement_required' => true,
+-        'approver_user_id' => $users['hr']->getKey(),
++        'approver_user_id' => $users['hrManager']->getKey(),
+         'is_active' => true,
+     ]);
+     foreach ([
+@@ -208,7 +216,7 @@ function separationTemplate(array $users): SeparationTemplate
+         ->assertSessionDoesntHaveErrors();
+     expect($case->fresh()->approval_stage)->toBe('hr');
+ 
+-    $this->actingAs($users['hr'])
++    $this->actingAs($users['hrManager'])
+         ->patch(route('separations.hr-review', $case), [
+             'action' => 'approve',
+             'approved_last_day' => today()->addDays(45)->toDateString(),
+@@ -338,7 +346,7 @@ function separationTemplate(array $users): SeparationTemplate
+         ->assertRedirect();
+     expect($case->fresh()->status)->toBe('final_review');
+ 
+-    $this->actingAs($users['hr'])
++    $this->actingAs($users['hrManager'])
+         ->patch(route('separations.complete', $case), [
+             'eligible_for_rehire' => true,
+             'closure_notes' => 'Semua clearance, aset dan penyelesaian akhir lengkap.',
+@@ -446,11 +454,11 @@ function separationTemplate(array $users): SeparationTemplate
+         'proposed_last_day' => today()->addMonth(),
+         'status' => 'pending_approval',
+         'approval_stage' => 'hr',
+-        'hr_approver_user_id' => $users['hr']->getKey(),
+-        'created_by' => $users['hr']->getKey(),
++        'hr_approver_user_id' => $users['hrManager']->getKey(),
++        'created_by' => $users['hrManager']->getKey(),
+     ]);
+ 
+-    $this->actingAs($users['hr'])
++    $this->actingAs($users['hrManager'])
+         ->patch(route('separations.hr-review', $case), [
+             'action' => 'approve',
+             'approved_last_day' => today()->addMonth()->toDateString(),
+diff --git a/tests/Feature/StatutoryPayslipTest.php b/tests/Feature/StatutoryPayslipTest.php
+index a2b181c38f5955d7365f16c6870573eca583da02..1bfa15450124d68b862a5c4d5a1a360ea2c8979f 100644
+--- a/tests/Feature/StatutoryPayslipTest.php
++++ b/tests/Feature/StatutoryPayslipTest.php
+@@ -76,7 +76,7 @@ function createStatutoryEmployee(string $number = 'EMP-STAT-001'): int
+ 
+ test('statutory contributions are snapshotted and employee can download only own finalized payslip', function () {
+     $hr = User::factory()->hrAdmin()->create();
+-    $approver = User::factory()->superAdmin()->create();
++    $approver = User::factory()->hrManager()->create();
+     $employeeUser = User::factory()->employee()->create();
+     $otherEmployee = User::factory()->employee()->create();
+     $employeeId = createStatutoryEmployee();
+diff --git a/tests/Feature/TrainingCompetencyManagementTest.php b/tests/Feature/TrainingCompetencyManagementTest.php
+index 92f462b9810c43337ff5f8318bd815bacac62163..51dcb44836051e811a2d718e907a58c7c17172e5 100644
+--- a/tests/Feature/TrainingCompetencyManagementTest.php
++++ b/tests/Feature/TrainingCompetencyManagementTest.php
+@@ -94,6 +94,7 @@
+     $employee = User::factory()->employee()->create(['name' => 'Nur Employee']);
+     $supervisor = User::factory()->supervisor()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     EmployeeUserLink::query()->create([
+         'user_id' => $employee->getKey(),
+         'employee_id' => 100,
+@@ -223,9 +224,9 @@
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+     expect($training->fresh()->approval_stage)->toBe('hr');
+-    expect(app(LeaveApprovalAlerts::class)->summarizeFor($hr)['training_hr'])->toBe(1);
++    expect(app(LeaveApprovalAlerts::class)->summarizeFor($hrManager)['training_hr'])->toBe(1);
+ 
+-    $this->actingAs($hr)
++    $this->actingAs($hrManager)
+         ->patch(route('training.review', $training), [
+             'action' => 'approve',
+             'approved_cost' => 300,
+@@ -292,6 +293,7 @@
+ test('training approval rejects costs above available departmental budget', function () {
+     $employee = User::factory()->employee()->create();
+     $hr = User::factory()->hrAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     EmployeeUserLink::query()->create([
+         'user_id' => $employee->getKey(),
+         'employee_id' => 100,
+@@ -318,7 +320,7 @@
+         'approval_stage' => 'hr',
+     ]);
+ 
+-    $this->actingAs($hr)
++    $this->actingAs($hrManager)
+         ->from(route('training.index'))
+         ->patch(route('training.review', $training), [
+             'action' => 'approve',
+diff --git a/tests/Feature/WorkScheduleRosterTest.php b/tests/Feature/WorkScheduleRosterTest.php
+index ea2f010971ba58863249c362e46f181f8b4ca721..af3a4a6a855de020d23167c4f5d269010ca8b9ca 100644
+--- a/tests/Feature/WorkScheduleRosterTest.php
++++ b/tests/Feature/WorkScheduleRosterTest.php
+@@ -160,6 +160,7 @@ function createRosterOffice(): OfficeLocation
+ 
+ test('hr can generate publish and lock a monthly roster without writing to db_spp', function () {
+     $admin = User::factory()->superAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $employeeUser = User::factory()->employee()->create();
+     $office = createRosterOffice();
+     $employeeId = createRosterEmployee(
+@@ -196,7 +197,7 @@ function createRosterOffice(): OfficeLocation
+             ->value('day_type'),
+     )->toBe('rest_day');
+ 
+-    $this->actingAs($admin)
++    $this->actingAs($hrManager)
+         ->patch(route('rosters.publish', $period))
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+@@ -210,7 +211,7 @@ function createRosterOffice(): OfficeLocation
+             ->where('summary.workdays', 21)
+             ->has('entries', 31));
+ 
+-    $this->actingAs($admin)
++    $this->actingAs($hrManager)
+         ->patch(route('rosters.lock', $period))
+         ->assertRedirect()
+         ->assertSessionDoesntHaveErrors();
+@@ -232,6 +233,7 @@ function createRosterOffice(): OfficeLocation
+ 
+ test('night roster drives late and overnight attendance calculations', function () {
+     $admin = User::factory()->superAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $employeeUser = User::factory()->employee()->create();
+     $office = createRosterOffice();
+     $employeeId = createRosterEmployee(
+@@ -255,7 +257,7 @@ function createRosterOffice(): OfficeLocation
+         ->post(route('rosters.generate'), ['month' => '2026-08'])
+         ->assertSessionDoesntHaveErrors();
+     $period = RosterPeriod::query()->sole();
+-    $this->actingAs($admin)
++    $this->actingAs($hrManager)
+         ->patch(route('rosters.publish', $period))
+         ->assertSessionDoesntHaveErrors();
+ 
+@@ -308,6 +310,7 @@ function createRosterOffice(): OfficeLocation
+ 
+ test('supervisor can approve a shift swap before the roster is locked', function () {
+     $admin = User::factory()->superAdmin()->create();
++    $hrManager = User::factory()->hrManager()->create();
+     $supervisor = User::factory()->supervisor()->create();
+     $requester = User::factory()->employee()->create();
+     $target = User::factory()->employee()->create();
+@@ -356,7 +359,7 @@ function createRosterOffice(): OfficeLocation
+         'break_minutes' => 45,
+         'source' => 'manual',
+     ]);
+-    $this->actingAs($admin)
++    $this->actingAs($hrManager)
+         ->patch(route('rosters.publish', $period))
+         ->assertSessionDoesntHaveErrors();
+ 

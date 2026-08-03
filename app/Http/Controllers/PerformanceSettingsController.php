@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\UserRole;
 use App\Models\PerformanceCycle;
 use App\Models\PerformanceNotification;
 use App\Models\PerformanceSupervisorAssignment;
@@ -87,8 +86,7 @@ class PerformanceSettingsController extends Controller
                 ->with('roleAssignments')
                 ->orderBy('name')
                 ->get()
-                ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
-                    || $user->hasRole(UserRole::SuperAdmin))
+                ->filter(fn (User $user) => $user->hasPermission('performance.supervise'))
                 ->values()
                 ->map(fn (User $user) => [
                     'id' => $user->getKey(),
@@ -370,12 +368,9 @@ class PerformanceSettingsController extends Controller
         ]);
         $supervisor = User::query()->findOrFail($validated['supervisor_user_id']);
 
-        if (
-            ! $supervisor->hasRole(UserRole::Supervisor)
-            && ! $supervisor->hasRole(UserRole::SuperAdmin)
-        ) {
+        if (! $supervisor->hasPermission('performance.supervise')) {
             throw ValidationException::withMessages([
-                'supervisor_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
+                'supervisor_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan prestasi.',
             ]);
         }
 

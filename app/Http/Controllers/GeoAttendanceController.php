@@ -6,6 +6,7 @@ use App\Http\Requests\RecordGeoAttendanceRequest;
 use App\Http\Requests\SaveAttendanceAdjustmentRequest;
 use App\Http\Requests\StoreManualAttendanceRequest;
 use App\Models\AttendanceAdjustment;
+use App\Models\EmployeeRecord;
 use App\Models\EmployeeUserLink;
 use App\Models\GeoAttendanceRecord;
 use App\Models\OfficeLocation;
@@ -31,18 +32,12 @@ class GeoAttendanceController extends Controller
     public function clockPage(Request $request): Response
     {
         $link = EmployeeUserLink::query()
-            ->with('officeLocation')
+            ->with(['officeLocation', 'employeeRecord'])
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
 
-        $employee = $link
-            ? DB::connection('ibco')
-                ->table('maklumatpekerja')
-                ->where('id', $link->employee_id)
-                ->where('rcd_enable', 1)
-                ->first(['id', 'employeeID', 'nama'])
-            : null;
+        $employee = $link ? $this->employeeOrFail($link->employee_id) : null;
 
         $today = now()->toDateString();
         $todayRecord = $link
@@ -342,7 +337,7 @@ class GeoAttendanceController extends Controller
     public function storeManual(StoreManualAttendanceRequest $request): RedirectResponse
     {
         $validated = $request->validated();
-        $this->legacyEmployeeOrFail((int) $validated['employee_id']);
+        $this->employeeOrFail((int) $validated['employee_id']);
 
         $clockIn = Carbon::parse($validated['clock_in_at']);
         $clockOut = isset($validated['clock_out_at'])
@@ -503,7 +498,7 @@ class GeoAttendanceController extends Controller
     private function activeEmployeeLink(Request $request): EmployeeUserLink
     {
         $link = EmployeeUserLink::query()
-            ->with('officeLocation')
+            ->with(['officeLocation', 'employeeRecord'])
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
@@ -514,7 +509,7 @@ class GeoAttendanceController extends Controller
             ]);
         }
 
-        $this->legacyEmployeeOrFail($link->employee_id);
+        $this->employeeOrFail($link->employee_id);
 
         return $link;
     }
@@ -561,8 +556,21 @@ class GeoAttendanceController extends Controller
         return compact('latitude', 'longitude', 'accuracy', 'distance');
     }
 
-    private function legacyEmployeeOrFail(int $employeeId): object
+    private function employeeOrFail(int $employeeId): object
     {
+        $local = EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->first(['directory_id', 'employee_number', 'name']);
+
+        if ($local) {
+            return (object) [
+                'id' => $local->directory_id,
+                'employeeID' => $local->employee_number,
+                'nama' => $local->name,
+            ];
+        }
+
         $employee = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->where('id', $employeeId)
@@ -571,7 +579,7 @@ class GeoAttendanceController extends Controller
 
         if (! $employee) {
             throw ValidationException::withMessages([
-                'employee_id' => 'Rekod pekerja aktif tidak ditemui dalam db_spp.',
+                'employee_id' => 'Rekod pekerja aktif tidak ditemui dalam IBCO HR Solutions atau db_spp.',
             ]);
         }
 
@@ -587,7 +595,7 @@ class GeoAttendanceController extends Controller
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacyIds = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->where('rcd_enable', 1)
             ->where(function ($query) use ($search) {
@@ -598,6 +606,18 @@ class GeoAttendanceController extends Controller
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
             ->all();
+        $localIds = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->where(function (Builder $query) use ($search) {
+                $query->where('name', 'like', "%{$search}%")
+                    ->orWhere('employee_number', 'like', "%{$search}%")
+                    ->orWhere('identity_number', 'like', "%{$search}%");
+            })
+            ->pluck('directory_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        return array_values(array_unique([...$legacyIds, ...$localIds]));
     }
 
     /**
@@ -612,7 +632,7 @@ class GeoAttendanceController extends Controller
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->whereIn('id', $ids)
             ->get(['id', 'employeeID', 'nama'])
@@ -624,6 +644,19 @@ class GeoAttendanceController extends Controller
                 ],
             ])
             ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', $ids)
+            ->get(['directory_id', 'employee_number', 'name'])
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => [
+                    'id' => $employee->directory_id,
+                    'employee_id' => $employee->employee_number,
+                    'name' => $employee->name,
+                ],
+            ])
+            ->all();
+
+        return $legacy + $local;
     }
 
     /**
@@ -631,7 +664,7 @@ class GeoAttendanceController extends Controller
      */
     private function employeeOptions(): array
     {
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->where('rcd_enable', 1)
             ->orderBy('nama')
@@ -641,6 +674,21 @@ class GeoAttendanceController extends Controller
                 'employee_id' => $employee->employeeID,
                 'name' => $employee->nama,
             ])
+            ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->orderBy('name')
+            ->get(['directory_id', 'employee_number', 'name'])
+            ->map(fn (EmployeeRecord $employee) => [
+                'id' => $employee->directory_id,
+                'employee_id' => $employee->employee_number,
+                'name' => $employee->name,
+            ])
+            ->all();
+
+        return collect([...$legacy, ...$local])
+            ->sortBy('name')
+            ->values()
             ->all();
     }
 

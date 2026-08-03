@@ -90,7 +90,11 @@ type Props = {
         approved_amount: number;
     }[];
     payrollPeriods: { id: number; period: string; label: string }[];
-    permissions: { can_supervise: boolean; can_manage: boolean };
+    permissions: {
+        can_supervise: boolean;
+        can_manage: boolean;
+        can_approve: boolean;
+    };
 };
 
 function money(value: number): string {
@@ -323,7 +327,7 @@ export default function Index({
                             Permohonan Tuntutan
                         </h1>
                         <p className="text-sm text-muted-foreground">
-                            Kelulusan Penyelia → HR/Kewangan dan penjadualan
+                            Kelulusan Penyelia → Pengurus HR dan penjadualan
                             bayaran melalui payroll.
                         </p>
                     </div>
@@ -341,7 +345,7 @@ export default function Index({
                     {[
                         ['Jumlah', statistics.total],
                         ['Menunggu Penyelia', statistics.pending_supervisor],
-                        ['Menunggu HR/Kewangan', statistics.pending_finance],
+                        ['Menunggu Pengurus HR', statistics.pending_finance],
                         ['Diluluskan', statistics.approved],
                         ['Amaun Diluluskan', money(statistics.approved_amount)],
                         [
@@ -611,7 +615,7 @@ export default function Index({
 
                                     {claim.status === 'pending' &&
                                         claim.approval_stage === 'finance' &&
-                                        permissions.can_manage && (
+                                        permissions.can_approve && (
                                             <HrReview
                                                 claim={claim}
                                                 payrollPeriods={payrollPeriods}
@@ -619,19 +623,23 @@ export default function Index({
                                         )}
 
                                     {claim.status === 'approved' &&
-                                        permissions.can_manage && (
+                                        (permissions.can_manage ||
+                                            permissions.can_approve) && (
                                             <div>
-                                                <PayrollSchedule
-                                                    claim={claim}
-                                                    payrollPeriods={
-                                                        payrollPeriods
-                                                    }
-                                                />
-                                                {!claim.payroll_status ||
-                                                claim.payroll_status ===
-                                                    'scheduled' ||
-                                                claim.payroll_status ===
-                                                    'draft' ? (
+                                                {permissions.can_manage && (
+                                                    <PayrollSchedule
+                                                        claim={claim}
+                                                        payrollPeriods={
+                                                            payrollPeriods
+                                                        }
+                                                    />
+                                                )}
+                                                {permissions.can_approve &&
+                                                (!claim.payroll_status ||
+                                                    claim.payroll_status ===
+                                                        'scheduled' ||
+                                                    claim.payroll_status ===
+                                                        'draft') ? (
                                                     <Button
                                                         className="mt-2"
                                                         size="sm"

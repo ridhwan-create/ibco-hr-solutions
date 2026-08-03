@@ -135,6 +135,7 @@ type LeaveRequestProps = {
     permissions: {
         can_supervise: boolean;
         can_manage: boolean;
+        can_approve: boolean;
     };
 };
 
@@ -262,7 +263,7 @@ function ReviewDialog({
                             <SelectContent>
                                 <SelectItem value="approved">
                                     {mode === 'supervisor'
-                                        ? 'Sokong dan hantar kepada HR'
+                                        ? 'Sokong dan hantar kepada Pengurus HR'
                                         : 'Luluskan'}
                                 </SelectItem>
                                 <SelectItem value="rejected">Tolak</SelectItem>
@@ -519,8 +520,8 @@ export default function LeaveRequests({
                             Pengurusan Permohonan Cuti
                         </h1>
                         <p className="text-sm text-muted-foreground">
-                            Semakan penyelia, kelulusan HR, kalendar dan laporan
-                            dalam satu aliran.
+                            Semakan penyelia, kelulusan Pengurus HR, kalendar
+                            dan laporan dalam satu aliran.
                         </p>
                     </div>
                     <Button asChild variant="outline">
@@ -535,7 +536,7 @@ export default function LeaveRequests({
                     {[
                         ['Jumlah', statistics.total],
                         ['Menunggu Penyelia', statistics.pending_supervisor],
-                        ['Menunggu HR', statistics.pending_hr],
+                        ['Menunggu Pengurus HR', statistics.pending_hr],
                         ['Diluluskan', statistics.approved],
                         ['Ditolak', statistics.rejected],
                     ].map(([label, value]) => (
@@ -850,7 +851,7 @@ export default function LeaveRequests({
                                                         mode="supervisor"
                                                     />
                                                 )}
-                                            {permissions.can_manage &&
+                                            {permissions.can_approve &&
                                                 request.status === 'pending' &&
                                                 request.approval_stage ===
                                                     'hr' && (
@@ -859,7 +860,7 @@ export default function LeaveRequests({
                                                         mode="hr"
                                                     />
                                                 )}
-                                            {permissions.can_manage &&
+                                            {permissions.can_approve &&
                                                 request.status ===
                                                     'approved' && (
                                                     <CancellationDialog
@@ -908,7 +909,7 @@ export default function LeaveRequests({
                     </Card>
                 )}
 
-                {permissions.can_manage && (
+                {permissions.can_approve && (
                     <Card className="border-primary/20 bg-primary/5">
                         <CardContent className="flex items-start gap-3 pt-6">
                             <ShieldCheck className="mt-0.5 size-5 text-primary" />

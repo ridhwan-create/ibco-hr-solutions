@@ -29,7 +29,10 @@ class UserManagementController extends Controller
                 'roleAssignments',
                 'employeeLink' => fn ($query) => $query
                     ->where('is_active', true)
-                    ->with('officeLocation:id,name'),
+                    ->with([
+                        'officeLocation:id,name',
+                        'employeeRecord:id,directory_id,employee_number,name',
+                    ]),
             ])
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($query) use ($search) {
@@ -41,7 +44,9 @@ class UserManagementController extends Controller
             ->paginate(15)
             ->withQueryString();
         $employeeIds = $users->getCollection()
-            ->pluck('employeeLink.employee_id')
+            ->pluck('employeeLink')
+            ->filter(fn (?EmployeeUserLink $link) => $link?->employee_source !== 'local')
+            ->pluck('employee_id')
             ->filter()
             ->unique()
             ->values();
@@ -55,9 +60,9 @@ class UserManagementController extends Controller
 
         $users->through(function (User $user) use ($employees, $request) {
             $link = $user->employeeLink;
-            $employee = $link
-                ? ($employees[(string) $link->employee_id] ?? null)
-                : null;
+            $employee = $link?->employee_source === 'local'
+                ? $link->employeeRecord
+                : ($link ? ($employees[(string) $link->employee_id] ?? null) : null);
 
             return [
                 'id' => $user->id,
@@ -73,9 +78,9 @@ class UserManagementController extends Controller
                 'is_current_user' => $user->is($request->user()),
                 'employee' => $employee
                     ? [
-                        'id' => (int) $employee->id,
-                        'employee_id' => $employee->employeeID,
-                        'name' => $employee->nama,
+                        'id' => (int) ($employee->directory_id ?? $employee->id),
+                        'employee_id' => $employee->employee_number ?? $employee->employeeID,
+                        'name' => $employee->name ?? $employee->nama,
                         'office' => $link?->officeLocation?->name,
                     ]
                     : null,
@@ -111,6 +116,7 @@ class UserManagementController extends Controller
     {
         $validated = $request->validated();
         $roles = $this->rolesFromValidated($validated);
+        $this->guardRoleCombination($roles);
         $this->validateEmployeeAssignment($validated);
 
         $user = DB::transaction(function () use ($request, $validated, $roles) {
@@ -173,6 +179,7 @@ class UserManagementController extends Controller
         $validated = $request->validated();
         $roles = $this->rolesFromValidated($validated);
 
+        $this->guardRoleCombination($roles);
         $this->guardRoleChange($request, $user, $roles);
         $this->validateEmployeeAssignment($validated, $user);
 
@@ -220,6 +227,7 @@ class UserManagementController extends Controller
         $validated = $request->validated();
         $roles = $this->rolesFromValidated($validated);
 
+        $this->guardRoleCombination($roles);
         $this->guardRoleChange($request, $user, $roles);
 
         if (
@@ -290,6 +298,32 @@ class UserManagementController extends Controller
         ) {
             throw ValidationException::withMessages([
                 'roles' => 'Sekurang-kurangnya satu akaun Super Admin mesti dikekalkan.',
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<int, UserRole>  $roles
+     */
+    private function guardRoleCombination(array $roles): void
+    {
+        if (! in_array(UserRole::HrManager, $roles, true)) {
+            return;
+        }
+
+        $conflicts = collect($roles)->filter(fn (UserRole $role) => in_array(
+            $role,
+            [
+                UserRole::SuperAdmin,
+                UserRole::HrAdmin,
+                UserRole::Supervisor,
+            ],
+            true,
+        ));
+
+        if ($conflicts->isNotEmpty()) {
+            throw ValidationException::withMessages([
+                'roles' => 'Role Pengurus HR tidak boleh digabungkan dengan Super Admin, HR Admin atau Penyelia. Gunakan akaun berasingan untuk mengekalkan pengasingan tugas.',
             ]);
         }
     }

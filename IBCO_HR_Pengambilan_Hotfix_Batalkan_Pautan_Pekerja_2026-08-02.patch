@@ -1,0 +1,645 @@
+diff --git a/app/Http/Controllers/AuditTrailController.php b/app/Http/Controllers/AuditTrailController.php
+index 8c9503a..cfe0670 100644
+--- a/app/Http/Controllers/AuditTrailController.php
++++ b/app/Http/Controllers/AuditTrailController.php
+@@ -42,11 +42,14 @@ class AuditTrailController extends Controller
+         'employee_link.created' => 'Pautan Pekerja Ditambah',
+         'employee_link.updated' => 'Pautan Pekerja Dikemas Kini',
+         'employee_link.deactivated' => 'Pautan Pekerja Dinyahaktifkan',
++        'employee_link.deactivated_from_onboarding_correction' => 'Pautan Akaun Dinyahaktifkan daripada Pembetulan Onboarding',
+         'user.created' => 'Pengguna Sistem Ditambah',
+         'user.updated' => 'Pengguna Sistem Dikemas Kini',
+         'user.password.bulk_reset' => 'Kata Laluan Direset Secara Pukal',
+         'employee.registered_from_recruitment' => 'Calon Didaftarkan sebagai Pekerja',
+         'user.created_from_recruitment' => 'Akaun Pekerja Dicipta daripada Pengambilan',
++        'onboarding.employee_linked' => 'Pekerja Sedia Ada Dipautkan kepada Onboarding',
++        'onboarding.employee_unlinked' => 'Pautan Pekerja Onboarding Dibatalkan',
+         'employee.profile_updated' => 'Profil Sendiri Dikemas Kini',
+         'leave.submitted' => 'Permohonan Cuti Dihantar',
+         'leave.supervisor_approved' => 'Permohonan Cuti Disokong Penyelia',
+@@ -186,6 +189,7 @@ class AuditTrailController extends Controller
+         'geo_attendance_records',
+         'office_locations',
+         'employee_user_links',
++        'onboarding_cases',
+         'users',
+         'employee_personal_profiles',
+         'employee_leave_requests',
+@@ -490,6 +494,8 @@ public function index(Request $request): Response
+                     + ($actionCounts['attendance.cancelled'] ?? 0)
+                     + ($actionCounts['office.deactivated'] ?? 0)
+                     + ($actionCounts['employee_link.deactivated'] ?? 0)
++                    + ($actionCounts['employee_link.deactivated_from_onboarding_correction'] ?? 0)
++                    + ($actionCounts['onboarding.employee_unlinked'] ?? 0)
+                     + ($actionCounts['leave.cancelled'] ?? 0)
+                     + ($actionCounts['leave.approved_cancelled'] ?? 0)
+                     + ($actionCounts['leave_type.deactivated'] ?? 0)
+diff --git a/app/Http/Controllers/OnboardingController.php b/app/Http/Controllers/OnboardingController.php
+index 5444d0f..e2e9551 100644
+--- a/app/Http/Controllers/OnboardingController.php
++++ b/app/Http/Controllers/OnboardingController.php
+@@ -477,6 +477,187 @@ public function linkEmployee(
+         ]);
+     }
+ 
++    public function unlinkEmployee(
++        Request $request,
++        OnboardingCase $onboardingCase,
++    ): RedirectResponse {
++        $validated = $request->validate([
++            'reason' => ['required', 'string', 'min:5', 'max:1000'],
++            'deactivate_employee_link' => ['sometimes', 'boolean'],
++            'confirmed' => ['accepted'],
++        ], [
++            'reason.required' => 'Sila nyatakan sebab pautan pekerja perlu dibatalkan.',
++            'reason.min' => 'Sebab pembatalan mestilah sekurang-kurangnya 5 aksara.',
++            'confirmed.accepted' => 'Sila sahkan bahawa pautan pekerja yang dipilih adalah salah.',
++        ]);
++
++        if ($onboardingCase->employee_record_id) {
++            throw ValidationException::withMessages([
++                'unlink' => 'Rekod pekerja yang telah didaftarkan secara automatik tidak boleh dibatalkan melalui tindakan ini.',
++            ]);
++        }
++
++        if (in_array($onboardingCase->status, ['completed', 'cancelled'], true)) {
++            throw ValidationException::withMessages([
++                'unlink' => 'Pautan bagi kes onboarding yang selesai atau dibatalkan tidak boleh diubah.',
++            ]);
++        }
++
++        if (! $onboardingCase->legacy_employee_id && ! $onboardingCase->employee_user_id) {
++            throw ValidationException::withMessages([
++                'unlink' => 'Kes onboarding ini tidak mempunyai pautan pekerja untuk dibatalkan.',
++            ]);
++        }
++
++        $result = DB::transaction(function () use ($request, $onboardingCase, $validated) {
++            $case = OnboardingCase::query()
++                ->with('tasks')
++                ->lockForUpdate()
++                ->findOrFail($onboardingCase->getKey());
++
++            if (
++                $case->employee_record_id
++                || in_array($case->status, ['completed', 'cancelled'], true)
++                || (! $case->legacy_employee_id && ! $case->employee_user_id)
++            ) {
++                throw ValidationException::withMessages([
++                    'unlink' => 'Status pautan telah berubah. Muat semula halaman sebelum mencuba semula.',
++                ]);
++            }
++
++            $legacyEmployeeId = $case->legacy_employee_id;
++            $employeeUserId = $case->employee_user_id;
++            $taskQuery = $case->tasks()
++                ->where('assignee_role', 'employee')
++                ->when(
++                    $employeeUserId,
++                    fn ($query) => $query->where('assignee_user_id', $employeeUserId),
++                    fn ($query) => $query->whereRaw('1 = 0'),
++                );
++            $tasksBefore = (clone $taskQuery)
++                ->get([
++                    'id',
++                    'status',
++                    'assignee_user_id',
++                    'completion_notes',
++                    'completed_by',
++                    'completed_at',
++                ])
++                ->map(fn (OnboardingTask $task) => [
++                    'id' => $task->getKey(),
++                    'status' => $task->status,
++                    'assignee_user_id' => $task->assignee_user_id,
++                    'completed_by' => $task->completed_by,
++                    'completed_at' => $task->completed_at?->toIso8601String(),
++                ])
++                ->values()
++                ->all();
++            $employeeLinkDeactivated = false;
++
++            if (
++                ($validated['deactivate_employee_link'] ?? false)
++                && $legacyEmployeeId
++                && $employeeUserId
++            ) {
++                $usedByAnotherCase = OnboardingCase::query()
++                    ->where('id', '<>', $case->getKey())
++                    ->where('legacy_employee_id', $legacyEmployeeId)
++                    ->where('employee_user_id', $employeeUserId)
++                    ->whereIn('status', ['pending', 'active', 'completed'])
++                    ->exists();
++
++                if ($usedByAnotherCase) {
++                    throw ValidationException::withMessages([
++                        'deactivate_employee_link' => 'Pautan akaun ini masih digunakan oleh kes onboarding lain dan tidak boleh dinyahaktifkan.',
++                    ]);
++                }
++
++                $employeeLink = EmployeeUserLink::query()
++                    ->where('user_id', $employeeUserId)
++                    ->where('employee_id', $legacyEmployeeId)
++                    ->where('employee_source', 'legacy')
++                    ->where('is_active', true)
++                    ->lockForUpdate()
++                    ->first();
++
++                if ($employeeLink) {
++                    $linkBefore = [
++                        'user_id' => $employeeLink->user_id,
++                        'employee_id' => $employeeLink->employee_id,
++                        'employee_source' => $employeeLink->employee_source,
++                        'office_location_id' => $employeeLink->office_location_id,
++                        'is_active' => true,
++                    ];
++                    $employeeLink->update([
++                        'is_active' => false,
++                        'updated_by' => $request->user()->getAuthIdentifier(),
++                    ]);
++                    $employeeLinkDeactivated = true;
++
++                    AuditLogger::record(
++                        $request,
++                        'employee_link.deactivated_from_onboarding_correction',
++                        'employee_user_links',
++                        $employeeLink->getKey(),
++                        oldValues: $linkBefore,
++                        newValues: [
++                            ...$linkBefore,
++                            'is_active' => false,
++                            'reason' => $validated['reason'],
++                            'onboarding_case_id' => $case->getKey(),
++                        ],
++                    );
++                }
++            }
++
++            $case->update([
++                'legacy_employee_id' => null,
++                'employee_user_id' => null,
++            ]);
++            $taskQuery->update([
++                'assignee_user_id' => null,
++                'status' => 'pending',
++                'completion_notes' => null,
++                'completed_by' => null,
++                'completed_at' => null,
++            ]);
++
++            AuditLogger::record(
++                $request,
++                'onboarding.employee_unlinked',
++                'onboarding_cases',
++                $case->getKey(),
++                oldValues: [
++                    'legacy_employee_id' => $legacyEmployeeId,
++                    'employee_user_id' => $employeeUserId,
++                    'employee_tasks' => $tasksBefore,
++                ],
++                newValues: [
++                    'legacy_employee_id' => null,
++                    'employee_user_id' => null,
++                    'reset_employee_task_ids' => collect($tasksBefore)
++                        ->pluck('id')
++                        ->values()
++                        ->all(),
++                    'employee_link_deactivated' => $employeeLinkDeactivated,
++                    'reason' => $validated['reason'],
++                ],
++            );
++
++            return [
++                'employee_link_deactivated' => $employeeLinkDeactivated,
++                'reset_task_count' => count($tasksBefore),
++            ];
++        });
++
++        return back()->with('toast', [
++            'type' => 'success',
++            'message' => $result['employee_link_deactivated']
++                ? 'Pautan onboarding dan pautan akaun pekerja telah dibatalkan. Calon kini boleh didaftarkan sebagai pekerja.'
++                : 'Pautan onboarding telah dibatalkan tanpa memadam akaun atau rekod pekerja. Calon kini boleh didaftarkan sebagai pekerja.',
++        ]);
++    }
++
+     public function changeCaseStatus(
+         Request $request,
+         OnboardingCase $onboardingCase,
+diff --git a/resources/js/pages/Onboarding/Index.tsx b/resources/js/pages/Onboarding/Index.tsx
+index ba953dc..4642ab3 100644
+--- a/resources/js/pages/Onboarding/Index.tsx
++++ b/resources/js/pages/Onboarding/Index.tsx
+@@ -10,6 +10,7 @@ import {
+     RotateCcw,
+     Search,
+     ShieldCheck,
++    Unlink,
+     UserPlus,
+     UserRoundCheck,
+     XCircle,
+@@ -404,6 +405,164 @@ function LinkEmployeeDialog({
+     );
+ }
+ 
++function UnlinkEmployeeDialog({ item }: { item: OnboardingCase }) {
++    const [open, setOpen] = useState(false);
++    const form = useForm({
++        reason: '',
++        deactivate_employee_link: false,
++        confirmed: false,
++    });
++    const submit = (event: FormEvent<HTMLFormElement>) => {
++        event.preventDefault();
++        form.delete(`/onboarding/${item.id}/paut-pekerja`, {
++            preserveScroll: true,
++            onSuccess: () => {
++                setOpen(false);
++                form.reset();
++            },
++        });
++    };
++
++    return (
++        <Dialog open={open} onOpenChange={setOpen}>
++            <DialogTrigger asChild>
++                <Button size="sm" variant="destructive">
++                    <Unlink />
++                    Batalkan Pautan Salah
++                </Button>
++            </DialogTrigger>
++            <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
++                <DialogHeader>
++                    <DialogTitle>Batalkan Pautan Pekerja</DialogTitle>
++                    <DialogDescription>
++                        Gunakan tindakan ini apabila calon telah dipautkan
++                        kepada rekod pekerja atau akaun Employee yang salah.
++                    </DialogDescription>
++                </DialogHeader>
++                <form onSubmit={submit} className="space-y-4">
++                    <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 text-sm sm:grid-cols-2">
++                        <div>
++                            <p className="text-xs text-muted-foreground">
++                                Calon
++                            </p>
++                            <p className="font-medium">{item.candidate.name}</p>
++                        </div>
++                        <div>
++                            <p className="text-xs text-muted-foreground">
++                                Pautan semasa
++                            </p>
++                            <p className="font-medium">
++                                {item.employee_user ??
++                                    'Akaun tidak dikenal pasti'}
++                            </p>
++                            <p className="text-xs text-muted-foreground">
++                                {item.legacy_employee_id
++                                    ? `db_spp ID: ${item.legacy_employee_id}`
++                                    : 'Tiada ID db_spp'}
++                            </p>
++                        </div>
++                    </div>
++
++                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
++                        <p className="font-medium">Kesan pembatalan</p>
++                        <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
++                            <li>
++                                Pautan calon kepada rekod dan akaun semasa akan
++                                dikosongkan.
++                            </li>
++                            <li>
++                                Tugasan kategori pekerja akan ditetapkan semula
++                                kepada Belum Bermula dan tiada pemilik.
++                            </li>
++                            <li>
++                                Rekod asal dalam db_spp dan akaun pengguna tidak
++                                akan dipadam.
++                            </li>
++                        </ul>
++                    </div>
++
++                    <div className="space-y-2">
++                        <Label>Sebab Pembatalan</Label>
++                        <textarea
++                            value={form.data.reason}
++                            onChange={(event) =>
++                                form.setData('reason', event.target.value)
++                            }
++                            className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm"
++                            placeholder="Contoh: Calon tersalah dipautkan kepada rekod DUMMY DATA."
++                        />
++                        <InputError message={form.errors.reason} />
++                    </div>
++
++                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
++                        <input
++                            type="checkbox"
++                            checked={form.data.deactivate_employee_link}
++                            onChange={(event) =>
++                                form.setData(
++                                    'deactivate_employee_link',
++                                    event.target.checked,
++                                )
++                            }
++                            className="mt-1 size-4"
++                        />
++                        <span className="text-sm">
++                            <span className="font-medium">
++                                Nyahaktifkan juga pautan akaun Employee dengan
++                                rekod db_spp ini
++                            </span>
++                            <span className="mt-1 block text-muted-foreground">
++                                Tandakan hanya jika pautan akaun itu juga salah.
++                                Biarkan kosong jika akaun tersebut masih milik
++                                pekerja sedia ada.
++                            </span>
++                        </span>
++                    </label>
++                    <InputError
++                        message={form.errors.deactivate_employee_link}
++                    />
++
++                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
++                        <input
++                            type="checkbox"
++                            checked={form.data.confirmed}
++                            onChange={(event) =>
++                                form.setData('confirmed', event.target.checked)
++                            }
++                            className="mt-1 size-4"
++                        />
++                        <span className="text-sm">
++                            Saya mengesahkan pautan pekerja bagi calon ini
++                            adalah salah dan perlu dibatalkan.
++                        </span>
++                    </label>
++                    <InputError message={form.errors.confirmed} />
++                    <InputError
++                        message={(form.errors as Record<string, string>).unlink}
++                    />
++
++                    <DialogFooter>
++                        <DialogClose asChild>
++                            <Button type="button" variant="outline">
++                                Tutup
++                            </Button>
++                        </DialogClose>
++                        <Button
++                            variant="destructive"
++                            disabled={form.processing || !form.data.confirmed}
++                        >
++                            <Unlink />
++                            {form.processing
++                                ? 'Sedang Membatalkan...'
++                                : 'Batalkan Pautan'}
++                        </Button>
++                    </DialogFooter>
++                </form>
++            </DialogContent>
++        </Dialog>
++    );
++}
++
+ function RegisterEmployeeDialog({
+     item,
+     users,
+@@ -1093,20 +1252,35 @@ export default function OnboardingIndex({
+                                                                 }
+                                                             />
+                                                         )}
+-                                                    {!item.employee_record_id && (
+-                                                        <LinkEmployeeDialog
+-                                                            item={item}
+-                                                            employees={
+-                                                                legacyEmployees
+-                                                            }
+-                                                            employeeUsers={
+-                                                                employeeUsers
+-                                                            }
+-                                                            officeLocations={
+-                                                                officeLocations
+-                                                            }
+-                                                        />
+-                                                    )}
++                                                    {!item.employee_record_id &&
++                                                        !item.legacy_employee_id &&
++                                                        !item.employee_user_id && (
++                                                            <LinkEmployeeDialog
++                                                                item={item}
++                                                                employees={
++                                                                    legacyEmployees
++                                                                }
++                                                                employeeUsers={
++                                                                    employeeUsers
++                                                                }
++                                                                officeLocations={
++                                                                    officeLocations
++                                                                }
++                                                            />
++                                                        )}
++                                                    {!item.employee_record_id &&
++                                                        (item.legacy_employee_id ||
++                                                            item.employee_user_id) &&
++                                                        [
++                                                            'pending',
++                                                            'active',
++                                                        ].includes(
++                                                            item.status,
++                                                        ) && (
++                                                            <UnlinkEmployeeDialog
++                                                                item={item}
++                                                            />
++                                                        )}
+                                                     <CaseActions item={item} />
+                                                 </>
+                                             )}
+diff --git a/routes/web.php b/routes/web.php
+index b1b6cec..ef03bec 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -547,6 +547,9 @@
+         Route::put('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'linkEmployee'])
+             ->whereNumber('onboardingCase')
+             ->name('onboarding.link-employee');
++        Route::delete('onboarding/{onboardingCase}/paut-pekerja', [OnboardingController::class, 'unlinkEmployee'])
++            ->whereNumber('onboardingCase')
++            ->name('onboarding.unlink-employee');
+         Route::post('onboarding/{onboardingCase}/daftar-pekerja', [OnboardingController::class, 'registerEmployee'])
+             ->whereNumber('onboardingCase')
+             ->name('onboarding.register-employee');
+diff --git a/tests/Feature/RecruitmentOnboardingTest.php b/tests/Feature/RecruitmentOnboardingTest.php
+index 57f7b2a..e5682dd 100644
+--- a/tests/Feature/RecruitmentOnboardingTest.php
++++ b/tests/Feature/RecruitmentOnboardingTest.php
+@@ -335,6 +335,171 @@ function createOnboardingTemplate(User $hr): OnboardingTemplate
+     ))->toBeTrue();
+ });
+ 
++test('HR can correct a wrong legacy onboarding link without deleting source records', function () {
++    $hr = User::factory()->hrAdmin()->create();
++    $manager = User::factory()->supervisor()->create();
++    $employeeUser = User::factory()->employee()->create([
++        'name' => 'DUMMY DATA',
++        'email' => 'dummy.employee@example.com',
++    ]);
++    $requisition = createPublishedRequisition($hr, $manager);
++    $legacyEmployeeId = DB::connection('ibco')
++        ->table('maklumatpekerja')
++        ->insertGetId([
++            'employeeID' => 'DUMMY-008',
++            'nama' => 'DUMMY DATA',
++            'rcd_enable' => 1,
++        ]);
++    $office = OfficeLocation::query()->create([
++        'name' => 'IBCO HQ',
++        'address' => 'Kuala Lumpur',
++        'latitude' => 3.139,
++        'longitude' => 101.6869,
++        'radius_meters' => 100,
++        'accuracy_limit_meters' => 100,
++        'is_active' => true,
++    ]);
++    $candidate = RecruitmentCandidate::query()->create([
++        'recruitment_requisition_id' => $requisition->getKey(),
++        'candidate_number' => 'CAN-UNLINK-0001',
++        'name' => 'Calon Sebenar',
++        'email' => 'calon.sebenar@example.com',
++        'phone' => '0123456789',
++        'nric' => '900101101234',
++        'source' => 'job_portal',
++        'stage' => 'hired',
++        'owner_user_id' => $hr->getKey(),
++        'applied_at' => now(),
++        'hired_at' => now(),
++    ]);
++    $offer = RecruitmentOffer::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'offer_number' => 'OFF-UNLINK-0001',
++        'position_name' => 'Eksekutif Teknologi Maklumat',
++        'department_id' => 1,
++        'employment_type' => 'permanent',
++        'salary' => 4600,
++        'start_date' => '2026-09-01',
++        'probation_months' => 3,
++        'expiry_date' => '2026-08-15',
++        'status' => 'accepted',
++        'created_by' => $hr->getKey(),
++        'approved_by' => $hr->getKey(),
++        'responded_at' => now(),
++    ]);
++    $onboarding = OnboardingCase::query()->create([
++        'recruitment_candidate_id' => $candidate->getKey(),
++        'recruitment_offer_id' => $offer->getKey(),
++        'manager_user_id' => $manager->getKey(),
++        'start_date' => '2026-09-01',
++        'status' => 'active',
++        'created_by' => $hr->getKey(),
++        'started_at' => now(),
++    ]);
++    $task = $onboarding->tasks()->create([
++        'title' => 'Lengkapkan maklumat pekerja',
++        'category' => 'employee',
++        'assignee_role' => 'employee',
++        'due_date' => '2026-09-01',
++        'is_required' => true,
++        'status' => 'pending',
++        'sort_order' => 1,
++    ]);
++
++    $this->actingAs($hr)
++        ->put(route('onboarding.link-employee', $onboarding), [
++            'legacy_employee_id' => $legacyEmployeeId,
++            'employee_user_id' => $employeeUser->getKey(),
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++    $task->update([
++        'status' => 'completed',
++        'completion_notes' => 'Disiapkan melalui pautan yang salah.',
++        'completed_by' => $employeeUser->getKey(),
++        'completed_at' => now(),
++    ]);
++
++    $legacyQueries = [];
++    Event::listen(QueryExecuted::class, function (QueryExecuted $event) use (
++        &$legacyQueries,
++    ) {
++        if ($event->connectionName === 'ibco') {
++            $legacyQueries[] = strtolower(ltrim($event->sql));
++        }
++    });
++
++    $this->actingAs($hr)
++        ->from(route('onboarding.index'))
++        ->delete(route('onboarding.unlink-employee', $onboarding), [
++            'reason' => 'Calon tersalah dipautkan kepada rekod DUMMY DATA.',
++            'deactivate_employee_link' => false,
++            'confirmed' => true,
++        ])
++        ->assertRedirect(route('onboarding.index'))
++        ->assertSessionDoesntHaveErrors();
++
++    expect($onboarding->fresh()->legacy_employee_id)->toBeNull()
++        ->and($onboarding->fresh()->employee_user_id)->toBeNull()
++        ->and($task->fresh()->assignee_user_id)->toBeNull()
++        ->and($task->fresh()->status)->toBe('pending')
++        ->and($task->fresh()->completion_notes)->toBeNull()
++        ->and($task->fresh()->completed_by)->toBeNull()
++        ->and($task->fresh()->completed_at)->toBeNull()
++        ->and($employeeUser->fresh())->not->toBeNull();
++    expect(EmployeeUserLink::query()
++        ->where('user_id', $employeeUser->getKey())
++        ->where('employee_id', $legacyEmployeeId)
++        ->where('is_active', true)
++        ->exists())->toBeTrue();
++    expect(AuditLog::query()
++        ->where('action', 'onboarding.employee_unlinked')
++        ->where('auditable_id', (string) $onboarding->getKey())
++        ->exists())->toBeTrue();
++
++    $this->actingAs($hr)
++        ->put(route('onboarding.link-employee', $onboarding), [
++            'legacy_employee_id' => $legacyEmployeeId,
++            'employee_user_id' => $employeeUser->getKey(),
++            'office_location_id' => $office->getKey(),
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++    $this->actingAs($hr)
++        ->delete(route('onboarding.unlink-employee', $onboarding), [
++            'reason' => 'Pautan akaun Employee juga merupakan data ujian yang salah.',
++            'deactivate_employee_link' => true,
++            'confirmed' => true,
++        ])
++        ->assertRedirect()
++        ->assertSessionDoesntHaveErrors();
++
++    expect(EmployeeUserLink::query()
++        ->where('user_id', $employeeUser->getKey())
++        ->where('employee_id', $legacyEmployeeId)
++        ->where('is_active', false)
++        ->exists())->toBeTrue();
++    expect(AuditLog::query()
++        ->where('action', 'employee_link.deactivated_from_onboarding_correction')
++        ->exists())->toBeTrue();
++    expect(DB::connection('ibco')
++        ->table('maklumatpekerja')
++        ->where('id', $legacyEmployeeId)
++        ->where('nama', 'DUMMY DATA')
++        ->exists())->toBeTrue();
++    expect(collect($legacyQueries)->every(
++        fn (string $sql) => str_starts_with($sql, 'select'),
++    ))->toBeTrue();
++
++    $this->actingAs($employeeUser)
++        ->delete(route('onboarding.unlink-employee', $onboarding), [
++            'reason' => 'Cubaan tanpa kebenaran.',
++            'confirmed' => true,
++        ])
++        ->assertForbidden();
++});
++
+ test('accepted candidate is registered automatically without writing to legacy database', function () {
+     $hr = User::factory()->hrAdmin()->create();
+     $manager = User::factory()->supervisor()->create();

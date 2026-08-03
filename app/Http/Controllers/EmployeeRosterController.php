@@ -27,7 +27,7 @@ class EmployeeRosterController extends Controller
         $periodStart = CarbonImmutable::createFromFormat('Y-m', $month)
             ->startOfMonth();
         $link = EmployeeUserLink::query()
-            ->with('officeLocation:id,name')
+            ->with(['officeLocation:id,name', 'employeeRecord'])
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
@@ -45,17 +45,25 @@ class EmployeeRosterController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['id', 'employeeID', 'nama']);
-        $departmentId = DB::connection('ibco')
-            ->table('maklumatjawatan')
-            ->where('id_pekerja', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->orderByDesc('id')
-            ->value('id_department');
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'id' => $link->employeeRecord->directory_id,
+                'employeeID' => $link->employeeRecord->employee_number,
+                'nama' => $link->employeeRecord->name,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['id', 'employeeID', 'nama']);
+        $departmentId = $link->employee_source === 'local'
+            ? $link->employeeRecord?->department_id
+            : DB::connection('ibco')
+                ->table('maklumatjawatan')
+                ->where('id_pekerja', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->orderByDesc('id')
+                ->value('id_department');
         $period = RosterPeriod::query()
             ->whereDate('period_start', $periodStart)
             ->whereIn('status', ['published', 'locked'])

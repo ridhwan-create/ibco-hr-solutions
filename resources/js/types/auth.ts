@@ -1,5 +1,10 @@
 export type UserRole =
-    'super_admin' | 'hr_admin' | 'supervisor' | 'viewer' | 'employee';
+    | 'super_admin'
+    | 'hr_manager'
+    | 'hr_admin'
+    | 'supervisor'
+    | 'viewer'
+    | 'employee';
 
 export type Permission =
     | 'dashboard.view'
@@ -15,12 +20,14 @@ export type Permission =
     | 'employee.profile.update'
     | 'leave.view'
     | 'leave.manage'
+    | 'leave.approve'
     | 'leave.supervise'
     | 'leave.settings'
     | 'leave.self'
     | 'leave.apply'
     | 'overtime.view'
     | 'overtime.manage'
+    | 'overtime.approve'
     | 'overtime.supervise'
     | 'overtime.settings'
     | 'overtime.self'
@@ -39,8 +46,48 @@ export type Permission =
     | 'performance.finalize'
     | 'performance.settings'
     | 'performance.self'
+    | 'recruitment.view'
+    | 'recruitment.manage'
+    | 'recruitment.approve'
+    | 'recruitment.interview'
+    | 'recruitment.settings'
+    | 'onboarding.view'
+    | 'onboarding.manage'
+    | 'onboarding.approve'
+    | 'onboarding.self'
+    | 'training.view'
+    | 'training.manage'
+    | 'training.approve'
+    | 'training.supervise'
+    | 'training.settings'
+    | 'training.self'
+    | 'training.apply'
+    | 'competency.view'
+    | 'competency.assess'
+    | 'competency.self'
+    | 'documents.view'
+    | 'documents.manage'
+    | 'documents.approve'
+    | 'documents.settings'
+    | 'documents.self'
+    | 'discipline.view'
+    | 'discipline.manage'
+    | 'discipline.investigate'
+    | 'discipline.approve'
+    | 'discipline.settings'
+    | 'discipline.self'
+    | 'discipline.apply'
+    | 'separation.view'
+    | 'separation.manage'
+    | 'separation.supervise'
+    | 'separation.approve'
+    | 'separation.clearance'
+    | 'separation.settings'
+    | 'separation.self'
+    | 'separation.apply'
     | 'claims.view'
     | 'claims.manage'
+    | 'claims.approve'
     | 'claims.supervise'
     | 'claims.settings'
     | 'claims.self'
@@ -91,6 +138,27 @@ export type LeaveApprovalAlerts = {
     performance_total: number;
     performance_supervisor: number;
     performance_hr: number;
+    recruitment_total: number;
+    recruitment_approval: number;
+    recruitment_interview: number;
+    onboarding_total: number;
+    onboarding_registration: number;
+    onboarding_overdue: number;
+    training_total: number;
+    training_supervisor: number;
+    training_hr: number;
+    document_total: number;
+    document_approval: number;
+    document_expiring: number;
+    discipline_total: number;
+    discipline_triage: number;
+    discipline_investigation: number;
+    discipline_decision: number;
+    separation_total: number;
+    separation_supervisor: number;
+    separation_hr: number;
+    separation_clearance: number;
+    separation_final_review: number;
 };
 
 /* @chisel-passkeys */

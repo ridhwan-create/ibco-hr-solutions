@@ -3,13 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\EmployeeStatutoryProfile;
+use App\Models\EmployeeRecord;
 use App\Models\PayrollSetting;
 use App\Models\StatutorySetting;
 use App\Support\AuditLogger;
 use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -25,7 +28,7 @@ class StatutorySettingsController extends Controller
             ->where('rcd_enable', 1)
             ->selectRaw('id_pekerja, MAX(id) as job_id')
             ->groupBy('id_pekerja');
-        $employees = DB::connection('ibco')
+        $legacyEmployees = DB::connection('ibco')
             ->table('maklumatpekerja as employee')
             ->leftJoinSub($activeJobs, 'active_job', function ($join) {
                 $join->on('active_job.id_pekerja', '=', 'employee.id');
@@ -50,8 +53,37 @@ class StatutorySettingsController extends Controller
                 'job.nosocso as legacy_socso_number',
             ])
             ->orderBy('employee.nama')
-            ->paginate(20)
-            ->withQueryString();
+            ->get();
+        $localEmployees = EmployeeRecord::query()
+            ->whereIn('status', ['pending_activation', 'active'])
+            ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                $query->where('name', 'like', "%{$search}%")
+                    ->orWhere('employee_number', 'like', "%{$search}%")
+                    ->orWhere('position_name', 'like', "%{$search}%");
+            }))
+            ->get()
+            ->map(fn (EmployeeRecord $employee) => (object) [
+                'id' => $employee->directory_id,
+                'employee_number' => $employee->employee_number,
+                'employee_name' => $employee->name,
+                'birth_date' => null,
+                'nationality' => null,
+                'position' => $employee->position_name,
+                'legacy_epf_number' => null,
+                'legacy_socso_number' => null,
+            ]);
+        $combinedEmployees = $legacyEmployees
+            ->concat($localEmployees)
+            ->sortBy(fn ($employee) => Str::lower($employee->employee_name ?? ''))
+            ->values();
+        $page = LengthAwarePaginator::resolveCurrentPage();
+        $employees = new LengthAwarePaginator(
+            $combinedEmployees->forPage($page, 20)->values(),
+            $combinedEmployees->count(),
+            20,
+            $page,
+            ['path' => $request->url(), 'query' => $request->query()],
+        );
         $profiles = EmployeeStatutoryProfile::query()
             ->whereIn(
                 'employee_id',
@@ -110,7 +142,9 @@ class StatutorySettingsController extends Controller
                 'active_employees' => DB::connection('ibco')
                     ->table('maklumatpekerja')
                     ->where('rcd_enable', 1)
-                    ->count(),
+                    ->count() + EmployeeRecord::query()
+                        ->where('status', 'active')
+                        ->count(),
                 'configured_profiles' => EmployeeStatutoryProfile::query()
                     ->where('is_active', true)
                     ->count(),
@@ -315,6 +349,11 @@ class StatutorySettingsController extends Controller
             ->table('maklumatpekerja')
             ->where('id', $employeeId)
             ->where('rcd_enable', 1)
+            ->exists();
+
+        $exists = $exists || EmployeeRecord::query()
+            ->where('directory_id', $employeeId)
+            ->whereIn('status', ['pending_activation', 'active'])
             ->exists();
 
         if (! $exists) {

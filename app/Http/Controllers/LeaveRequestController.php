@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\EmployeeRecord;
 use App\Http\Requests\ReviewEmployeeLeaveRequest;
 use App\Models\EmployeeLeaveRequest;
 use App\Models\LeaveApprovalAssignment;
@@ -123,6 +124,7 @@ class LeaveRequestController extends Controller
             'permissions' => [
                 'can_supervise' => $request->user()->hasPermission('leave.supervise'),
                 'can_manage' => $request->user()->hasPermission('leave.manage'),
+                'can_approve' => $request->user()->hasPermission('leave.approve'),
             ],
         ]);
     }
@@ -187,7 +189,7 @@ class LeaveRequestController extends Controller
                     ? 'Permohonan disokong penyelia'
                     : 'Permohonan ditolak penyelia',
                 'message' => $approved
-                    ? 'Permohonan cuti anda telah dihantar kepada HR untuk kelulusan akhir.'
+                    ? 'Permohonan cuti anda telah dihantar kepada Pengurus HR untuk kelulusan akhir.'
                     : 'Permohonan cuti anda tidak disokong oleh penyelia.',
             ]);
 
@@ -217,7 +219,7 @@ class LeaveRequestController extends Controller
         return back()->with('toast', [
             'type' => 'success',
             'message' => $leaveRequest->status === 'pending'
-                ? 'Permohonan telah disokong dan dihantar kepada HR.'
+                ? 'Permohonan telah disokong dan dihantar kepada Pengurus HR.'
                 : 'Permohonan cuti telah ditolak.',
         ]);
     }
@@ -238,6 +240,12 @@ class LeaveRequestController extends Controller
             ) {
                 throw ValidationException::withMessages([
                     'status' => 'Permohonan ini belum sampai ke peringkat HR atau telah selesai.',
+                ]);
+            }
+
+            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
+                throw ValidationException::withMessages([
+                    'status' => 'Anda tidak boleh meluluskan permohonan cuti sendiri.',
                 ]);
             }
 
@@ -298,7 +306,7 @@ class LeaveRequestController extends Controller
         Request $request,
         EmployeeLeaveRequest $leaveRequest,
     ): RedirectResponse {
-        abort_unless($request->user()->hasPermission('leave.manage'), 403);
+        abort_unless($request->user()->hasPermission('leave.approve'), 403);
         $validated = $request->validate([
             'cancellation_notes' => ['required', 'string', 'min:5', 'max:1000'],
         ]);
@@ -316,6 +324,12 @@ class LeaveRequestController extends Controller
             if ($locked->status !== 'approved') {
                 throw ValidationException::withMessages([
                     'cancellation_notes' => 'Hanya cuti yang telah diluluskan boleh dibatalkan oleh HR.',
+                ]);
+            }
+
+            if ((int) $locked->user_id === (int) $request->user()->getAuthIdentifier()) {
+                throw ValidationException::withMessages([
+                    'cancellation_notes' => 'Anda tidak boleh membatalkan kelulusan cuti sendiri.',
                 ]);
             }
 
@@ -360,6 +374,7 @@ class LeaveRequestController extends Controller
     {
         abort_unless(
             $request->user()->hasPermission('leave.manage')
+                || $request->user()->hasPermission('leave.approve')
                 || $request->user()->hasPermission('leave.supervise'),
             403,
         );
@@ -468,7 +483,10 @@ class LeaveRequestController extends Controller
     {
         $query = EmployeeLeaveRequest::query();
 
-        if ($request->user()->hasPermission('leave.manage')) {
+        if (
+            $request->user()->hasPermission('leave.manage')
+            || $request->user()->hasPermission('leave.approve')
+        ) {
             return $query;
         }
 
@@ -532,6 +550,16 @@ class LeaveRequestController extends Controller
             ->limit(250)
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
+            ->concat(
+                EmployeeRecord::query()
+                    ->whereIn('status', ['pending_activation', 'active'])
+                    ->where(function ($query) use ($search) {
+                        $query->where('name', 'like', "%{$search}%")
+                            ->orWhere('employee_number', 'like', "%{$search}%");
+                    })
+                    ->pluck('directory_id'),
+            )
+            ->unique()
             ->all();
     }
 
@@ -551,7 +579,7 @@ class LeaveRequestController extends Controller
             return [];
         }
 
-        return DB::connection('ibco')
+        $legacy = DB::connection('ibco')
             ->table('maklumatpekerja')
             ->whereIn('id', $ids)
             ->get(['id', 'employeeID as employee_id', 'nama as name'])
@@ -563,6 +591,19 @@ class LeaveRequestController extends Controller
                 ],
             ])
             ->all();
+        $local = EmployeeRecord::query()
+            ->whereIn('directory_id', $ids)
+            ->get()
+            ->mapWithKeys(fn (EmployeeRecord $employee) => [
+                (string) $employee->directory_id => [
+                    'id' => $employee->directory_id,
+                    'employee_id' => $employee->employee_number,
+                    'name' => $employee->name,
+                ],
+            ])
+            ->all();
+
+        return $legacy + $local;
     }
 
     private function csvValue(string $value): string

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\EnsureUserHasPermission;
+use App\Http\Middleware\EnsurePasswordChanged;
 use App\Http\Middleware\HandleAppearance;
 use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Foundation\Application;
@@ -22,6 +23,7 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
 
         $middleware->web(append: [
+            EnsurePasswordChanged::class,
             HandleAppearance::class,
             HandleInertiaRequests::class,
             AddLinkHeadersForPreloadedAssets::class,

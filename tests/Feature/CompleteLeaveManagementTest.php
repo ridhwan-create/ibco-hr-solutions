@@ -105,6 +105,7 @@ test('leave follows supervisor then hr approval and balance is deducted and refu
     $employeeUser = User::factory()->employee()->create();
     $supervisor = User::factory()->supervisor()->create();
     $hrAdmin = User::factory()->hrAdmin()->create();
+    $hrManager = User::factory()->hrManager()->create();
     $employeeId = createCompleteLeaveEmployee();
     linkCompleteLeaveEmployee($employeeUser, $employeeId);
     LeaveApprovalAssignment::query()->create([
@@ -135,7 +136,7 @@ test('leave follows supervisor then hr approval and balance is deducted and refu
     expect($leave->approval_stage)->toBe('supervisor');
     expect((float) $leave->requested_days)->toBe(3.0);
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($hrManager)
         ->patch(route('leave-requests.review', $leave), [
             'status' => 'approved',
             'review_notes' => 'Cuba lulus terlalu awal.',
@@ -152,7 +153,7 @@ test('leave follows supervisor then hr approval and balance is deducted and refu
 
     expect($leave->fresh()->approval_stage)->toBe('hr');
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($hrManager)
         ->patch(route('leave-requests.review', $leave), [
             'status' => 'approved',
             'review_notes' => 'Diluluskan HR.',
@@ -168,7 +169,7 @@ test('leave follows supervisor then hr approval and balance is deducted and refu
     ]);
     expect((float) LeaveBalanceTransaction::query()->sum('days'))->toBe(-3.0);
 
-    $this->actingAs($hrAdmin)
+    $this->actingAs($hrManager)
         ->patch(route('leave-requests.cancel-approved', $leave), [
             'cancellation_notes' => 'Program organisasi dibatalkan.',
         ])

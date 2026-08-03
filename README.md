@@ -17,6 +17,11 @@ digunakan untuk membuka halaman modul berkaitan.
 - Jawatan
 - Jadual kerja, syif & roster
 - Prestasi, KPI & penilaian tahunan
+- Pengambilan pekerja & onboarding
+- Latihan & kompetensi
+- Dokumen & surat HR
+- Disiplin & aduan
+- Berhenti kerja & clearance
 - Kehadiran
 - Cuti
 - Kerja lebih masa
@@ -40,7 +45,7 @@ Super Admin dan HR Admin boleh:
   secara kekal.
 
 ID pekerja dan NRIC diperiksa untuk mengelakkan rekod pendua. Borang
-memerlukan pengesahan sebelum data disimpan, manakala Viewer / Manager kekal
+memerlukan pengesahan sebelum data disimpan, manakala Viewer / Pemerhati kekal
 dengan akses paparan sahaja.
 
 Semua tindakan tambah, kemas kini dan nyahaktif direkodkan dalam jadual
@@ -54,7 +59,7 @@ menamatkan jawatan aktif. Setiap pertukaran mewujudkan rekod baharu dan menukar
 rekod terdahulu kepada `rcd_enable = 0`, supaya sejarah tidak ditimpa. Sistem
 turut memastikan hanya satu jawatan aktif bagi seseorang pekerja.
 
-Viewer / Manager boleh melihat jawatan aktif dan sejarah, tetapi tidak menerima
+Viewer / Pemerhati boleh melihat jawatan aktif dan sejarah, tetapi tidak menerima
 medan gaji, bank atau caruman daripada backend. Profil pekerja memaparkan
 jawatan semasa dan keseluruhan sejarah penempatan.
 
@@ -151,6 +156,54 @@ Semua bukti disimpan dalam storan persendirian dan hanya boleh dimuat turun
 oleh pemilik, penyelia yang ditetapkan atau HR. Data pekerja, jawatan dan
 jabatan daripada `db_spp` digunakan melalui `SELECT` sahaja; semua transaksi
 prestasi disimpan dalam database aplikasi.
+
+## Pengambilan Pekerja & Onboarding
+
+Modul pengambilan mengurus keseluruhan perjalanan calon bermula daripada
+permohonan kekosongan sehingga lapor diri:
+
+- kekosongan Draf → Menunggu Kelulusan → Diluluskan → Dibuka → Ditutup;
+- pipeline calon bagi saringan, senarai pendek, temu duga, tawaran dan
+  pengambilan;
+- resume, sijil dan dokumen calon dalam storan persendirian;
+- temu duga berbilang pusingan dengan panel serta scorecard individu;
+- tawaran Draf → Kelulusan → Dihantar → Diterima/Ditolak;
+- penjanaan checklist onboarding secara automatik daripada tawaran diterima;
+- template onboarding mengikut jabatan atau jawatan;
+- tugasan HR, Penyelia, ICT, Kewangan, Fasiliti dan Pekerja Baharu;
+- paparan **Onboarding Saya**, kemajuan, tarikh akhir dan tugasan lewat;
+- pautan calon berjaya kepada rekod pekerja aktif, akaun Employee serta lokasi
+  pejabat;
+- notifikasi dalaman, eksport CSV dan Audit Trail.
+
+Semasa memautkan calon, sistem hanya memilih rekod pekerja sedia ada daripada
+`db_spp` dan menyimpan pautan dalam database aplikasi. Modul pengambilan dan
+onboarding tidak menambah atau mengubah jadual `db_spp`.
+
+## Latihan & Kompetensi
+
+Modul ini menghubungkan pembangunan pekerja dengan KPI, PIP, onboarding dan
+jurang kompetensi melalui aliran **Permohonan → Penyelia → HR → Pendaftaran →
+Kehadiran/Keputusan → Sijil & Penilaian**.
+
+Fungsi utama merangkumi:
+
+- katalog kursus, penyedia, kaedah penyampaian, mata CPD dan tempoh sah sijil;
+- sesi latihan dengan tarikh tutup, kapasiti, fasilitator, lokasi dan kos;
+- bajet tahunan umum atau mengikut jabatan serta kawalan baki semasa kelulusan;
+- permohonan Employee, pencalonan HR dan penyelia kelulusan mengikut jabatan;
+- rekod kehadiran, jam latihan, skor, keputusan dan maklum balas keberkesanan;
+- sijil PDF/JPG/PNG dalam storan persendirian dan tarikh luput;
+- kerangka kompetensi berskala, keperluan mengikut jabatan/jawatan dan penilaian
+  tahap semasa;
+- matriks jurang kompetensi serta pelan pembangunan individu;
+- pautan pelan kepada KPI, Performance Improvement Plan (PIP), onboarding atau
+  jurang kompetensi;
+- paparan **Latihan Saya**, notifikasi tindakan, eksport CSV dan Audit Trail.
+
+Semua transaksi latihan, sijil dan kompetensi disimpan dalam database aplikasi.
+Identiti, jawatan serta jabatan pekerja daripada `db_spp` hanya dibaca melalui
+operasi `SELECT`; migration modul ini tidak mengubah database asal.
 
 ## Profil pekerja
 
@@ -287,23 +340,93 @@ Halaman **Laporan Asal** mengekalkan rekod `reportbulanan` daripada `db_spp`
 sebagai rujukan. Penjanaan laporan baharu hanya menjalankan `SELECT` pada
 `db_spp`; eksport direkodkan dalam Audit Trail pada database aplikasi.
 
+## Disiplin & Aduan
+
+Modul ini menyediakan saluran sulit berasaskan prinsip **need-to-know** dengan
+aliran **Aduan → Triage → Siasatan → Tunjuk Sebab → Keputusan → Rayuan →
+Penutupan**.
+
+Fungsi utama merangkumi:
+
+- aduan bernama atau identiti dilindungi dengan kategori, tahap risiko dan SLA;
+- sehingga lima bukti awal PDF, imej atau dokumen dalam storan persendirian;
+- snapshot pengadu, subjek, jabatan dan jawatan supaya rekod kes lama kekal;
+- triage HR, pelantikan penyiasat/panel dan sasaran tarikh penyelesaian;
+- deklarasi konflik kepentingan wajib sebelum pegawai membuka butiran siasatan;
+- pengguguran automatik pegawai yang mengisytiharkan konflik;
+- kronologi siasatan, temu bual, kenyataan dan bukti dengan kawalan keterlihatan;
+- dapatan terbukti, sebahagian terbukti, tidak terbukti atau tidak konklusif;
+- surat tunjuk sebab, representasi pekerja dan draf tindakan melalui modul
+  **Dokumen & Surat HR**;
+- pemisahan HR, penyiasat, pembuat keputusan dan panel rayuan bebas;
+- tempoh rayuan boleh dikonfigurasi, keputusan rayuan dan penutupan kes;
+- paparan **Aduan Saya**, notifikasi tindakan, badge menu, CSV dan Audit Trail.
+
+Responden tidak menerima identiti pengadu yang dilindungi. Pegawai siasatan
+tidak boleh bertindak sebelum deklarasi konflik selesai, manakala pelulus
+keputusan asal tidak boleh menyemak rayuan kes yang sama. Kandungan aduan,
+kenyataan dan bukti tidak disalin ke Audit Trail; hanya metadata tindakan yang
+direkodkan.
+
+Semua transaksi disiplin disimpan dalam database aplikasi. Identiti pekerja,
+jawatan dan jabatan daripada `db_spp` hanya dibaca melalui operasi `SELECT`.
+
+## Berhenti Kerja & Clearance
+
+Modul ini mengurus kitaran **Notis/Draf HR → Kelulusan Penyelia → Kelulusan HR
+→ Clearance → Semakan Akhir → Selesai** untuk berhenti sukarela, tamat kontrak,
+persaraan, penamatan dan jenis pengakhiran lain.
+
+Fungsi utama merangkumi:
+
+- template proses mengikut jenis pengakhiran dan tempoh notis minimum;
+- notis berhenti Employee serta pembukaan kes oleh HR;
+- snapshot pekerja, jawatan dan jabatan bagi mengekalkan rekod sejarah;
+- checklist clearance Employee, Penyelia, ICT, Pentadbiran, Finance, Payroll
+  dan HR dengan pegawai, tarikh akhir serta bukti persendirian;
+- rekod pemulangan aset, keadaan aset dan caj yang diselaraskan ke final
+  settlement;
+- serahan tugas kepada penerima yang ditetapkan dengan semakan dan pemulangan;
+- exit interview berjadual serta maklum balas Employee;
+- final settlement, pengesahan berasingan dan jumlah bersih;
+- surat penerimaan notis serta surat pelepasan melalui modul Dokumen & Surat HR;
+- sekatan penutupan sehingga semua item wajib lengkap;
+- notifikasi tindakan, badge menu, eksport CSV dan Audit Trail.
+
+HR tidak boleh meluluskan kes yang dibukanya sendiri, dan penyedia final
+settlement tidak boleh mengesahkan pengiraan sendiri. Modul tidak menyahaktifkan
+rekod pekerja secara automatik; perubahan status pada sistem asal hendaklah
+melalui proses pentadbiran pekerja yang berasingan. Semua transaksi pengakhiran
+disimpan dalam database aplikasi, manakala data pekerja daripada `db_spp` hanya
+dibaca melalui operasi `SELECT`.
+
 ## Roles & Permissions
 
 Kawalan akses disimpan dalam jadual `users` pada database sistem:
 
-- **Super Admin** — akses penuh termasuk pengurusan pengguna dan role.
-- **HR Admin** — akses semua modul HR termasuk CRUD pekerja, roster, prestasi,
-  penyediaan tuntutan, Payroll Core dan laporan.
-- **Penyelia / Ketua Jabatan** — semak permohonan cuti, OT, tuntutan,
-  pertukaran syif dan penilaian prestasi pekerja yang ditetapkan.
-- **Viewer / Manager** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
+- **Super Admin** — akses teknikal penuh kepada modul, pengguna, role,
+  konfigurasi, keselamatan dan Audit Trail, tanpa kuasa meluluskan transaksi HR.
+- **Pengurus HR** — pelulus akhir bagi proses HR termasuk pengambilan,
+  onboarding, cuti, OT, tuntutan, roster, prestasi, latihan, dokumen, tatatertib,
+  penggajian dan pelepasan pekerja.
+- **HR Admin** — akses semua modul HR termasuk disiplin, pengambilan,
+  onboarding, pengakhiran dan clearance, CRUD pekerja, roster, prestasi,
+  penyediaan tuntutan, Payroll Core dan laporan. HR menyediakan, memproses dan
+  menyemak transaksi tetapi tidak membuat kelulusan akhir.
+- **Penyelia / Ketua Jabatan** — menyertai panel temu duga dan pasukan siasatan
+  yang ditetapkan serta menyemak onboarding, cuti, OT, tuntutan, pertukaran
+  syif dan penilaian prestasi pekerja.
+- **Viewer / Pemerhati** — akses Dashboard, Pekerja, Jawatan, Kehadiran, Cuti
   dan Kerja Lebih Masa sahaja.
-- **Employee** — melihat roster dan prestasi, memohon pertukaran syif, merakam
-  masuk/keluar serta mengurus profil, cuti, OT, tuntutan dan slip gaji sendiri.
+- **Employee** — melihat onboarding, roster dan prestasi, menghantar aduan
+  sulit, menjawab tunjuk sebab, membuat rayuan, memohon pertukaran syif,
+  merakam masuk/keluar serta mengurus profil, cuti, OT, tuntutan dan slip gaji
+  sendiri.
 
 Akaun boleh memegang lebih daripada satu role. Permission daripada semua role
 akan digabungkan, contohnya akaun `Super Admin + Employee` boleh mengurus sistem
-dan merakam kehadiran sendiri.
+dan merakam kehadiran sendiri. Role Pengurus HR tidak boleh digabungkan dengan
+Super Admin, HR Admin atau Penyelia supaya pengasingan tugas kekal berkesan.
 
 Super Admin juga boleh menggunakan fungsi **Import Pekerja** untuk membaca
 pekerja aktif daripada `db_spp` dan mendaftarkan sehingga 200 akaun Employee
@@ -351,5 +474,6 @@ pekerja serta jawatan; operasi `DELETE` tidak digunakan.
 Jika fungsi CRUD pekerja dan jawatan lama tidak akan digunakan, connection
 `ibco` boleh diberikan akses `SELECT` sahaja. Modul kehadiran geolocation tidak
 memerlukan akses tulis kepada `db_spp` dalam apa-apa keadaan.
-Modul ESS, cuti, OT, roster, prestasi, tuntutan, Payroll Core, statutori dan
-slip gaji juga hanya memerlukan akses `SELECT` kepada `db_spp`.
+Modul ESS, cuti, OT, roster, prestasi, pengambilan, onboarding, latihan,
+kompetensi, dokumen, disiplin, pengakhiran, clearance, tuntutan, Payroll Core,
+statutori dan slip gaji juga hanya memerlukan akses `SELECT` kepada `db_spp`.

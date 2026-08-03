@@ -9,7 +9,7 @@ class ReviewClaimRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->hasPermission('claims.manage') ?? false;
+        return $this->user()?->hasPermission('claims.approve') ?? false;
     }
 
     /**

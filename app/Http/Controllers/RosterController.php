@@ -124,24 +124,23 @@ class RosterController extends Controller
         $statistics = $query
             ? $this->statistics((clone $query)->get())
             : $this->emptyStatistics();
-        $pendingSwaps = ShiftSwapRequest::query()
-            ->with([
-                'requesterEntry.shiftTemplate:id,name',
-                'targetEntry.shiftTemplate:id,name',
-                'requester:id,name',
-                'target:id,name',
-            ])
-            ->where('status', 'pending')
-            ->when(
-                ! $request->user()->hasPermission('roster.manage'),
-                fn (Builder $query) => $query->whereIn(
+        $pendingSwaps = $request->user()->hasPermission('roster.supervise')
+            ? ShiftSwapRequest::query()
+                ->with([
+                    'requesterEntry.shiftTemplate:id,name',
+                    'targetEntry.shiftTemplate:id,name',
+                    'requester:id,name',
+                    'target:id,name',
+                ])
+                ->where('status', 'pending')
+                ->whereIn(
                     'department_id',
                     $this->supervisedDepartmentIds($request),
-                ),
-            )
-            ->latest()
-            ->get()
-            ->map(fn (ShiftSwapRequest $swap) => $this->swapPayload($swap));
+                )
+                ->latest()
+                ->get()
+                ->map(fn (ShiftSwapRequest $swap) => $this->swapPayload($swap))
+            : collect();
 
         return Inertia::render('Rosters/Index', [
             'period' => $period ? $this->periodPayload($period) : null,
@@ -332,6 +331,12 @@ class RosterController extends Controller
         Request $request,
         RosterPeriod $period,
     ): RedirectResponse {
+        if ((int) $period->created_by === (int) $request->user()->getAuthIdentifier()) {
+            throw ValidationException::withMessages([
+                'roster' => 'Penyedia roster tidak boleh menerbitkan roster yang sama.',
+            ]);
+        }
+
         if ($period->status !== 'draft' || ! $period->entries()->exists()) {
             throw ValidationException::withMessages([
                 'roster' => 'Roster mesti mempunyai rekod Draf sebelum diterbitkan.',
@@ -422,14 +427,13 @@ class RosterController extends Controller
                 'required_if:status,rejected',
             ],
         ]);
-        $canManage = $request->user()->hasPermission('roster.manage');
         $assigned = $request->user()->hasPermission('roster.supervise')
             && in_array(
                 $shiftSwapRequest->department_id,
                 $this->supervisedDepartmentIds($request),
                 true,
             );
-        abort_unless($canManage || $assigned, 403);
+        abort_unless($assigned, 403);
 
         $swap = DB::transaction(function () use (
             $request,
@@ -702,7 +706,7 @@ class RosterController extends Controller
         bool $enforceVisibility = true,
     ): array {
         $links = EmployeeUserLink::query()
-            ->with('user:id,name,email')
+            ->with(['user:id,name,email', 'employeeRecord'])
             ->where('is_active', true)
             ->get()
             ->keyBy('employee_id');
@@ -712,9 +716,12 @@ class RosterController extends Controller
             return [];
         }
 
+        $legacyEmployeeIds = $links
+            ->reject(fn (EmployeeUserLink $link) => $link->employee_source === 'local')
+            ->keys();
         $positions = DB::connection('ibco')
             ->table('maklumatjawatan')
-            ->whereIn('id_pekerja', $employeeIds)
+            ->whereIn('id_pekerja', $legacyEmployeeIds)
             ->where('rcd_enable', 1)
             ->orderByDesc('id')
             ->get(['id_pekerja', 'id_department'])
@@ -723,6 +730,9 @@ class RosterController extends Controller
         $departmentIds = $positions
             ->pluck('id_department')
             ->filter()
+            ->concat(
+                $links->pluck('employeeRecord.department_id')->filter(),
+            )
             ->unique();
         $departments = $departmentIds->isEmpty()
             ? collect()
@@ -737,9 +747,9 @@ class RosterController extends Controller
             ? $this->supervisedDepartmentIds($request)
             : null;
 
-        return DB::connection('ibco')
+        $legacyEmployees = DB::connection('ibco')
             ->table('maklumatpekerja')
-            ->whereIn('id', $employeeIds)
+            ->whereIn('id', $legacyEmployeeIds)
             ->where('rcd_enable', 1)
             ->orderBy('nama')
             ->get(['id', 'employeeID', 'nama'])
@@ -768,7 +778,31 @@ class RosterController extends Controller
                         : 'Tanpa Jabatan',
                     'office_location_id' => $link?->office_location_id,
                 ];
-            })
+            });
+        $localEmployees = $links
+            ->filter(fn (EmployeeUserLink $link) => $link->employee_source === 'local'
+                && $link->employeeRecord !== null)
+            ->map(function (EmployeeUserLink $link) use ($departments) {
+                $employee = $link->employeeRecord;
+                $departmentId = $employee->department_id;
+
+                return [
+                    'employee_id' => $employee->directory_id,
+                    'employee_number' => $employee->employee_number,
+                    'name' => $employee->name,
+                    'user_id' => $link->user_id,
+                    'user_name' => $link->user?->name,
+                    'department_id' => $departmentId,
+                    'department_name' => $departmentId
+                        ? $departments->get((string) $departmentId)?->description
+                            ?? 'Tanpa Jabatan'
+                        : 'Tanpa Jabatan',
+                    'office_location_id' => $link->office_location_id,
+                ];
+            });
+
+        return $legacyEmployees
+            ->concat($localEmployees)
             ->when(
                 is_array($supervised),
                 fn (Collection $employees) => $employees->whereIn(

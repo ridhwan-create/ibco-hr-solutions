@@ -717,7 +717,7 @@ export default function RosterIndex({
                     </Button>
                 </form>
 
-                {pendingSwaps.length > 0 && (
+                {permissions.can_supervise && pendingSwaps.length > 0 && (
                     <Card className="border-amber-500/30">
                         <CardHeader>
                             <CardTitle>

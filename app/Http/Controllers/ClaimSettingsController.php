@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Enums\UserRole;
+use App\Models\EmployeeRecord;
 use App\Models\ClaimApprovalAssignment;
 use App\Models\ClaimLimitOverride;
 use App\Models\ClaimRequest;
@@ -32,6 +32,20 @@ class ClaimSettingsController extends Controller
             ->where('rcd_enable', 1)
             ->orderBy('nama')
             ->get(['id', 'employeeID as employee_number', 'nama as name']);
+        $employees = $employees
+            ->concat(
+                EmployeeRecord::query()
+                    ->whereIn('status', ['pending_activation', 'active'])
+                    ->orderBy('name')
+                    ->get()
+                    ->map(fn (EmployeeRecord $employee) => (object) [
+                        'id' => $employee->directory_id,
+                        'employee_number' => $employee->employee_number,
+                        'name' => $employee->name,
+                    ]),
+            )
+            ->sortBy('name')
+            ->values();
         $employeeMap = $employees->keyBy('id');
         $positions = DB::connection('ibco')
             ->table('maklumatjawatan as position')
@@ -49,8 +63,7 @@ class ClaimSettingsController extends Controller
             ->with('roleAssignments')
             ->orderBy('name')
             ->get()
-            ->filter(fn (User $user) => $user->hasRole(UserRole::Supervisor)
-                || $user->hasRole(UserRole::SuperAdmin))
+            ->filter(fn (User $user) => $user->hasPermission('claims.supervise'))
             ->values()
             ->map(fn (User $user) => [
                 'id' => $user->getKey(),
@@ -251,12 +264,9 @@ class ClaimSettingsController extends Controller
             ->with('roleAssignments')
             ->findOrFail($validated['approver_user_id']);
 
-        if (
-            ! $approver->hasRole(UserRole::Supervisor)
-            && ! $approver->hasRole(UserRole::SuperAdmin)
-        ) {
+        if (! $approver->hasPermission('claims.supervise')) {
             throw ValidationException::withMessages([
-                'approver_user_id' => 'Pengguna mesti mempunyai role Penyelia atau Super Admin.',
+                'approver_user_id' => 'Pengguna mesti mempunyai kebenaran penyeliaan tuntutan.',
             ]);
         }
 
@@ -362,6 +372,10 @@ class ClaimSettingsController extends Controller
                 ->where('id', $validated['scope_id'])
                 ->where('rcd_enable', 1)
                 ->exists()
+                || EmployeeRecord::query()
+                    ->where('directory_id', $validated['scope_id'])
+                    ->whereIn('status', ['pending_activation', 'active'])
+                    ->exists()
             : DB::connection('ibco')
                 ->table('maklumatjawatan')
                 ->where('id', $validated['scope_id'])

@@ -43,6 +43,7 @@ export type RecordPageConfig = {
     deleteRoutePath?: string;
     entityLabel?: string;
     searchPlaceholder: string;
+    dataSourceLabel?: string;
     columns: RecordColumn[];
 };
 
@@ -132,6 +133,8 @@ function RecordActions({
     const recordName = String(
         record.nama ?? record.employee_id ?? `${config.entityLabel} ini`,
     );
+    const canEdit = canManage && record._can_edit !== false;
+    const canDelete = canManage && record._can_delete !== false;
 
     const deactivate = () => {
         if (!config.deleteRoutePath) {
@@ -168,7 +171,7 @@ function RecordActions({
                 </Button>
             )}
 
-            {canManage && config.editRoutePath && (
+            {canEdit && config.editRoutePath && (
                 <Button asChild variant="outline" size="sm">
                     <Link href={`${config.editRoutePath}/${recordId}/edit`}>
                         <Pencil />
@@ -177,7 +180,7 @@ function RecordActions({
                 </Button>
             )}
 
-            {canManage && config.deleteRoutePath && (
+            {canDelete && config.deleteRoutePath && (
                 <>
                     <Button
                         type="button"
@@ -303,7 +306,7 @@ export default function RecordsIndex({
                             className="gap-1.5 font-normal"
                         >
                             <Database className="size-3.5" />
-                            Sumber data: db_spp
+                            Sumber data: {config.dataSourceLabel ?? 'db_spp'}
                         </Badge>
                     </div>
 

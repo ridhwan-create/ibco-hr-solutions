@@ -45,11 +45,17 @@ class EmployeeOvertimeController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['id', 'employeeID as employee_id', 'nama as name']);
+        $employee = $link->employee_source === 'local' && $link->employeeRecord
+            ? (object) [
+                'id' => $link->employee_id,
+                'employee_id' => $link->employeeRecord->employee_number,
+                'name' => $link->employeeRecord->name,
+            ]
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['id', 'employeeID as employee_id', 'nama as name']);
         $requests = OvertimeRequest::query()
             ->where('employee_id', $link->employee_id)
             ->with([
@@ -80,7 +86,9 @@ class EmployeeOvertimeController extends Controller
                 'status' => $record->status,
             ]);
 
-        $legacyOvertime = DB::connection('ibco')
+        $legacyOvertime = $link->employee_source === 'local'
+            ? collect()
+            : DB::connection('ibco')
             ->table('maklumatot as ot')
             ->leftJoin('xjenisot as type', 'ot.jenis_ot', '=', 'type.id')
             ->where('ot.id_pekerja', $link->employee_id)
@@ -146,11 +154,13 @@ class EmployeeOvertimeController extends Controller
             ]);
         }
 
-        $employee = DB::connection('ibco')
-            ->table('maklumatpekerja')
-            ->where('id', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->first(['id']);
+        $employee = $link->employee_source === 'local'
+            ? $link->employeeRecord
+            : DB::connection('ibco')
+                ->table('maklumatpekerja')
+                ->where('id', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->first(['id']);
 
         if (! $employee) {
             throw ValidationException::withMessages([
@@ -218,12 +228,14 @@ class EmployeeOvertimeController extends Controller
             ]);
         }
 
-        $departmentId = DB::connection('ibco')
-            ->table('maklumatjawatan')
-            ->where('id_pekerja', $link->employee_id)
-            ->where('rcd_enable', 1)
-            ->orderByDesc('id')
-            ->value('id_department');
+        $departmentId = $link->employee_source === 'local'
+            ? $link->employeeRecord?->department_id
+            : DB::connection('ibco')
+                ->table('maklumatjawatan')
+                ->where('id_pekerja', $link->employee_id)
+                ->where('rcd_enable', 1)
+                ->orderByDesc('id')
+                ->value('id_department');
         $hasSupervisor = $departmentId !== null
             && OvertimeApprovalAssignment::query()
                 ->where('department_id', $departmentId)
@@ -419,6 +431,7 @@ class EmployeeOvertimeController extends Controller
     private function activeLink(Request $request): ?EmployeeUserLink
     {
         return EmployeeUserLink::query()
+            ->with('employeeRecord')
             ->where('user_id', $request->user()->getAuthIdentifier())
             ->where('is_active', true)
             ->first();
